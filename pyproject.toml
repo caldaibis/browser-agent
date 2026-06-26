@@ -1,13 +1,15 @@
 [project]
 name = "stekkies-responder"
 version = "0.1.0"
-description = "Autonomous responder for Stekkies rental matches (Gmail -> Stekkies -> Hermes browser agent)."
+description = "Autonomous responder for Stekkies rental matches (Gmail -> Stekkies -> browser agent)."
 requires-python = ">=3.12"
 dependencies = [
     "playwright>=1.60",
     "google-api-python-client>=2.198",
     "google-auth-httplib2>=0.4",
     "google-auth-oauthlib>=1.4",
+    "openai>=1.50",
+    "mcp>=1.2",
 ]
 
 [tool.uv]

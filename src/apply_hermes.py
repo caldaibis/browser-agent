@@ -1,31 +1,28 @@
-"""Apply stage: hand the external listing to the Hermes browser agent.
+"""Apply stage: hand the external listing to our browser agent loop.
 
 Builds a precise task prompt (source URL, reference message, document list,
-auto-submit instruction) and runs Hermes non-interactively with the browser +
-file toolsets. Hermes adapts to whatever application form the source site shows.
+auto-submit instruction) and runs the lightweight agent loop in
+`src.browser_agent` (OpenRouter LLM + Playwright MCP over our shared CDP
+browser). The agent adapts to whatever application form the source site shows.
 
 Run standalone:  python -m src.apply_hermes logs/last_listing.json
 """
 import json
 import os
-import select
-import signal
-import subprocess
 import sys
-import time
 from pathlib import Path
 
-from .config import DOCS_DIR, LOG_DIR
+from .config import DOCS_DIR, LOG_DIR, CDP_URL
 from .credentials import for_url
 from .message_template import REFERENCE_APPLICATION_MESSAGE
+from .browser_agent import run_agent
 
 # Model for the apply agent. Default: google/gemini-3.5-flash — cheap, fast,
-# Hermes-compatible, and (with the tool guidance below) reliably drives complex
-# multi-step Dutch housing portals using snapshot refs. Override via HERMES_MODEL.
-# NB: z-ai/glm-5.2 was tried but stalls with empty/reasoning-only responses in
-# Hermes's tool loop (OpenRouter reasoning-surfacing issue) — avoid for now.
-HERMES_MODEL = os.environ.get("HERMES_MODEL", "google/gemini-3.5-flash")
-HERMES_TIMEOUT_SECONDS = int(os.environ.get("HERMES_TIMEOUT_SECONDS", "900"))
+# and (with the tool guidance below) reliably drives complex multi-step Dutch
+# housing portals using snapshot refs. Override via APPLY_MODEL / HERMES_MODEL.
+APPLY_MODEL = os.environ.get("APPLY_MODEL", os.environ.get("HERMES_MODEL", "google/gemini-3.5-flash"))
+APPLY_MAX_TURNS = int(os.environ.get("APPLY_MAX_TURNS", "60"))
+APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
@@ -124,96 +121,27 @@ account actions looking for a workaround.
 
 Be decisive. Do not ask me questions mid-task; make reasonable choices and
 proceed. Speed matters: complete the application as fast as safely possible.
+Never output a page snapshot as your final answer. Finish the job: upload the
+documents and SUBMIT. Only stop when you have submitted, or state the exact
+blocking reason in one short paragraph.
 """
 
 
-def _run_streaming(cmd: list[str], logfile: Path, timeout_seconds: int = HERMES_TIMEOUT_SECONDS) -> int:
-    """Run cmd attached to a pty so Hermes streams its FULL live output (rich
-    tool previews, spinners, model text) straight to this terminal, while also
-    teeing a plain copy to logfile. Returns the process exit code. Returns 124
-    when the command exceeds timeout_seconds."""
-    import pty
-
-    master_fd, slave_fd = pty.openpty()
-    proc = subprocess.Popen(
-        cmd,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        start_new_session=True,
-    )
-    os.close(slave_fd)
-    deadline = time.monotonic() + timeout_seconds
-    timed_out = False
-
-    with open(logfile, "wb") as lf:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 and proc.poll() is None:
-                timed_out = True
-                msg = f"\n[apply] Hermes timed out after {timeout_seconds}s; terminating.\n".encode()
-                os.write(sys.stdout.fileno(), msg)
-                lf.write(msg)
-                lf.flush()
-                os.killpg(proc.pid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
-                break
-
-            readable, _, _ = select.select([master_fd], [], [], max(0.1, min(1.0, remaining)))
-            if master_fd in readable:
-                try:
-                    data = os.read(master_fd, 4096)
-                except OSError:
-                    data = b""
-                if data:
-                    os.write(sys.stdout.fileno(), data)
-                    lf.write(data)
-                    lf.flush()
-
-            if proc.poll() is not None:
-                while True:
-                    try:
-                        data = os.read(master_fd, 4096)
-                    except OSError:
-                        data = b""
-                    if not data:
-                        break
-                    os.write(sys.stdout.fileno(), data)
-                    lf.write(data)
-                break
-
-    os.close(master_fd)
-    return 124 if timed_out else int(proc.returncode or 0)
-
-
-def apply(listing: dict, model: str = HERMES_MODEL) -> int:
+def apply(listing: dict, model: str = APPLY_MODEL) -> int:
+    """Run the apply agent on one listing. Returns 0 on success, 124 on
+    timeout, 1 if the turn budget was exhausted, 2 on setup error."""
     prompt = build_prompt(listing)
     (LOG_DIR / "last_hermes_prompt.txt").write_text(prompt, encoding="utf-8")
-    cmd = [
-        "hermes", "chat",
-        "-q", prompt,
-        # Playwright MCP only: efficient high-level snapshot/click/fill_form +
-        # browser_file_upload, all attached to our CDP browser. We deliberately
-        # do NOT enable Hermes's built-in `browser` toolset, whose low-level
-        # browser_cdp tempts the model into dozens of raw JS evals + full-page
-        # innerText dumps (the token bleed we saw).
-        "-t", "playwright",
-        "--yolo",          # auto-approve tool calls (no interactive prompts)
-        "-v",              # verbose: full tool calls + reasoning in the stream
-        "--max-turns", "60",  # complex multi-step portals need headroom
-    ]
-    if model:
-        cmd[2:2] = ["-m", model]  # insert right after "chat", not between -t/value
-    print(f"[apply] launching Hermes for {listing['source_url']}")
-    print("[apply] ----- live Hermes output -----")
-    rc = _run_streaming(cmd, LOG_DIR / "last_hermes_output.txt")
-    print(f"\n[apply] ----- Hermes finished (exit {rc}) -----")
-    if rc != 0:
-        print("[apply] Hermes exited non-zero:", rc)
+    print(f"[apply] launching agent ({model}) for {listing['source_url']}")
+    rc = run_agent(
+        prompt=prompt,
+        model=model,
+        max_turns=APPLY_MAX_TURNS,
+        cdp_url=CDP_URL,
+        log_path=LOG_DIR / "last_hermes_output.txt",
+        timeout_seconds=APPLY_TIMEOUT_SECONDS,
+    )
+    print(f"[apply] ----- agent finished (exit {rc}) -----")
     return rc
 
 
