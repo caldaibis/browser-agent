@@ -64,6 +64,16 @@ uv run python -m src.orchestrator
 
 The agent applies and **submits** autonomously — there is no dry-run guard.
 
+## Monitoring
+For a concise operational view over SSH:
+```bash
+tail -f logs/activity.log
+tail -f logs/mail_summary.jsonl
+```
+`activity.log` is human-readable: one short line per handled email/listing.
+`mail_summary.jsonl` is structured JSONL with message id, status, listing URLs,
+address/source when known, return code, duration, and the short outcome message.
+
 ## Deploy (24/7)
 See [`deploy/README.md`](deploy/README.md) — Hetzner VM + Xvfb + systemd + VNC.
 

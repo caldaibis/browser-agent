@@ -8,7 +8,11 @@ Run standalone:  python -m src.apply_hermes logs/last_listing.json
 """
 import json
 import os
+import select
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .config import DOCS_DIR, LOG_DIR
@@ -21,6 +25,7 @@ from .message_template import REFERENCE_APPLICATION_MESSAGE
 # NB: z-ai/glm-5.2 was tried but stalls with empty/reasoning-only responses in
 # Hermes's tool loop (OpenRouter reasoning-surfacing issue) — avoid for now.
 HERMES_MODEL = os.environ.get("HERMES_MODEL", "google/gemini-3.5-flash")
+HERMES_TIMEOUT_SECONDS = int(os.environ.get("HERMES_TIMEOUT_SECONDS", "900"))
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
@@ -122,24 +127,67 @@ proceed. Speed matters: complete the application as fast as safely possible.
 """
 
 
-def _run_streaming(cmd: list[str], logfile: Path) -> int:
+def _run_streaming(cmd: list[str], logfile: Path, timeout_seconds: int = HERMES_TIMEOUT_SECONDS) -> int:
     """Run cmd attached to a pty so Hermes streams its FULL live output (rich
     tool previews, spinners, model text) straight to this terminal, while also
-    teeing a plain copy to logfile. Returns the process exit code."""
+    teeing a plain copy to logfile. Returns the process exit code. Returns 124
+    when the command exceeds timeout_seconds."""
     import pty
 
-    with open(logfile, "wb") as lf:
-        def _read(fd: int) -> bytes:
-            data = os.read(fd, 4096)
-            try:
-                lf.write(data)
-                lf.flush()
-            except Exception:
-                pass
-            return data  # pty.spawn writes this to our stdout -> live in terminal
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
 
-        status = pty.spawn(cmd, _read)
-    return os.waitstatus_to_exitcode(status)
+    with open(logfile, "wb") as lf:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and proc.poll() is None:
+                timed_out = True
+                msg = f"\n[apply] Hermes timed out after {timeout_seconds}s; terminating.\n".encode()
+                os.write(sys.stdout.fileno(), msg)
+                lf.write(msg)
+                lf.flush()
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                break
+
+            readable, _, _ = select.select([master_fd], [], [], max(0.1, min(1.0, remaining)))
+            if master_fd in readable:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    data = b""
+                if data:
+                    os.write(sys.stdout.fileno(), data)
+                    lf.write(data)
+                    lf.flush()
+
+            if proc.poll() is not None:
+                while True:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        break
+                    os.write(sys.stdout.fileno(), data)
+                    lf.write(data)
+                break
+
+    os.close(master_fd)
+    return 124 if timed_out else int(proc.returncode or 0)
 
 
 def apply(listing: dict, model: str = HERMES_MODEL) -> int:

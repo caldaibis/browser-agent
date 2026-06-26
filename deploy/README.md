@@ -61,6 +61,8 @@ journalctl -u orchestrator -f          # live logs
 ```bash
 systemctl status browser-host orchestrator xvfb
 journalctl -u browser-host -f
+tail -f ~/browser-agent/logs/activity.log       # one concise line per email/listing
+tail -f ~/browser-agent/logs/mail_summary.jsonl # structured per-mail outcomes
 sudo systemctl restart browser-host    # reattach a clean browser
 git -C ~/browser-agent pull && sudo systemctl restart orchestrator   # deploy update
 ```

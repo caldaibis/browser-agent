@@ -95,8 +95,15 @@ def extract_listing_url(svc, msg_id: str) -> str | None:
     return m.group(0) if m else None
 
 
-def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str]]:
-    """Yield (message_id, listing_url) for each new Stekkies mail. Marks read."""
+def mark_read(msg_id: str) -> None:
+    svc = get_service()
+    svc.users().messages().modify(
+        userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
+    ).execute()
+
+
+def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str | None]]:
+    """Yield (message_id, listing_url) for each unread Stekkies mail."""
     svc = get_service()
     print(f"[gmail] watching (query='{GMAIL_QUERY}', every {poll_seconds}s)...")
     while True:
@@ -104,14 +111,11 @@ def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str]]:
             resp = svc.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=10).execute()
             for m in resp.get("messages", []):
                 url = extract_listing_url(svc, m["id"])
-                # Mark read so we don't reprocess.
-                svc.users().messages().modify(
-                    userId="me", id=m["id"], body={"removeLabelIds": ["UNREAD"]}
-                ).execute()
                 if url:
                     yield m["id"], url
                 else:
                     print(f"[gmail] mail {m['id']} had no listing link; skipped.")
+                    yield m["id"], None
         except Exception as e:  # keep the watcher alive
             print("[gmail] error:", e)
         time.sleep(poll_seconds)
