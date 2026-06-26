@@ -14,10 +14,9 @@ from pathlib import Path
 from .config import DOCS_DIR, LOG_DIR, DRY_RUN
 from .credentials import for_url
 
-# Model for the apply agent. Default: use Hermes's own configured model
-# (set via `hermes model`). Override here or with HERMES_MODEL env var, e.g.
-# "anthropic/claude-sonnet-4" or "openai/gpt-5" (must be valid for your provider).
-HERMES_MODEL = os.environ.get("HERMES_MODEL", "")
+# Model for the apply agent. Default: z-ai/glm-5.2 (SOTA, routed via OpenRouter)
+# for reliable interactive form-driving. Override with the HERMES_MODEL env var.
+HERMES_MODEL = os.environ.get("HERMES_MODEL", "z-ai/glm-5.2")
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
@@ -87,14 +86,23 @@ APPLICANT MOTIVATION LETTER (contains name, age, job, income, phone):
 {listing.get('letter','')}
 \"\"\"
 
-TOOL USE — BE EFFICIENT (this saves tokens and time):
-- Use browser_snapshot to see the page as a compact accessibility tree, then
-  act on element refs with browser_click / browser_type / browser_select_option.
+TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
+- Use browser_snapshot to see the page as a compact accessibility tree. Each
+  element has a ref like `e37`.
+- To click/type, pass that EXACT ref (e.g. target "e37") plus a short `element`
+  description. NEVER invent CSS selectors (no "#e37 > button", no
+  "button[ref=...]", no ":has-text(...)"). Refs come only from the latest
+  snapshot.
+- If a click/type fails ("does not match any elements"), take a FRESH
+  browser_snapshot and use the new ref — do not guess selectors.
 - Fill several fields at once with browser_fill_form.
 - Upload documents with browser_file_upload (pass the absolute paths above).
-- Do NOT dump full page text or write raw JS repeatedly. Take ONE snapshot,
-  act, and only re-snapshot after the page meaningfully changes. Avoid
-  arbitrary waits; use browser_wait_for when you must wait.
+- Accept any cookie banner first (click its "Accept"/"Alles accepteren" ref).
+- Do NOT dump full page text or write raw JS (browser_run_code_unsafe) unless
+  every higher-level tool has genuinely failed.
+- Tools do NOT go "offline" and there is no "cooldown" — if something fails,
+  re-snapshot and retry; never claim the server crashed or ask me to type
+  "retry". You run autonomously to completion.
 
 Be decisive. Do not ask me questions mid-task; make reasonable choices and
 proceed. Speed matters: complete the application as fast as safely possible.
@@ -138,7 +146,7 @@ def apply(listing: dict, model: str = HERMES_MODEL) -> int:
         "--max-turns", "40",
     ]
     if model:
-        cmd[5:5] = ["-m", model]
+        cmd[2:2] = ["-m", model]  # insert right after "chat", not between -t/value
     print(f"[apply] launching Hermes (DRY_RUN={DRY_RUN}) for {listing['source_url']}")
     print("[apply] ----- live Hermes output -----")
     rc = _run_streaming(cmd, LOG_DIR / "last_hermes_output.txt")
