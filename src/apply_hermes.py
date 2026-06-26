@@ -14,9 +14,12 @@ from pathlib import Path
 from .config import DOCS_DIR, LOG_DIR, DRY_RUN
 from .credentials import for_url
 
-# Model for the apply agent. Default: z-ai/glm-5.2 (SOTA, routed via OpenRouter)
-# for reliable interactive form-driving. Override with the HERMES_MODEL env var.
-HERMES_MODEL = os.environ.get("HERMES_MODEL", "z-ai/glm-5.2")
+# Model for the apply agent. Default: google/gemini-3.5-flash — cheap, fast,
+# Hermes-compatible, and (with the tool guidance below) reliably drives complex
+# multi-step Dutch housing portals using snapshot refs. Override via HERMES_MODEL.
+# NB: z-ai/glm-5.2 was tried but stalls with empty/reasoning-only responses in
+# Hermes's tool loop (OpenRouter reasoning-surfacing issue) — avoid for now.
+HERMES_MODEL = os.environ.get("HERMES_MODEL", "google/gemini-3.5-flash")
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
@@ -143,7 +146,7 @@ def apply(listing: dict, model: str = HERMES_MODEL) -> int:
         "-t", "playwright",
         "--yolo",          # auto-approve tool calls (no interactive prompts)
         "-v",              # verbose: full tool calls + reasoning in the stream
-        "--max-turns", "40",
+        "--max-turns", "60",  # complex multi-step portals need headroom
     ]
     if model:
         cmd[2:2] = ["-m", model]  # insert right after "chat", not between -t/value
