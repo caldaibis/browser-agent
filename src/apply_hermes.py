@@ -101,11 +101,21 @@ TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
 - Fill several fields at once with browser_fill_form.
 - Upload documents with browser_file_upload (pass the absolute paths above).
 - Accept any cookie banner first (click its "Accept"/"Alles accepteren" ref).
-- Do NOT dump full page text or write raw JS (browser_run_code_unsafe) unless
-  every higher-level tool has genuinely failed.
+- NEVER use browser_evaluate or browser_run_code_unsafe. Use the high-level
+  tools only. Do not dump full page text.
+- Snapshot discipline: do NOT re-snapshot after every click. Re-snapshot only
+  when the page has clearly changed (new page, modal opened/closed) and you need
+  fresh refs. Redundant snapshots waste the whole budget.
 - Tools do NOT go "offline" and there is no "cooldown" — if something fails,
   re-snapshot and retry; never claim the server crashed or ask me to type
   "retry". You run autonomously to completion.
+
+STOP EARLY WHEN THE LISTING CANNOT BE RESPONDED TO. If the property shows any of:
+paywall ("Plus"/"upgrade required"), not eligible ("je komt niet in aanmerking"),
+suitability still being recalculated, a message/response already sent, or the
+"reageer"/apply control is simply absent — then STOP IMMEDIATELY and report that
+status. Do NOT wander the rest of the site, open your profile, or take unrelated
+account actions looking for a workaround.
 
 Be decisive. Do not ask me questions mid-task; make reasonable choices and
 proceed. Speed matters: complete the application as fast as safely possible.

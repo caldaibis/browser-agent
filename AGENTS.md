@@ -14,6 +14,12 @@ source site (logs in, fills form, uploads docs, submits).
   `--cdp-endpoint http://127.0.0.1:9222`) for efficient snapshot/click/fill_form
   + `browser_file_upload`. Do NOT re-enable Hermes's built-in `browser` toolset:
   its low-level `browser_cdp` caused 50+ raw-JS calls + full-page dumps.
+  The playwright MCP's `browser_evaluate` + `browser_run_code_unsafe` are
+  disabled (`hermes tools disable playwright:browser_evaluate
+  playwright:browser_run_code_unsafe`) to force efficient high-level tool use;
+  this lives in ~/.hermes/config.yaml (copied to the VPS).
+- Apply model: google/gemini-3.5-flash (HERMES_MODEL). GLM-5.2 stalls with
+  empty/reasoning-only responses in Hermes; avoid.
 - `documents/` — application PDFs/JPG, version-controlled so the VPS gets them
   via git. `DOCS_DIR` (config) points here; override with the env var.
 - `src/credentials.py` / `import_passwords.py` — per-site logins by domain.
