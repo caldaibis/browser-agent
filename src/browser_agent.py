@@ -88,6 +88,8 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 
             messages: list[dict] = [{"role": "user", "content": prompt}]
             nudges_left = 2  # if the model stops early without finishing, prod it
+            last_sig = None  # detect degenerate repeated-action loops
+            repeats = 0
             for turn in range(1, max_turns + 1):
                 resp = await client.chat.completions.create(
                     model=model, messages=messages, tools=tools, tool_choice="auto",
@@ -137,6 +139,14 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     log.line(f"[agent] DONE after {turn} turns")
                     return 0
 
+                # Detect degenerate repeated-action loops (e.g. ArrowDown x30).
+                sig = tuple((tc.function.name, tc.function.arguments) for tc in tool_calls)
+                repeats = repeats + 1 if sig == last_sig else 0
+                last_sig = sig
+                if repeats >= 4:
+                    log.line(f"[agent] ABORT: same action repeated {repeats + 1}x with no progress")
+                    return 1
+
                 for tc in tool_calls:
                     name = tc.function.name
                     try:
@@ -153,6 +163,20 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         log.line(f"[agent]   -> error: {e}")
                     messages.append({
                         "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                    })
+
+                # After answering the tool calls, prod the model if it's looping.
+                if repeats == 2:
+                    log.line("[agent] repeat-guard nudge")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have repeated the same action several times with no "
+                            "progress. STOP repeating it. Take ONE fresh browser_snapshot, "
+                            "then either do something clearly different, or if you cannot "
+                            "proceed, stop and report the exact status in one short "
+                            "paragraph (no page snapshots)."
+                        ),
                     })
 
             log.line(f"[agent] STOP: hit max_turns={max_turns}")
