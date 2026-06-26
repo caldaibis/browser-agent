@@ -9,8 +9,13 @@ source site (logs in, fills form, uploads docs, submits).
   port 9222. The Stekkies extractor and Hermes both attach over CDP, so all
   logins (Google SSO + rental sites) live in one profile signed into once.
 - `src/stekkies.py` — attach over CDP, extract letter/source URL (deterministic).
-- `src/apply_hermes.py` — build prompt, run `hermes chat` (browser+file) via pty
-  so output streams live; `BROWSER_CDP_URL` points Hermes at the shared browser.
+- `src/apply_hermes.py` — build prompt, run `hermes chat -t playwright` via pty
+  (live output). Uses the **Playwright MCP** (registered with `hermes mcp add`,
+  `--cdp-endpoint http://127.0.0.1:9222`) for efficient snapshot/click/fill_form
+  + `browser_file_upload`. Do NOT re-enable Hermes's built-in `browser` toolset:
+  its low-level `browser_cdp` caused 50+ raw-JS calls + full-page dumps.
+- `documents/` — application PDFs/JPG, version-controlled so the VPS gets them
+  via git. `DOCS_DIR` (config) points here; override with the env var.
 - `src/credentials.py` / `import_passwords.py` — per-site logins by domain.
 - `src/gmail_watch.py` — poll inbox, extract Stekkies link.
 - `src/orchestrator.py` — ties it together (`--once URL` or live watch).

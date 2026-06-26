@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from .config import DOCS_DIR, LOG_DIR, DRY_RUN, CDP_URL
+from .config import DOCS_DIR, LOG_DIR, DRY_RUN
 from .credentials import for_url
 
 # Model for the apply agent. Default: use Hermes's own configured model
@@ -87,6 +87,15 @@ APPLICANT MOTIVATION LETTER (contains name, age, job, income, phone):
 {listing.get('letter','')}
 \"\"\"
 
+TOOL USE — BE EFFICIENT (this saves tokens and time):
+- Use browser_snapshot to see the page as a compact accessibility tree, then
+  act on element refs with browser_click / browser_type / browser_select_option.
+- Fill several fields at once with browser_fill_form.
+- Upload documents with browser_file_upload (pass the absolute paths above).
+- Do NOT dump full page text or write raw JS repeatedly. Take ONE snapshot,
+  act, and only re-snapshot after the page meaningfully changes. Avoid
+  arbitrary waits; use browser_wait_for when you must wait.
+
 Be decisive. Do not ask me questions mid-task; make reasonable choices and
 proceed. Speed matters: complete the application as fast as safely possible.
 """
@@ -118,17 +127,19 @@ def apply(listing: dict, model: str = HERMES_MODEL) -> int:
     cmd = [
         "hermes", "chat",
         "-q", prompt,
-        "-t", "browser,file,web",
+        # Playwright MCP only: efficient high-level snapshot/click/fill_form +
+        # browser_file_upload, all attached to our CDP browser. We deliberately
+        # do NOT enable Hermes's built-in `browser` toolset, whose low-level
+        # browser_cdp tempts the model into dozens of raw JS evals + full-page
+        # innerText dumps (the token bleed we saw).
+        "-t", "playwright",
         "--yolo",          # auto-approve tool calls (no interactive prompts)
         "-v",              # verbose: full tool calls + reasoning in the stream
-        "--max-turns", "60",
+        "--max-turns", "40",
     ]
     if model:
         cmd[5:5] = ["-m", model]
-    # Make Hermes drive our shared, logged-in browser host over CDP. pty.spawn
-    # inherits the current environment, so set it here.
-    os.environ["BROWSER_CDP_URL"] = CDP_URL
-    print(f"[apply] launching Hermes (DRY_RUN={DRY_RUN}, CDP={CDP_URL}) for {listing['source_url']}")
+    print(f"[apply] launching Hermes (DRY_RUN={DRY_RUN}) for {listing['source_url']}")
     print("[apply] ----- live Hermes output -----")
     rc = _run_streaming(cmd, LOG_DIR / "last_hermes_output.txt")
     print(f"\n[apply] ----- Hermes finished (exit {rc}) -----")

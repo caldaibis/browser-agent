@@ -17,7 +17,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
   git curl ca-certificates xvfb x11vnc fonts-liberation fonts-noto-color-emoji \
+  nodejs npm \
   >/dev/null
+# Node/npx is required for the Playwright MCP (browser automation + file upload)
+# that Hermes drives. The MCP server config travels in the copied ~/.hermes.
 
 echo "==> [2/7] app user '${APP_USER}'"
 if ! id "${APP_USER}" >/dev/null 2>&1; then

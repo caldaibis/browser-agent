@@ -6,8 +6,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Persistent Chromium profile (keeps you logged into Stekkies across runs).
 USER_DATA_DIR = PROJECT_ROOT / "state" / "chromium-profile"
 
-# Folder containing your application documents (WSL view of C:\Users\colli\Documents\huurdossier_2026).
-DOCS_DIR = Path("/mnt/c/Users/colli/Documents/huurdossier_2026")
+# Application documents, version-controlled in the repo so the VPS gets them
+# via git clone. Override with DOCS_DIR env var if needed.
+import os as _os
+DOCS_DIR = Path(_os.environ.get("DOCS_DIR", PROJECT_ROOT / "documents"))
 
 LOG_DIR = PROJECT_ROOT / "logs"
 SCREENSHOT_DIR = LOG_DIR / "screenshots"
