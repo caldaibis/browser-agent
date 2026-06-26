@@ -1,14 +1,15 @@
 # AGENTS.md
 
 Stekkies rental auto-responder. Pipeline: Gmail (new Stekkies mail) → extract
-response letter + external source URL → Hermes browser agent applies on the
-source site (logs in, fills form, uploads docs, submits).
+listing metadata + external source URL → Hermes browser agent applies on the
+source site using the reference message in `src/message_template.py` (logs in,
+fills form, uploads docs, submits).
 
 ## Architecture
 - **One shared browser** (`src/browser_host.py`): persistent Chromium on CDP
   port 9222. The Stekkies extractor and Hermes both attach over CDP, so all
   logins (Google SSO + rental sites) live in one profile signed into once.
-- `src/stekkies.py` — attach over CDP, extract letter/source URL (deterministic).
+- `src/stekkies.py` — attach over CDP, extract listing/source URL (deterministic).
 - `src/apply_hermes.py` — build prompt, run `hermes chat -t playwright` via pty
   (live output). Uses the **Playwright MCP** (registered with `hermes mcp add`,
   `--cdp-endpoint http://127.0.0.1:9222`) for efficient snapshot/click/fill_form
@@ -20,6 +21,8 @@ source site (logs in, fills form, uploads docs, submits).
   this lives in ~/.hermes/config.yaml (copied to the VPS).
 - Apply model: google/gemini-3.5-flash (HERMES_MODEL). GLM-5.2 stalls with
   empty/reasoning-only responses in Hermes; avoid.
+- `src/message_template.py` — hardcoded reference application message. Hermes
+  should customize this per listing instead of pasting it verbatim.
 - `documents/` — application PDFs/JPG, version-controlled so the VPS gets them
   via git. `DOCS_DIR` (config) points here; override with the env var.
 - `src/credentials.py` / `import_passwords.py` — per-site logins by domain.

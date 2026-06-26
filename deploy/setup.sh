@@ -43,7 +43,8 @@ fi
 echo "==> [5/7] chromium OS deps (root) + browser (as ${APP_USER})"
 # install-deps needs root (apt); the browser download lives in the user's cache.
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
-uvx --from playwright playwright install-deps chromium
+# Run install-deps as root via the venv's playwright (uvx isn't on root's PATH).
+"${APP_DIR}/.venv/bin/python" -m playwright install-deps chromium
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
 
 echo "==> [6/7] systemd units"

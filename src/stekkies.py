@@ -4,7 +4,7 @@ Returns a dict with:
   - listing_url    : the Stekkies listing page we landed on
   - source_url     : external "Go to listing" URL (where the real application is)
   - source_name    : e.g. "Ik Wil Huren"
-  - letter         : the pre-written response/motivation letter (plain text)
+  - letter         : Stekkies' pre-written letter, kept for metadata extraction
   - title / price / address : listing metadata (best-effort)
 
 Run standalone:  python -m src.stekkies "<stekkies_listing_or_redirect_url>"

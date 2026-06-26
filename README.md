@@ -3,10 +3,10 @@
 Fully-autonomous responder for Stekkies rental matches.
 
 **Pipeline:** Gmail (new Stekkies mail) → open Stekkies listing with your saved
-login, extract the response letter + external "Go to listing" URL → hand off to
+login, extract listing metadata + external "Go to listing" URL → hand off to
 the **Hermes** browser agent, which opens the source site (Ik Wil Huren,
-Pararius, Funda, …), fills the application form, uploads your documents, and
-submits.
+Pararius, Funda, …), writes a customized message from the reference template,
+fills the application form, uploads your documents, and submits.
 
 Stekkies is only a *notifier/aggregator* — the real application happens on the
 external source site, which varies per listing. That variable last mile is why
@@ -23,9 +23,10 @@ rental sites. Hermes is pointed at it via the `BROWSER_CDP_URL` env var.
 - `src/config.py`       — paths, URLs, `CDP_URL`.
 - `src/browser_host.py` — always-on shared Chromium (CDP port); `--login` opens sites to sign into.
 - `src/login_setup.py`  — (legacy) standalone Stekkies login; the browser host replaces it.
-- `src/stekkies.py`     — attach over CDP, open a listing, extract letter + source URL.
+- `src/stekkies.py`     — attach over CDP, open a listing, extract metadata + source URL.
 - `src/credentials.py`  — per-site logins matched by domain (from import_passwords).
 - `src/import_passwords.py` — load a Google Password Manager CSV into the creds JSON.
+- `src/message_template.py` — reference application message for Hermes to customize.
 - `src/apply_hermes.py` — build the task prompt (SSO-first, creds, docs) and run Hermes.
 - `src/gmail_watch.py`  — detect new Stekkies mails, extract the listing link.
 - `src/orchestrator.py` — ties it all together.

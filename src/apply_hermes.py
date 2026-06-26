@@ -1,6 +1,6 @@
 """Apply stage: hand the external listing to the Hermes browser agent.
 
-Builds a precise task prompt (source URL, response letter, document list,
+Builds a precise task prompt (source URL, reference message, document list,
 auto-submit instruction) and runs Hermes non-interactively with the browser +
 file toolsets. Hermes adapts to whatever application form the source site shows.
 
@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import DOCS_DIR, LOG_DIR
 from .credentials import for_url
+from .message_template import REFERENCE_APPLICATION_MESSAGE
 
 # Model for the apply agent. Default: google/gemini-3.5-flash — cheap, fast,
 # Hermes-compatible, and (with the tool guidance below) reliably drives complex
@@ -70,8 +71,12 @@ YOUR TASK
 1. Open the URL above in the browser.
 2. Find the apply / "reageer" / contact / application form for this property.
 3. Fill the application form using the applicant details contained in the
-   motivation letter below. Paste the Dutch motivation letter into any
-   message/motivation field.
+   reference message below. For any message/motivation field, write a warm,
+   natural application message inspired by the reference. Keep the same facts,
+   keep both Dutch and English sections, replace [[ADDRESS]] with the current
+   property address when known, and make small listing-specific adjustments so
+   it does not read like a rigid template. Do not paste the reference verbatim.
+   Do not invent new personal details.
 4. Upload ALL of these documents wherever the form accepts attachments
    (id, payslips, employer statement, etc.). Match document type to field
    where the field asks for a specific document; otherwise attach all:
@@ -79,9 +84,9 @@ YOUR TASK
 5. {submit_clause}
 6. Report: did it submit, any errors, and what fields you could not fill.
 
-APPLICANT MOTIVATION LETTER (contains name, age, job, income, phone):
+REFERENCE APPLICATION MESSAGE (contains name, age, job, income, phone):
 \"\"\"
-{listing.get('letter','')}
+{REFERENCE_APPLICATION_MESSAGE}
 \"\"\"
 
 TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
