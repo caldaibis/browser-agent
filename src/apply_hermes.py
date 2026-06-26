@@ -17,10 +17,11 @@ from .credentials import for_url
 from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .browser_agent import run_agent
 
-# Model for the apply agent. Default: google/gemini-3.5-flash — cheap, fast,
-# and (with the tool guidance below) reliably drives complex multi-step Dutch
-# housing portals using snapshot refs. Override via APPLY_MODEL / HERMES_MODEL.
-APPLY_MODEL = os.environ.get("APPLY_MODEL", os.environ.get("HERMES_MODEL", "google/gemini-3.5-flash"))
+# Model for the apply agent. Default: z-ai/glm-5.2 — strong tool-use/agentic
+# model. (Its earlier empty-response failure was a Hermes-loop quirk; our own
+# OpenRouter loop reads content/tool_calls directly.) gemini-3.5-flash proved
+# too flaky (degenerate loops). Override via APPLY_MODEL / HERMES_MODEL.
+APPLY_MODEL = os.environ.get("APPLY_MODEL", os.environ.get("HERMES_MODEL", "z-ai/glm-5.2"))
 APPLY_MAX_TURNS = int(os.environ.get("APPLY_MAX_TURNS", "60"))
 APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
 
