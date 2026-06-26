@@ -68,11 +68,6 @@ Flip `DRY_RUN = False` in `src/config.py` only after you've watched a dry run
 fill a form correctly.
 
 ## Open items / required input
-- **Source-site accounts.** Sites like ikwilhuren.nu require a logged-in account
-  to apply. Hermes needs credentials or a logged-in browser profile per site.
-- **Apply model.** Set a strong model for reliable unattended form-fills:
-  `export HERMES_MODEL="openai/gpt-5"` (or another vision-capable model valid
-  for your provider). Default uses Hermes's configured model.
 - **Latency.** Polling is every 5s (`src/gmail_watch.py`). For lower latency,
   use Gmail push (Pub/Sub `users().watch()` + a webhook endpoint / tunnel).
 - **Gmail query.** Tune `GMAIL_QUERY` in `src/gmail_watch.py` to your real

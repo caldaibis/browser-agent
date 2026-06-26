@@ -15,6 +15,7 @@ Run standalone (prints new listing URLs as they arrive):
   python -m src.gmail_watch
 """
 import base64
+import quopri
 import re
 import time
 from pathlib import Path
@@ -32,11 +33,15 @@ CLIENT_SECRET = PROJECT_ROOT / "state" / "gmail_client_secret.json"
 TOKEN = PROJECT_ROOT / "state" / "gmail_token.json"
 
 # Match Stekkies "new match/listing" mails. Tune the query to your real subjects.
-GMAIL_QUERY = 'is:unread from:stekkies.com'
+# Listing mails come from help@stekkies.com with a stable subject.
+GMAIL_QUERY = 'is:unread from:help@stekkies.com subject:"new Stekkies for you"'
 POLL_SECONDS = 5
 
-# Find a Stekkies listing/redirect link in the email body.
-LINK_RE = re.compile(r"https://www\.stekkies\.com/[^\s\"'>]*?(?:redirect/\d+|/h/\d+|/matches/\d+)[^\s\"'>]*")
+# Direct listing link in the plain-text body, e.g.
+#   http://www.stekkies.com/en/api/v1/redirect/e70587cc...?utm_...
+# ID is a hex hash (not digits); scheme may be http or https. We restrict to
+# www.stekkies.com to skip the email.stekkies.com click-tracking wrappers.
+LINK_RE = re.compile(r"https?://www\.stekkies\.com/[^\s\"'>]*?redirect/[A-Za-z0-9]+[^\s\"'>]*")
 
 
 def get_service():
@@ -58,6 +63,13 @@ def get_service():
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
+def _cte(part) -> str:
+    for h in part.get("headers", []) or []:
+        if h.get("name", "").lower() == "content-transfer-encoding":
+            return h.get("value", "").lower()
+    return ""
+
+
 def _body_text(payload) -> str:
     out = []
     stack = [payload]
@@ -65,7 +77,13 @@ def _body_text(payload) -> str:
         part = stack.pop()
         data = part.get("body", {}).get("data")
         if data:
-            out.append(base64.urlsafe_b64decode(data).decode("utf-8", "replace"))
+            raw = base64.urlsafe_b64decode(data)
+            # Gmail returns the part still in its transfer encoding; undo
+            # quoted-printable so soft line-breaks (=\n) and =3D etc. don't
+            # mangle URLs.
+            if _cte(part) == "quoted-printable":
+                raw = quopri.decodestring(raw)
+            out.append(raw.decode("utf-8", "replace"))
         stack.extend(part.get("parts", []) or [])
     return "\n".join(out)
 
