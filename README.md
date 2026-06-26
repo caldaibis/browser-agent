@@ -20,7 +20,7 @@ once: Google (enables "Sign in with Google" SSO on Funda etc.), Stekkies, and al
 rental sites. Hermes is pointed at it via the `BROWSER_CDP_URL` env var.
 
 ## Layout
-- `src/config.py`       — paths, URLs, `CDP_URL`, `DRY_RUN` switch.
+- `src/config.py`       — paths, URLs, `CDP_URL`.
 - `src/browser_host.py` — always-on shared Chromium (CDP port); `--login` opens sites to sign into.
 - `src/login_setup.py`  — (legacy) standalone Stekkies login; the browser host replaces it.
 - `src/stekkies.py`     — attach over CDP, open a listing, extract letter + source URL.
@@ -54,18 +54,17 @@ uv run python -m src.import_passwords passwords.csv   # then delete the CSV
 
 ## Run
 ```bash
-# Process a single Stekkies listing (no submit while DRY_RUN=True):
+# Process a single Stekkies listing (applies + submits autonomously):
 uv run python -m src.orchestrator --once "https://www.stekkies.com/en/api/v1/h/redirect/5338905"
 
 # Live: watch inbox and auto-respond:
 uv run python -m src.orchestrator
 ```
 
+The agent applies and **submits** autonomously — there is no dry-run guard.
+
 ## Deploy (24/7)
 See [`deploy/README.md`](deploy/README.md) — Hetzner VM + Xvfb + systemd + VNC.
-
-Flip `DRY_RUN = False` in `src/config.py` only after you've watched a dry run
-fill a form correctly.
 
 ## Open items / required input
 - **Latency.** Polling is every 5s (`src/gmail_watch.py`). For lower latency,

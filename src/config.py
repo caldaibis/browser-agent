@@ -24,8 +24,5 @@ STEKKIES_HOME_URL = "https://www.stekkies.com/en/"
 CDP_PORT = 9222
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
-# Set False once you've verified the flow; True = fill but DO NOT submit.
-DRY_RUN = True
-
 for _d in (USER_DATA_DIR, LOG_DIR, SCREENSHOT_DIR):
     _d.mkdir(parents=True, exist_ok=True)

@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from .config import DOCS_DIR, LOG_DIR, DRY_RUN
+from .config import DOCS_DIR, LOG_DIR
 from .credentials import for_url
 
 # Model for the apply agent. Default: google/gemini-3.5-flash — cheap, fast,
@@ -55,12 +55,7 @@ def build_prompt(listing: dict) -> str:
             "If neither Google sign-in nor stored credentials are available and "
             "the site requires an account, stop and report that login is needed."
         )
-    submit_clause = (
-        "Do NOT click the final submit button. Fill everything, attach all "
-        "documents, then STOP and report what you see so a human can submit."
-        if DRY_RUN else
-        "Then SUBMIT the application. Confirm submission succeeded."
-    )
+    submit_clause = "Then SUBMIT the application. Confirm submission succeeded."
     return f"""You are applying to a Dutch rental listing on my behalf. Act autonomously.
 
 LISTING (external source: {listing.get('source_name','?')})
@@ -160,7 +155,7 @@ def apply(listing: dict, model: str = HERMES_MODEL) -> int:
     ]
     if model:
         cmd[2:2] = ["-m", model]  # insert right after "chat", not between -t/value
-    print(f"[apply] launching Hermes (DRY_RUN={DRY_RUN}) for {listing['source_url']}")
+    print(f"[apply] launching Hermes for {listing['source_url']}")
     print("[apply] ----- live Hermes output -----")
     rc = _run_streaming(cmd, LOG_DIR / "last_hermes_output.txt")
     print(f"\n[apply] ----- Hermes finished (exit {rc}) -----")

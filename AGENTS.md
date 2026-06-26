@@ -33,7 +33,7 @@ source site (logs in, fills form, uploads docs, submits).
 - WSL2 + WSLg (DISPLAY=:0) for headed Chromium; no system Chrome (use bundled
   Chromium). Docs live on a Windows path under `/mnt/c/...`.
 - `state/` (profile, creds, tokens) and `logs/` are gitignored — never commit.
-- **`DRY_RUN`** in `src/config.py` gates real submits; keep `True` until verified.
+- The agent applies and **submits** autonomously — there is no dry-run guard.
 - Secrets: `state/sources_credentials.json` (plaintext, local-only). Never print
   passwords in logs or commits.
 
