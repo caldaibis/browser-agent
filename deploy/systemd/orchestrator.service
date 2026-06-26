@@ -1,0 +1,19 @@
+[Unit]
+Description=Stekkies orchestrator (Gmail trigger -> extract -> Hermes apply)
+After=browser-host.service
+Requires=browser-host.service
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+Environment=DISPLAY=__DISPLAY__
+Environment=PATH=__APP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Uncomment to pin a model / direct provider instead of Hermes default:
+# Environment=HERMES_MODEL=google/gemini-3.5-flash
+ExecStart=__APP_HOME__/.local/bin/uv run python -m src.orchestrator
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

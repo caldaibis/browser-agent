@@ -1,0 +1,18 @@
+[Unit]
+Description=Stekkies shared browser host (persistent Chromium, CDP :9222)
+After=xvfb.service network-online.target
+Requires=xvfb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+Environment=DISPLAY=__DISPLAY__
+Environment=PATH=__APP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=__APP_HOME__/.local/bin/uv run python -m src.browser_host
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

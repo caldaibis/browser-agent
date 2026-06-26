@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Provision a fresh Ubuntu 24.04 server (e.g. Hetzner CX22) to run the Stekkies
+# responder 24/7: headful Chromium under Xvfb, driven by systemd, with VNC for
+# the one-time interactive logins. Idempotent — safe to re-run.
+#
+# Run as root on the server:   bash deploy/setup.sh
+set -euo pipefail
+
+APP_USER="${APP_USER:-deploy}"
+APP_HOME="/home/${APP_USER}"
+APP_DIR="${APP_HOME}/browser-agent"
+REPO_URL="${REPO_URL:-git@github.com:caldaibis/browser-agent.git}"
+DISPLAY_NUM="${DISPLAY_NUM:-:99}"
+
+echo "==> [1/7] base packages"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq \
+  git curl ca-certificates xvfb x11vnc fonts-liberation fonts-noto-color-emoji \
+  >/dev/null
+
+echo "==> [2/7] app user '${APP_USER}'"
+if ! id "${APP_USER}" >/dev/null 2>&1; then
+  adduser --disabled-password --gecos "" "${APP_USER}"
+fi
+
+echo "==> [3/7] uv (as ${APP_USER})"
+sudo -u "${APP_USER}" bash -lc '
+  command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+'
+
+echo "==> [4/7] clone/update repo"
+if [ ! -d "${APP_DIR}/.git" ]; then
+  echo "    cloning ${REPO_URL} (server SSH key must be a GitHub deploy key)"
+  sudo -u "${APP_USER}" git clone "${REPO_URL}" "${APP_DIR}"
+else
+  sudo -u "${APP_USER}" git -C "${APP_DIR}" pull --ff-only
+fi
+
+echo "==> [5/7] chromium OS deps (root) + browser (as ${APP_USER})"
+# install-deps needs root (apt); the browser download lives in the user's cache.
+sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
+uvx --from playwright playwright install-deps chromium
+sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
+
+echo "==> [6/7] systemd units"
+sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
+  "${APP_DIR}/deploy/systemd/xvfb.service"        > /etc/systemd/system/xvfb.service
+sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
+  "${APP_DIR}/deploy/systemd/browser-host.service" > /etc/systemd/system/browser-host.service
+sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
+  "${APP_DIR}/deploy/systemd/orchestrator.service" > /etc/systemd/system/orchestrator.service
+sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
+  "${APP_DIR}/deploy/systemd/vnc.service"          > /etc/systemd/system/vnc.service
+systemctl daemon-reload
+
+echo "==> [7/7] enable Xvfb + browser host (NOT the orchestrator yet)"
+systemctl enable --now xvfb.service
+systemctl enable --now browser-host.service
+
+cat <<EOF
+
+==> Done. Next, MANUAL steps (see deploy/README.md):
+  1. Upload secrets:
+       scp -r ./state ${APP_USER}@SERVER:${APP_DIR}/        # gmail/creds (NOT the profile)
+       scp -r ~/.hermes ${APP_USER}@SERVER:${APP_HOME}/     # Hermes API keys/config
+  2. One-time logins via VNC:
+       systemctl start vnc.service
+       # from your laptop:  ssh -L 5900:localhost:5900 ${APP_USER}@SERVER
+       # connect a VNC viewer to localhost:5900, log into Google + Stekkies + sites
+       systemctl stop vnc.service
+  3. Go live:
+       systemctl enable --now orchestrator.service
+       journalctl -u orchestrator -f
+EOF

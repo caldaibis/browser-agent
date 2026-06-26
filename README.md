@@ -61,6 +61,9 @@ uv run python -m src.orchestrator --once "https://www.stekkies.com/en/api/v1/h/r
 uv run python -m src.orchestrator
 ```
 
+## Deploy (24/7)
+See [`deploy/README.md`](deploy/README.md) — Hetzner VM + Xvfb + systemd + VNC.
+
 Flip `DRY_RUN = False` in `src/config.py` only after you've watched a dry run
 fill a form correctly.
 

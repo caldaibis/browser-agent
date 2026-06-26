@@ -1,0 +1,16 @@
+[Unit]
+Description=x11vnc on __DISPLAY__ for one-time interactive logins (localhost only)
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+User=__APP_USER__
+Environment=DISPLAY=__DISPLAY__
+# Bound to localhost with no password: reach it only via SSH tunnel
+#   ssh -L 5900:localhost:5900 __APP_USER__@SERVER
+ExecStart=/usr/bin/x11vnc -display __DISPLAY__ -forever -shared -rfbport 5900 -localhost -nopw
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

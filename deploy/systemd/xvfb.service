@@ -1,0 +1,12 @@
+[Unit]
+Description=Xvfb virtual display __DISPLAY__ for the Stekkies browser
+After=network.target
+
+[Service]
+User=__APP_USER__
+ExecStart=/usr/bin/Xvfb __DISPLAY__ -screen 0 1920x1080x24 -nolisten tcp
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
