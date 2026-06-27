@@ -47,18 +47,39 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
 "${APP_DIR}/.venv/bin/python" -m playwright install-deps chromium
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
 
-echo "==> [6/7] systemd units"
+echo "==> [6/8] systemd units"
 for unit in xvfb.service browser-host.service orchestrator.service vnc.service \
-            healthcheck.service healthcheck.timer; do
+            healthcheck.service healthcheck.timer dashboard.service; do
   sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
     "${APP_DIR}/deploy/systemd/${unit}" > "/etc/systemd/system/${unit}"
 done
+# sudoers drop-in for the dashboard's safe actions
+sed "s|__APP_USER__|${APP_USER}|g" "${APP_DIR}/deploy/stekkies-dashboard.sudoers" \
+  > /etc/sudoers.d/stekkies-dashboard
+chmod 0440 /etc/sudoers.d/stekkies-dashboard
 systemctl daemon-reload
 
-echo "==> [7/7] enable Xvfb + browser host + health-check timer (NOT orchestrator yet)"
+echo "==> [7/8] Caddy (reverse proxy: HTTPS + Basic Auth for the dashboard)"
+if ! command -v caddy >/dev/null 2>&1; then
+  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -qq && apt-get install -y -qq caddy >/dev/null
+fi
+# Render the Caddyfile if the dashboard env vars are provided, else leave a note.
+if [ -n "${DASHBOARD_DOMAIN:-}" ] && [ -n "${DASHBOARD_USER:-}" ] && [ -n "${DASHBOARD_HASH:-}" ]; then
+  sed "s|__DOMAIN__|${DASHBOARD_DOMAIN}|g; s|__USER__|${DASHBOARD_USER}|g; s|__HASH__|${DASHBOARD_HASH}|g" \
+    "${APP_DIR}/deploy/Caddyfile.template" > /etc/caddy/Caddyfile
+  systemctl restart caddy
+else
+  echo "    (set DASHBOARD_DOMAIN/USER/HASH and render deploy/Caddyfile.template -> /etc/caddy/Caddyfile)"
+fi
+
+echo "==> [8/8] enable Xvfb + browser host + health-check timer + dashboard (NOT orchestrator yet)"
 systemctl enable --now xvfb.service
 systemctl enable --now browser-host.service
 systemctl enable --now healthcheck.timer
+systemctl enable --now dashboard.service
 
 cat <<EOF
 

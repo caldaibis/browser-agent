@@ -1,0 +1,37 @@
+<article id="health" hx-get="/health" hx-trigger="every 30s" hx-swap="outerHTML">
+  <header><strong>System health</strong>
+    {% if health.last_health_check %}<span class="muted-txt" style="font-size:.8rem;">· last check {{ health.last_health_check }}</span>{% endif %}
+  </header>
+  <div class="grid2">
+    <div>
+      {% for svc, st in health.services.items() %}
+        <div>
+          <span class="dot {{ 'up' if st == 'active' else 'down' if st in ['failed','inactive'] else 'unk' }}"></span>
+          {{ svc }} — <span class="muted-txt">{{ st }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <div>
+      <div>
+        <span class="dot {{ 'down' if health.credit_low else 'up' if health.credit is not none else 'unk' }}"></span>
+        OpenRouter credit —
+        {% if health.credit is not none %}
+          <strong>${{ '%.2f'|format(health.credit) }}</strong>
+          {% if health.credit_low %}<span class="badge bad">LOW</span>{% endif %}
+        {% else %}<span class="muted-txt">unknown</span>{% endif %}
+      </div>
+      <div>
+        <span class="dot {{ 'up' if health.stekkies_logged_in else 'down' }}"></span>
+        Stekkies session —
+        <span class="muted-txt">{{ 'logged in' if health.stekkies_logged_in else 'LOGGED OUT — re-login' }}</span>
+      </div>
+    </div>
+  </div>
+  <footer>
+    <button class="secondary" hx-post="/action/healthcheck" hx-swap="none"
+            onclick="this.setAttribute('aria-busy','true')">Run health check</button>
+    <button class="secondary" hx-post="/action/pause" hx-swap="none"
+            hx-confirm="Pause the inbox watcher?">Pause</button>
+    <button hx-post="/action/resume" hx-swap="none">Resume</button>
+  </footer>
+</article>

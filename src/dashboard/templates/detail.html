@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ sub.address or 'Submission' }}{% endblock %}
+{% block content %}
+<p><a href="/submissions">← submissions</a></p>
+<h3>{{ sub.address or 'Listing' }}
+  <span class="badge {{ status_class(sub.status) }}">{{ sub.status }}</span></h3>
+
+<table>
+  <tbody>
+    <tr><th>When</th><td>{{ sub.ts.replace('T',' ') }}</td></tr>
+    <tr><th>Source</th><td>{{ sub.source or '—' }}</td></tr>
+    <tr><th>Listing</th><td>
+      {% if sub.source_url %}<a href="{{ sub.source_url }}" target="_blank" rel="noopener">{{ sub.source_url }}</a>{% else %}—{% endif %}
+    </td></tr>
+    <tr><th>Stekkies</th><td><a href="{{ sub.stekkies_url }}" target="_blank" rel="noopener">{{ sub.stekkies_url }}</a></td></tr>
+    <tr><th>Duration</th><td>{{ (sub.seconds|round(1))|string + 's' if sub.seconds else '—' }}</td></tr>
+    <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
+  </tbody>
+</table>
+
+{% if sub.status not in ['submitted','already_applied','skipped_duplicate'] and sub.stekkies_url %}
+<form hx-post="/action/retry?url={{ sub.stekkies_url|urlencode }}" hx-swap="none"
+      onsubmit="this.querySelector('button').setAttribute('aria-busy','true')">
+  <button class="contrast">Retry this listing</button>
+  <small class="muted-txt">Re-runs the agent now (briefly shares the browser with the watcher).</small>
+</form>
+{% endif %}
+
+<article>
+  <header><strong>Agent transcript</strong> <span class="muted-txt">(secrets redacted)</span></header>
+  {% if transcript %}<pre class="transcript">{{ transcript }}</pre>
+  {% else %}<p class="muted-txt">No transcript (the agent did not run for this listing — e.g. duplicate skip or no source URL).</p>{% endif %}
+</article>
+{% endblock %}

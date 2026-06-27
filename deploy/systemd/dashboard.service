@@ -1,0 +1,17 @@
+[Unit]
+Description=Stekkies dashboard (FastAPI on 127.0.0.1:8000, behind Caddy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+Environment=PATH=__APP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=__APP_DIR__/state/agent.env
+ExecStart=__APP_HOME__/.local/bin/uv run uvicorn src.dashboard.app:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

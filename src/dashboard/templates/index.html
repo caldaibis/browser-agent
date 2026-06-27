@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="cards">
+  <div class="card"><div class="big">{{ stats.submitted }}</div><div class="lbl">Submitted</div></div>
+  <div class="card"><div class="big">{{ stats.attempts }}</div><div class="lbl">Apply attempts</div></div>
+  <div class="card"><div class="big">{{ stats.success_rate }}%</div><div class="lbl">Success rate</div></div>
+  <div class="card"><div class="big">{{ stats.total_handled }}</div><div class="lbl">Listings handled</div></div>
+  <div class="card"><div class="big">{{ stats.avg_seconds }}s</div><div class="lbl">Avg apply time</div></div>
+</div>
+
+<div class="grid2" style="margin-top:1.5rem;">
+  <article><header><strong>Outcomes</strong></header><canvas id="byStatus"></canvas></article>
+  <article><header><strong>By source</strong></header><canvas id="bySource"></canvas></article>
+</div>
+<article><header><strong>Applies per day</strong></header><canvas id="perDay" height="80"></canvas></article>
+
+{% include "_health.html" %}
+
+<article>
+  <header><strong>Recent</strong> · <a href="/submissions">all submissions →</a></header>
+  <table>
+    <thead><tr><th>When</th><th>Address</th><th>Source</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for s in recent %}
+      <tr>
+        <td class="muted-txt">{{ s.ts[:16].replace('T',' ') }}</td>
+        <td><a href="/submission/{{ s.id }}">{{ s.address or '—' }}</a></td>
+        <td>{{ s.source or '—' }}</td>
+        <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+
+<script>
+  const stats = {{ stats_json|safe }};
+  const palette = ['#1a9e4b','#e0922f','#c0392b','#3b7dd8','#8e44ad','#16a085','#7f8c8d','#d35400'];
+  new Chart(byStatus, {type:'doughnut', data:{labels:Object.keys(stats.by_status),
+    datasets:[{data:Object.values(stats.by_status), backgroundColor:palette}]},
+    options:{plugins:{legend:{position:'right'}}}});
+  new Chart(bySource, {type:'bar', data:{labels:Object.keys(stats.by_source),
+    datasets:[{label:'attempts', data:Object.values(stats.by_source), backgroundColor:'#3b7dd8'}]},
+    options:{plugins:{legend:{display:false}}}});
+  new Chart(perDay, {type:'line', data:{labels:Object.keys(stats.per_day),
+    datasets:[{label:'applies', data:Object.values(stats.per_day), borderColor:'#1a9e4b', tension:.3, fill:false}]},
+    options:{plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}});
+</script>
+{% endblock %}

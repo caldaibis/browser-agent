@@ -35,20 +35,28 @@ def _save(state: dict) -> None:
     ALERTS_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
-def check_credits(state: dict) -> None:
+def remaining_credit() -> float | None:
+    """Remaining OpenRouter credit in USD, or None if unavailable. Shared by the
+    health check and the dashboard."""
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
-        print("[health] no OPENROUTER_API_KEY; skipping credit check")
-        return
+        return None
     try:
         req = urllib.request.Request(
             "https://openrouter.ai/api/v1/credits",
             headers={"Authorization": f"Bearer {key}"},
         )
         data = json.load(urllib.request.urlopen(req, timeout=20))["data"]
-        remaining = float(data["total_credits"]) - float(data["total_usage"])
+        return float(data["total_credits"]) - float(data["total_usage"])
     except Exception as e:
         print(f"[health] credit check error: {e}")
+        return None
+
+
+def check_credits(state: dict) -> None:
+    remaining = remaining_credit()
+    if remaining is None:
+        print("[health] credit unavailable; skipping credit check")
         return
     print(f"[health] OpenRouter credit remaining: ${remaining:.2f} (threshold ${CREDIT_THRESHOLD_USD:.2f})")
     if remaining < CREDIT_THRESHOLD_USD:

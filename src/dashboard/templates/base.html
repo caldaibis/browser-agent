@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Stekkies Agent{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.3/dist/htmx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    :root { --pico-font-size: 95%; }
+    main.container { max-width: 1100px; }
+    .badge { padding: .15rem .55rem; border-radius: 1rem; font-size: .78rem; font-weight: 600; white-space: nowrap; }
+    .badge.ok   { background:#d8f5e0; color:#137a3b; }
+    .badge.warn { background:#fdeccf; color:#8a5a00; }
+    .badge.bad  { background:#fcdada; color:#a11; }
+    .badge.muted{ background:#e9ecef; color:#555; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1rem; }
+    .card  { background:var(--pico-card-background-color); border:1px solid var(--pico-muted-border-color); border-radius:.5rem; padding:1rem; }
+    .card .big { font-size:1.9rem; font-weight:700; line-height:1; }
+    .card .lbl { color:var(--pico-muted-color); font-size:.8rem; text-transform:uppercase; letter-spacing:.03em; }
+    table td, table th { padding:.4rem .5rem; font-size:.9rem; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; }
+    @media (max-width:800px){ .grid2{grid-template-columns:1fr;} }
+    pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.35; }
+    .dot { height:.7rem; width:.7rem; border-radius:50%; display:inline-block; margin-right:.4rem; }
+    .dot.up{background:#1a9e4b;} .dot.down{background:#c0392b;} .dot.unk{background:#999;}
+    nav.top a { margin-right:1rem; }
+    .muted-txt { color:var(--pico-muted-color); }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <nav class="top">
+      <ul><li><strong>🏠 Stekkies Agent</strong></li></ul>
+      <ul>
+        <li><a href="/">Overview</a></li>
+        <li><a href="/submissions">Submissions</a></li>
+      </ul>
+    </nav>
+    {% block content %}{% endblock %}
+    <footer class="muted-txt" style="margin:2rem 0;font-size:.8rem;">
+      Autonomous Stekkies responder · read-only data from logs · secrets redacted
+    </footer>
+  </main>
+</body>
+</html>

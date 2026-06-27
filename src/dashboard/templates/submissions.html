@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Submissions{% endblock %}
+{% block content %}
+<h3>Submissions <span class="muted-txt">({{ subs|length }})</span></h3>
+
+<form method="get" action="/submissions" style="display:flex;gap:1rem;align-items:end;">
+  <label>Status
+    <select name="status" onchange="this.form.submit()">
+      <option value="">all</option>
+      {% for s in statuses %}<option value="{{ s }}" {{ 'selected' if s==f_status }}>{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Source
+    <select name="source" onchange="this.form.submit()">
+      <option value="">all</option>
+      {% for s in sources %}<option value="{{ s }}" {{ 'selected' if s==f_source }}>{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <a href="/submissions" role="button" class="secondary">Reset</a>
+</form>
+
+<table>
+  <thead><tr><th>When</th><th>Address</th><th>Source</th><th>Status</th><th>Took</th></tr></thead>
+  <tbody>
+    {% for s in subs %}
+    <tr>
+      <td class="muted-txt">{{ s.ts[:16].replace('T',' ') }}</td>
+      <td><a href="/submission/{{ s.id }}">{{ s.address or '—' }}</a></td>
+      <td>{{ s.source or '—' }}</td>
+      <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
+      <td class="muted-txt">{{ (s.seconds|round(0)|int)|string + 's' if s.seconds else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
