@@ -9,7 +9,9 @@ Run standalone:  python -m src.apply_hermes logs/last_listing.json
 """
 import json
 import os
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
@@ -128,9 +130,23 @@ TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
 
 STOP EARLY WHEN THE LISTING CANNOT BE RESPONDED TO. If the property shows any of:
 paywall ("Plus"/"upgrade required"), not eligible ("je komt niet in aanmerking"),
-suitability still being recalculated, a message/response already sent, or the
-"reageer"/apply control is simply absent — then STOP IMMEDIATELY and report that
-status. Do NOT wander the rest of the site, open your profile, or take unrelated
+suitability still being recalculated, or the "reageer"/apply control is simply
+absent — then STOP IMMEDIATELY and report that status.
+
+ALREADY-APPLIED = STOP (never resubmit). If the page offers to MODIFY, CHANGE,
+WITHDRAW, or CONTINUE an existing request — e.g. "Aanvraag wijzigen", "wijzig je
+reactie", "Reactie intrekken", "je hebt gereageerd", "Bezichtiging aangevraagd",
+"Je bericht is verstuurd", "Doorgaan met gesprek" — that means an application was
+ALREADY submitted for this property. STOP immediately and report it; do NOT
+re-open, re-fill, or resubmit.
+IMPORTANT distinction: a form whose fields are PRE-FILLED with your personal data
+or that already shows your saved documents is just the site remembering your
+profile — that ALONE does NOT mean you already applied. Judge "already applied"
+by the control wording / an explicit "already requested/sent" status, NOT by
+pre-filled data. When the entry control is a normal apply button ("Bezichtiging
+aanvragen", "Reageer"), proceed and submit.
+
+Do NOT wander the rest of the site, open your profile, or take unrelated
 account actions looking for a workaround.
 
 Be decisive. Do not ask me questions mid-task; make reasonable choices and
@@ -141,20 +157,40 @@ blocking reason in one short paragraph.
 """
 
 
+def _slug(text: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "-", (text or "").strip()).strip("-").lower()
+    return (s or "listing")[:50]
+
+
 def apply(listing: dict, model: str = APPLY_MODEL) -> int:
     """Run the apply agent on one listing. Returns 0 on success, 124 on
     timeout, 1 if the turn budget was exhausted, 2 on setup error."""
     prompt = build_prompt(listing)
+    # Persist a per-run transcript + prompt so nothing is overwritten/lost.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug = _slug(f"{listing.get('source_name','')}-{listing.get('address','')}")
+    run_dir = LOG_DIR / "transcripts"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    transcript = run_dir / f"{ts}_{slug}.log"
+    (run_dir / f"{ts}_{slug}.prompt.txt").write_text(prompt, encoding="utf-8")
     (LOG_DIR / "last_hermes_prompt.txt").write_text(prompt, encoding="utf-8")
+
     print(f"[apply] launching agent ({model}) for {listing['source_url']}")
+    print(f"[apply] transcript: {transcript}")
     rc = run_agent(
         prompt=prompt,
         model=model,
         max_turns=APPLY_MAX_TURNS,
         cdp_url=CDP_URL,
-        log_path=LOG_DIR / "last_hermes_output.txt",
+        log_path=transcript,
         timeout_seconds=APPLY_TIMEOUT_SECONDS,
     )
+    # Keep the convenience "latest" copy too.
+    try:
+        (LOG_DIR / "last_hermes_output.txt").write_text(
+            transcript.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
     print(f"[apply] ----- agent finished (exit {rc}) -----")
     return rc
 
