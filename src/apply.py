@@ -31,11 +31,49 @@ APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
 
 
+# Priority (lower = attach first) + one-line purpose per document type, matched
+# by filename substring. The purpose tells the agent WHY each doc matters so it
+# can map docs to labelled slots and choose well when slots are limited.
+def _classify(name: str) -> tuple[int, str]:
+    n = name.lower()
+    if "paspoort" in n or "passport" in n:
+        return 1, "Identity (ID) — always required, gatekeeping."
+    if "werkgeversverklaring" in n:
+        return 2, "Permanent employment + income — the decisive proof; attach whenever employer/income proof is asked."
+    if "salarisstrook" in n or "loonstrook" in n:
+        return 3, "Recent payslip — corroborates actual monthly income (attach the most recent months)."
+    if "verhuurdersverklaring" in n:
+        return 4, "Landlord reference — long stable tenancy, no arrears or nuisance; strong positive."
+    if "huurdersprofiel" in n:
+        return 5, "Tenant profile / cover sheet — summarises the whole dossier; good for a general/cover slot."
+    if "uwv" in n or "verzekeringsbericht" in n:
+        return 6, "UWV statement — independently confirms the permanent contract and work history."
+    if "jaaropgave" in n and "degiro" not in n:
+        return 7, "Annual income statement — secondary income proof."
+    if "bankafschrift" in n or "bankstatement" in n:
+        return 8, "Proof of salary deposit (and rent paid) — privacy-light extract."
+    if "degiro" in n:
+        return 9, "Investment statement — extra asset proof, only for strict income-multiple cases."
+    return 50, "Additional supporting document."
+
+
+def _month_key(name: str) -> int:
+    m = re.search(r"_(\d{2})_", name)
+    return -int(m.group(1)) if m else 0  # negative => most recent month first
+
+
 def _doc_list() -> str:
     if not DOCS_DIR.exists():
         return "(WARNING: documents folder not found at %s)" % DOCS_DIR
-    files = sorted(p for p in DOCS_DIR.iterdir() if p.is_file() and not p.name.startswith("."))
-    return "\n".join(f"  - {p}" for p in files)
+    files = [p for p in DOCS_DIR.iterdir() if p.is_file() and not p.name.startswith(".")]
+    entries = []
+    for p in files:
+        prio, purpose = _classify(p.name)
+        # within payslips, sort most-recent-first; otherwise by name
+        secondary = _month_key(p.name) if prio == 3 else p.name
+        entries.append((prio, secondary, p, purpose))
+    entries.sort(key=lambda e: (e[0], e[1]))
+    return "\n".join(f"  - {p} — {purpose}" for _prio, _sec, p, purpose in entries)
 
 
 def build_prompt(listing: dict) -> str:
@@ -87,14 +125,12 @@ YOUR TASK
    character limit; if a field shows [invalid] after typing, it is likely too
    long, so shorten drastically rather than retrying the same length.
 4. Upload documents BEFORE the final submit, into whatever attachment slots the
-   form provides. Match a document to a labelled slot when the label names it;
-   otherwise put it in a generic/extra slot. If a slot accepts multiple files,
-   add several at once. Slots are often LIMITED — do not loop hunting for more
-   slots or re-uploading the same file. If you cannot fit them all, prioritise
-   in this order and then proceed: passport/ID, recent payslips (salarisstrook),
-   employment contract (arbeidsovereenkomst), UWV/employer statement, annual
-   statement (jaaropgave), landlord reference (verhuurdersverklaring),
-   bank statement (bankafschrift). Documents available:
+   form provides. Match a document to a labelled slot when the label names it
+   (use the "why it matters" note to pick the right one); otherwise put it in a
+   generic/extra slot. If a slot accepts multiple files, add several at once.
+   Slots are often LIMITED — do not loop hunting for more slots or re-uploading
+   the same file. The list below is ALREADY in priority order, so attach from the
+   top down and stop when slots run out. Each line is "<path> — why it matters":
 {_doc_list()}
 5. {submit_clause}
 6. After you see a submission/confirmation message, you are DONE: report success
