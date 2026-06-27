@@ -79,7 +79,11 @@ YOUR TASK
    keep both Dutch and English sections, replace [[ADDRESS]] with the current
    property address when known, and make small listing-specific adjustments so
    it does not read like a rigid template. Do not paste the reference verbatim.
-   Do not invent new personal details.
+   Do not invent new personal details. Put the full message in the main
+   message/motivation field. For a separate OPTIONAL "opmerkingen"/remarks field,
+   leave it blank or write one short sentence — these often have a tight
+   character limit; if a field shows [invalid] after typing, it is likely too
+   long, so shorten drastically rather than retrying the same length.
 4. Upload documents BEFORE the final submit, into whatever attachment slots the
    form provides. Match a document to a labelled slot when the label names it;
    otherwise put it in a generic/extra slot. If a slot accepts multiple files,
