@@ -77,8 +77,18 @@ tail -f logs/mail_summary.jsonl
 `mail_summary.jsonl` is structured JSONL with message id, status, listing URLs,
 address/source when known, return code, duration, and the short outcome message.
 
+## Dashboard
+`src/dashboard/` is a FastAPI app (run `uv run uvicorn src.dashboard.app:app`)
+showing stats/charts, submissions, per-listing **redacted** transcripts, a live
+health panel (services + OpenRouter credit + Stekkies login), and safe actions
+(retry / pause / resume / run health check). On the VPS it runs as
+`dashboard.service` on `127.0.0.1:8000` behind **Caddy** (auto-HTTPS + Basic
+Auth) at the DuckDNS domain. Transcripts are scrubbed of credentials and
+`*.prompt.txt` is never served.
+
 ## Deploy (24/7)
-See [`deploy/README.md`](deploy/README.md) — Hetzner VM + Xvfb + systemd + VNC.
+See [`deploy/README.md`](deploy/README.md) — Hetzner VM + Xvfb + systemd + VNC +
+Caddy dashboard.
 
 ## Open items / required input
 - **Latency.** Polling is every 5s (`src/gmail_watch.py`). For lower latency,
