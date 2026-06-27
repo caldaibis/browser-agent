@@ -12,7 +12,7 @@ from datetime import datetime
 
 from .config import LOG_DIR, PROJECT_ROOT
 from .stekkies import extract_listing
-from .apply_hermes import apply
+from .apply import apply
 from .gmail_watch import mark_read, watch
 
 
@@ -120,40 +120,32 @@ def process(stekkies_url: str, msg_id: str | None = None) -> dict:
                 mark_read=True,
                 message="Skipped because this external listing was already handled.",
             )
-        rc = apply(d)
-        _log("applied", returncode=rc, seconds=round(time.time() - t0, 1))
-        if rc == 0:
+        result = apply(d)
+        _log("applied", outcome=result.outcome, returncode=result.rc,
+             seconds=round(time.time() - t0, 1))
+        # Record (so we don't retry) only when retrying wouldn't help: a real
+        # submission or a terminal site state (already applied / unavailable /
+        # not eligible / login needed). Transient failures stay retryable.
+        if result.terminal:
             _remember_processed(
                 msg_id=msg_id,
                 stekkies_url=stekkies_url,
                 source_url=listing.source_url,
                 source=listing.source_name,
                 address=listing.address,
+                outcome=result.outcome,
             )
-            return _finish(
-                msg_id=msg_id,
-                stekkies_url=stekkies_url,
-                source_url=listing.source_url,
-                source=listing.source_name,
-                address=listing.address,
-                status="applied",
-                mark_read=True,
-                returncode=rc,
-                seconds=round(time.time() - t0, 1),
-                message="Hermes finished successfully; application flow reported complete.",
-            )
-        status = "timeout" if rc == 124 else "failed"
         return _finish(
             msg_id=msg_id,
             stekkies_url=stekkies_url,
             source_url=listing.source_url,
             source=listing.source_name,
             address=listing.address,
-            status=status,
+            status=result.outcome,
             mark_read=True,
-            returncode=rc,
+            returncode=result.rc,
             seconds=round(time.time() - t0, 1),
-            message=f"Hermes exited with return code {rc}; check last_hermes_output.txt for details.",
+            message=result.summary or f"Agent finished with outcome={result.outcome} (rc={result.rc}).",
         )
     except Exception as e:
         _log("error", error=str(e))

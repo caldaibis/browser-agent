@@ -4,20 +4,22 @@ Fully-autonomous responder for Stekkies rental matches.
 
 **Pipeline:** Gmail (new Stekkies mail) → open Stekkies listing with your saved
 login, extract listing metadata + external "Go to listing" URL → hand off to
-the **Hermes** browser agent, which opens the source site (Ik Wil Huren,
-Pararius, Funda, …), writes a customized message from the reference template,
-fills the application form, uploads your documents, and submits.
+our **browser agent** (`src/browser_agent.py`), which opens the source site
+(Ik Wil Huren, Pararius, Funda, …), writes a customized message from the
+reference template, fills the application form, uploads your documents, and
+submits.
 
 Stekkies is only a *notifier/aggregator* — the real application happens on the
 external source site, which varies per listing. That variable last mile is why
-the apply stage uses an LLM browser agent (Hermes) rather than a fixed script.
+the apply stage uses an LLM browser agent rather than a fixed script.
 
 ## One shared logged-in browser (CDP)
 A single persistent Chromium — the **browser host** (`src.browser_host`) — runs
-with a CDP debugging port. Both the Stekkies extractor and the Hermes apply agent
+with a CDP debugging port. Both the Stekkies extractor and the apply agent
 **attach to it over CDP**, so every session lives in one profile you sign into
 once: Google (enables "Sign in with Google" SSO on Funda etc.), Stekkies, and all
-rental sites. Hermes is pointed at it via the `BROWSER_CDP_URL` env var.
+rental sites. The apply agent drives it via the Playwright MCP (`--cdp-endpoint`),
+and needs `OPENROUTER_API_KEY` set.
 
 ## Layout
 - `src/config.py`       — paths, URLs, `CDP_URL`.
@@ -26,12 +28,13 @@ rental sites. Hermes is pointed at it via the `BROWSER_CDP_URL` env var.
 - `src/stekkies.py`     — attach over CDP, open a listing, extract metadata + source URL.
 - `src/credentials.py`  — per-site logins matched by domain (from import_passwords).
 - `src/import_passwords.py` — load a Google Password Manager CSV into the creds JSON.
-- `src/message_template.py` — reference application message for Hermes to customize.
-- `src/apply_hermes.py` — build the task prompt (SSO-first, creds, docs) and run Hermes.
+- `src/message_template.py` — reference application message the agent customizes.
+- `src/apply.py`        — build the task prompt (SSO-first, creds, docs), run the agent.
+- `src/browser_agent.py` — the agent loop (OpenRouter + Playwright MCP); returns a structured outcome.
 - `src/gmail_watch.py`  — detect new Stekkies mails, extract the listing link.
 - `src/orchestrator.py` — ties it all together.
-- `state/`              — Chromium profile, creds, Gmail token (do not commit).
-- `logs/`               — screenshots, `runs.jsonl`, last prompt/output.
+- `state/`              — Chromium profile, creds, Gmail token, agent.env (do not commit).
+- `logs/`               — `activity.log`, `mail_summary.jsonl`, `transcripts/`.
 
 ## Setup
 Uses [uv](https://docs.astral.sh/uv/). `uv sync` creates `.venv` from

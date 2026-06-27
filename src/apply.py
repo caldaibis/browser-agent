@@ -5,7 +5,7 @@ auto-submit instruction) and runs the lightweight agent loop in
 `src.browser_agent` (OpenRouter LLM + Playwright MCP over our shared CDP
 browser). The agent adapts to whatever application form the source site shows.
 
-Run standalone:  python -m src.apply_hermes logs/last_listing.json
+Run standalone:  python -m src.apply logs/last_listing.json
 """
 import json
 import os
@@ -17,13 +17,13 @@ from pathlib import Path
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
 from .credentials import for_url
 from .message_template import REFERENCE_APPLICATION_MESSAGE
-from .browser_agent import run_agent
+from .browser_agent import run_agent, AgentResult
 
 # Model for the apply agent. Default: z-ai/glm-5.2 — strong tool-use/agentic
 # model. (Its earlier empty-response failure was a Hermes-loop quirk; our own
 # OpenRouter loop reads content/tool_calls directly.) gemini-3.5-flash proved
-# too flaky (degenerate loops). Override via APPLY_MODEL / HERMES_MODEL.
-APPLY_MODEL = os.environ.get("APPLY_MODEL", os.environ.get("HERMES_MODEL", "z-ai/glm-5.2"))
+# too flaky (degenerate loops). Override via APPLY_MODEL.
+APPLY_MODEL = os.environ.get("APPLY_MODEL", "z-ai/glm-5.2")
 APPLY_MAX_TURNS = int(os.environ.get("APPLY_MAX_TURNS", "60"))
 APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
 
@@ -154,6 +154,15 @@ proceed. Speed matters: complete the application as fast as safely possible.
 Never output a page snapshot as your final answer. Finish the job: upload the
 documents and SUBMIT. Only stop when you have submitted, or state the exact
 blocking reason in one short paragraph.
+
+FINAL ANSWER FORMAT: end your final message with one short status paragraph, then
+a last line that is EXACTLY one of:
+  OUTCOME: submitted          (you completed and submitted a new application)
+  OUTCOME: already_applied    (an application already existed; you did not resubmit)
+  OUTCOME: not_available      (listing expired/archived/removed)
+  OUTCOME: not_eligible       (you do not qualify / blocked by criteria)
+  OUTCOME: login_required     (could not log in / account needed)
+  OUTCOME: blocked            (any other reason you could not submit)
 """
 
 
@@ -162,9 +171,9 @@ def _slug(text: str) -> str:
     return (s or "listing")[:50]
 
 
-def apply(listing: dict, model: str = APPLY_MODEL) -> int:
-    """Run the apply agent on one listing. Returns 0 on success, 124 on
-    timeout, 1 if the turn budget was exhausted, 2 on setup error."""
+def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
+    """Run the apply agent on one listing. Returns an AgentResult with the true
+    outcome (submitted / already_applied / not_available / ... / timeout)."""
     prompt = build_prompt(listing)
     # Persist a per-run transcript + prompt so nothing is overwritten/lost.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -173,11 +182,11 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     transcript = run_dir / f"{ts}_{slug}.log"
     (run_dir / f"{ts}_{slug}.prompt.txt").write_text(prompt, encoding="utf-8")
-    (LOG_DIR / "last_hermes_prompt.txt").write_text(prompt, encoding="utf-8")
+    (LOG_DIR / "last_apply_prompt.txt").write_text(prompt, encoding="utf-8")
 
     print(f"[apply] launching agent ({model}) for {listing['source_url']}")
     print(f"[apply] transcript: {transcript}")
-    rc = run_agent(
+    result = run_agent(
         prompt=prompt,
         model=model,
         max_turns=APPLY_MAX_TURNS,
@@ -187,18 +196,20 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> int:
     )
     # Keep the convenience "latest" copy too.
     try:
-        (LOG_DIR / "last_hermes_output.txt").write_text(
+        (LOG_DIR / "last_apply_output.txt").write_text(
             transcript.read_text(encoding="utf-8"), encoding="utf-8")
     except Exception:
         pass
-    print(f"[apply] ----- agent finished (exit {rc}) -----")
-    return rc
+    print(f"[apply] ----- agent finished: outcome={result.outcome} (rc={result.rc}) -----")
+    return result
 
 
 def main() -> int:
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else LOG_DIR / "last_listing.json"
     listing = json.loads(path.read_text(encoding="utf-8"))
-    return apply(listing)
+    result = apply(listing)
+    print(f"OUTCOME: {result.outcome}")
+    return 0 if result.rc == 0 else result.rc
 
 
 if __name__ == "__main__":
