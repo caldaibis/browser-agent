@@ -28,7 +28,10 @@ from googleapiclient.discovery import build
 
 from .config import PROJECT_ROOT
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+]
 CLIENT_SECRET = PROJECT_ROOT / "state" / "gmail_client_secret.json"
 TOKEN = PROJECT_ROOT / "state" / "gmail_token.json"
 

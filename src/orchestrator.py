@@ -14,6 +14,7 @@ from .config import LOG_DIR, PROJECT_ROOT
 from .stekkies import extract_listing
 from .apply import apply
 from .gmail_watch import mark_read, watch
+from .notify import send_status_email
 
 
 PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
@@ -66,6 +67,10 @@ def _remember_processed(**kw) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+# Outcomes not worth emailing about (pure bookkeeping, no real attempt).
+_NO_EMAIL_STATUSES = {"skipped_duplicate", "no_listing_link"}
+
+
 def _finish(**kw) -> dict:
     rec = _mail_summary(**kw)
     msg_id = rec.get("msg_id") or "-"
@@ -74,6 +79,8 @@ def _finish(**kw) -> dict:
     address = rec.get("address") or "unknown address"
     source = rec.get("source") or "unknown source"
     _activity(f"mail={msg_id} status={status} source={source} address={address} - {detail}")
+    if status not in _NO_EMAIL_STATUSES:
+        send_status_email(rec)
     return rec
 
 
