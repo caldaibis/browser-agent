@@ -51,6 +51,23 @@ def _body(rec: dict) -> str:
     return "\n".join(lines)
 
 
+def send_alert(subject: str, body: str) -> None:
+    """Best-effort plain alert email (low credit, login expired, …)."""
+    if not NOTIFY_ENABLED:
+        return
+    try:
+        msg = EmailMessage()
+        msg["To"] = NOTIFY_TO
+        msg["From"] = NOTIFY_TO
+        msg["Subject"] = subject
+        msg.set_content(body)
+        raw = urlsafe_b64encode(msg.as_bytes()).decode()
+        get_service().users().messages().send(userId="me", body={"raw": raw}).execute()
+        print(f"[notify] alert sent: {subject}")
+    except Exception as e:  # pragma: no cover
+        print(f"[notify] alert send failed: {e}")
+
+
 def send_status_email(rec: dict) -> None:
     """Best-effort: email a status update. Never raises (logging must not break
     on a mail failure)."""

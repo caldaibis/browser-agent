@@ -48,26 +48,25 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
 
 echo "==> [6/7] systemd units"
-sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
-  "${APP_DIR}/deploy/systemd/xvfb.service"        > /etc/systemd/system/xvfb.service
-sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
-  "${APP_DIR}/deploy/systemd/browser-host.service" > /etc/systemd/system/browser-host.service
-sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
-  "${APP_DIR}/deploy/systemd/orchestrator.service" > /etc/systemd/system/orchestrator.service
-sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
-  "${APP_DIR}/deploy/systemd/vnc.service"          > /etc/systemd/system/vnc.service
+for unit in xvfb.service browser-host.service orchestrator.service vnc.service \
+            healthcheck.service healthcheck.timer; do
+  sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
+    "${APP_DIR}/deploy/systemd/${unit}" > "/etc/systemd/system/${unit}"
+done
 systemctl daemon-reload
 
-echo "==> [7/7] enable Xvfb + browser host (NOT the orchestrator yet)"
+echo "==> [7/7] enable Xvfb + browser host + health-check timer (NOT orchestrator yet)"
 systemctl enable --now xvfb.service
 systemctl enable --now browser-host.service
+systemctl enable --now healthcheck.timer
 
 cat <<EOF
 
 ==> Done. Next, MANUAL steps (see deploy/README.md):
   1. Upload secrets:
-       scp -r ./state ${APP_USER}@SERVER:${APP_DIR}/        # gmail/creds (NOT the profile)
-       scp -r ~/.hermes ${APP_USER}@SERVER:${APP_HOME}/     # Hermes API keys/config
+       scp state/gmail_client_secret.json state/gmail_token.json \\
+           state/sources_credentials.json ${APP_USER}@SERVER:${APP_DIR}/state/
+       # create ${APP_DIR}/state/agent.env with: OPENROUTER_API_KEY=sk-or-...
   2. One-time logins via VNC:
        systemctl start vnc.service
        # from your laptop:  ssh -L 5900:localhost:5900 ${APP_USER}@SERVER
