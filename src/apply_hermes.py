@@ -80,12 +80,21 @@ YOUR TASK
    property address when known, and make small listing-specific adjustments so
    it does not read like a rigid template. Do not paste the reference verbatim.
    Do not invent new personal details.
-4. Upload ALL of these documents wherever the form accepts attachments
-   (id, payslips, employer statement, etc.). Match document type to field
-   where the field asks for a specific document; otherwise attach all:
+4. Upload documents BEFORE the final submit, into whatever attachment slots the
+   form provides. Match a document to a labelled slot when the label names it;
+   otherwise put it in a generic/extra slot. If a slot accepts multiple files,
+   add several at once. Slots are often LIMITED — do not loop hunting for more
+   slots or re-uploading the same file. If you cannot fit them all, prioritise
+   in this order and then proceed: passport/ID, recent payslips (salarisstrook),
+   employment contract (arbeidsovereenkomst), UWV/employer statement, annual
+   statement (jaaropgave), landlord reference (verhuurdersverklaring),
+   bank statement (bankafschrift). Documents available:
 {_doc_list()}
 5. {submit_clause}
-6. Report: did it submit, any errors, and what fields you could not fill.
+6. After you see a submission/confirmation message, you are DONE: report success
+   in one short line and STOP. NEVER re-open ("Aanvraag wijzigen"/edit), modify,
+   or resubmit an application you have already submitted, even to add documents.
+   Report: did it submit, any errors, and what fields you could not fill.
 
 REFERENCE APPLICATION MESSAGE (contains name, age, job, income, phone):
 \"\"\"

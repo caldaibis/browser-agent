@@ -127,12 +127,13 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         messages.append({
                             "role": "user",
                             "content": (
-                                "That was not a final answer. Continue the task: "
-                                "upload every required document with "
-                                "browser_file_upload and SUBMIT the application. "
-                                "Only stop once you have submitted, or state the "
-                                "exact blocking reason in one short paragraph "
-                                "(no page snapshots)."
+                                "That was not a usable final answer. If you have "
+                                "ALREADY submitted (saw a confirmation), reply with a "
+                                "one-line success confirmation and nothing else — do "
+                                "NOT re-open or resubmit. Otherwise continue: fill "
+                                "remaining fields, upload documents, and submit. If "
+                                "blocked, state the exact reason in one short "
+                                "paragraph. No page snapshots."
                             ),
                         })
                         continue
