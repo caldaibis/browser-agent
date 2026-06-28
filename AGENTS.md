@@ -24,10 +24,17 @@ form, uploads docs, submits).
 - `documents/` — application PDFs/JPG, version-controlled so the VPS gets them
   via git. `DOCS_DIR` (config) points here; override with the env var.
 - `src/credentials.py` / `import_passwords.py` — per-site logins by domain.
-- `src/gmail_watch.py` — poll inbox, extract Stekkies link.
+- `src/gmail_watch.py` — poll inbox (5s), extract Stekkies link.
 - `src/orchestrator.py` — ties it together (`--once URL` or live watch); logs the
   true `outcome` (submitted / already_applied / not_available / …) and only marks
   a listing processed when the outcome is terminal.
+- `src/notify.py` — emails you@example.com after each handled listing
+  (outcome + redacted summary) via Gmail `send` scope.
+- `src/healthcheck.py` (+ systemd timer, 30 min) — emails when OpenRouter credit
+  is low or the Stekkies session has expired. `remaining_credit()` shared here.
+- `src/dashboard/` — FastAPI + htmx/Chart.js read-only dashboard (stats, per-run
+  redacted transcripts, health, safe actions) behind Caddy (HTTPS + Basic Auth).
+- `justfile` — every workflow as a `just` command (local + VPS ops + secret push).
 
 ## Conventions
 - Python 3.12, managed by **uv** (`pyproject.toml` + `uv.lock`). `uv sync` to
@@ -48,3 +55,26 @@ form, uploads docs, submits).
 - Node/npx is required at runtime for the Playwright MCP.
 - Stekkies only notifies; the real application is on the external source site,
   which varies per listing — hence the LLM agent for the last mile.
+- Transcripts/prompts can contain plaintext site passwords — the dashboard
+  redacts them and never serves `*.prompt.txt`. Don't undo that.
+
+## Hard-won lessons (don't relearn these)
+- **Model:** `z-ai/glm-5.2` works well *in our own loop*. Its earlier
+  empty/reasoning-only stalls were a **Hermes**-loop artifact, not the model.
+  `gemini-3.5-flash` falls into degenerate loops (e.g. ArrowDown ×30) — avoid.
+- **Use the Playwright MCP high-level tools** (snapshot→ref→click/fill_form);
+  the raw-JS path (`browser_cdp`/`browser_evaluate`) caused 50+ calls + full-page
+  dumps for one task. They stay filtered out.
+- **Already-applied = STOP, never resubmit.** Detect by control wording
+  ("Aanvraag wijzigen", "Reactie intrekken", "je hebt gereageerd", "Doorgaan
+  met gesprek"). Pre-filled fields / saved docs alone do NOT mean already-applied.
+- **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
+  accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
+  These are real states to report, not bugs — stop early and label them.
+- **Gmail listing mails:** from `help@stekkies.com`; the listing link is a
+  hex-hash `http://www.stekkies.com/.../redirect/<hash>` and the body is
+  quoted-printable (must QP-decode before regex).
+- **Documents** are uploaded in a fixed priority order with a one-line purpose
+  each (see `_classify` in `apply.py`): ID → werkgeversverklaring → recent
+  payslips → landlord ref → profile → UWV → jaaropgave → bank → degiro. Keep
+  the expired arbeidsovereenkomst OUT; keep the bank statement trimmed.

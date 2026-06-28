@@ -1,23 +1,25 @@
 # Deploy: 24/7 on a Hetzner Cloud VM
 
-Runs the responder always-on: headful Chromium under **Xvfb**, managed by
-**systemd**, with **VNC** (over SSH tunnel) for the one-time interactive logins.
+Always-on responder: headful Chromium under **Xvfb**, **systemd**-managed, with
+**VNC** (over SSH tunnel) for the one-time interactive logins, plus a **Caddy**
+dashboard (HTTPS + Basic Auth). No Hermes — the agent is `src/browser_agent.py`
+(OpenRouter + Playwright MCP). Most steps below are wrapped as `just` commands.
 
-Recommended box: **Hetzner Cloud CX22** (2 vCPU / 4 GB, EU region — an EU IP
-reduces Google/rental-site bot-flagging and is low-latency to the NL sites).
+Box: **Hetzner Cloud CX23** (2 vCPU / 4 GB, EU region — an EU IP reduces
+Google/rental-site bot-flagging and is low-latency to the NL sites).
+Current server: `stekkies` @ `your-server-ip` (nbg1), app user `deploy`.
 
 ## 1. Create the server
-Console or CLI (`hcloud`):
 ```bash
-hcloud server create --name stekkies --type cx22 --image ubuntu-24.04 \
+hcloud server create --name stekkies --type cx23 --image ubuntu-24.04 \
   --location nbg1 --ssh-key "your-key"
 ```
 
-## 2. Give the server access to the private repo
-On the server, create a key and add it to GitHub as a **deploy key** (read-only):
+## 2. Repo access (read-only deploy key)
+On the server, generate a key and add it to GitHub → repo → Settings → Deploy keys:
 ```bash
 ssh-keygen -t ed25519 -C stekkies -f ~/.ssh/id_ed25519 -N ""
-cat ~/.ssh/id_ed25519.pub   # -> GitHub repo > Settings > Deploy keys > Add
+cat ~/.ssh/id_ed25519.pub
 ```
 
 ## 3. Provision
@@ -25,51 +27,53 @@ cat ~/.ssh/id_ed25519.pub   # -> GitHub repo > Settings > Deploy keys > Add
 git clone git@github.com:caldaibis/browser-agent.git
 bash browser-agent/deploy/setup.sh
 ```
-This installs uv + Chromium + Xvfb + VNC, deploys the systemd units, and starts
-`xvfb` + `browser-host` (but NOT the orchestrator yet).
+Installs uv + Chromium + Xvfb + VNC + **Node/npx** (for the Playwright MCP) +
+**Caddy**; deploys all systemd units; starts `xvfb`, `browser-host`,
+`healthcheck.timer`, `dashboard` (but NOT `orchestrator` yet). To render the
+Caddyfile, run with `DASHBOARD_DOMAIN`, `DASHBOARD_USER`, `DASHBOARD_HASH` set
+(`DASHBOARD_HASH=$(caddy hash-password --plaintext '<pw>')`).
 
-## 4. Upload secrets (from your laptop)
-These are gitignored and must be copied up:
+## 4. Upload secrets (gitignored — from your laptop)
 ```bash
-# Gmail OAuth client + token + rental-site credentials:
-scp deploy/../state/gmail_client_secret.json deploy@SERVER:/home/deploy/browser-agent/state/
-scp state/sources_credentials.json           deploy@SERVER:/home/deploy/browser-agent/state/
-# Hermes API keys / config:
-scp -r ~/.hermes deploy@SERVER:/home/deploy/
+scp state/gmail_client_secret.json state/gmail_token.json \
+    state/sources_credentials.json deploy@SERVER:/home/deploy/browser-agent/state/
+# OpenRouter key (the apply agent reads it):
+printf 'OPENROUTER_API_KEY=sk-or-...\n' | ssh deploy@SERVER \
+    'cat > /home/deploy/browser-agent/state/agent.env'
 ```
-(Optionally also copy `state/chromium-profile` to try reusing sessions, but expect
-Google to require a fresh login from the new IP — step 5 covers that.)
+`just push-creds` / `push-token` / `push-env` do these after the first time.
 
 ## 5. One-time interactive logins via VNC
 ```bash
-sudo systemctl start vnc.service
-# from your laptop:
-ssh -L 5900:localhost:5900 deploy@SERVER
-# connect any VNC viewer to localhost:5900 -> in the Chromium window:
-#   sign into Google FIRST (enables SSO), then Stekkies + the rental sites.
-sudo systemctl stop vnc.service
+just vnc          # starts vnc.service + prints the tunnel command
+# ssh -L 5900:localhost:5900 deploy@SERVER ; VNC viewer -> localhost:5900
+#   sign into Google FIRST (enables SSO), then Stekkies + rental sites.
+just vnc-stop
 ```
-Sessions persist in `state/chromium-profile`, so this is one-time.
+Sessions persist in `state/chromium-profile`, so this is one-time (redo only if a
+login expires — the health check emails you when the Stekkies session drops).
 
 ## 6. Go live
 ```bash
-sudo systemctl enable --now orchestrator.service
-journalctl -u orchestrator -f          # live logs
+ssh deploy@SERVER 'sudo systemctl enable --now orchestrator.service'
+just logs          # live agent journal
 ```
+The dashboard is already up at `https://<DASHBOARD_DOMAIN>` (Basic Auth).
 
-## Ops
+## Ops (via just, from your laptop)
 ```bash
-systemctl status browser-host orchestrator xvfb
-journalctl -u browser-host -f
-tail -f ~/browser-agent/logs/activity.log       # one concise line per email/listing
-tail -f ~/browser-agent/logs/mail_summary.jsonl # structured per-mail outcomes
-sudo systemctl restart browser-host    # reattach a clean browser
-git -C ~/browser-agent pull && sudo systemctl restart orchestrator   # deploy update
+just status        # all services at a glance
+just logs / just dash-logs / just activity
+just deploy        # push -> pull on VPS -> uv sync -> restart agent + dashboard
+just pause / just resume          # stop/start the inbox watcher
+just credits       # remaining OpenRouter $ + Stekkies login (runs healthcheck)
+just restart browser-host         # reattach a clean browser if a session goes stale
 ```
 
 ## Notes
-- Flip `DRY_RUN=False` in `src/config.py` (commit + pull) only after a good dry run.
-- `browser-host` keeps the CDP browser on `:9222`; `orchestrator` and Hermes
+- The agent applies and **submits** autonomously — there is no dry-run guard.
+- `browser-host` keeps the CDP browser on `:9222`; the extractor and apply agent
   attach to it. If logins expire, re-run step 5.
-- Keep VNC stopped except during logins; it's localhost-only + SSH-tunneled, but
-  no reason to leave it running.
+- Keep VNC stopped except during logins (localhost-only + SSH-tunneled).
+- Keep OpenRouter credit topped up (each apply ≈ $0.01–0.10); the health check
+  emails you below the threshold.
