@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
-from .credentials import for_url
+from .credentials import available_domains
 from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .browser_agent import run_agent, AgentResult
 
@@ -77,7 +77,8 @@ def _doc_list() -> str:
 
 
 def build_prompt(listing: dict) -> str:
-    cred = for_url(listing["source_url"])
+    domains = available_domains()
+    domain_list = ", ".join(domains) if domains else "(none stored)"
     sso = (
         f"If the site offers \"Sign in with Google\" / \"Continue with Google\" "
         f"(e.g. Funda), PREFER that: click it and complete sign-in with the "
@@ -85,20 +86,20 @@ def build_prompt(listing: dict) -> str:
         f"Google session, so this is usually one or two clicks. Only fall back "
         f"to email/password login if Google sign-in is not offered."
     )
-    if cred:
-        login_clause = (
-            f"{sso}\n"
-            f"If using email/password instead, use these credentials:\n"
-            f"   username/email: {cred.get('username','')}\n"
-            f"   password: {cred.get('password','')}\n"
-            "Log in first, then proceed to the application."
-        )
-    else:
-        login_clause = (
-            f"{sso}\n"
-            "If neither Google sign-in nor stored credentials are available and "
-            "the site requires an account, stop and report that login is needed."
-        )
+    login_clause = (
+        f"{sso}\n"
+        "For email/password login, do NOT guess credentials: call the "
+        "`lookup_credential` tool with the site's domain or current URL (e.g. "
+        "\"ikwilhuren.nu\") and it returns the username/password to use. A single "
+        "application can span more than one site (the listing host plus a backing "
+        "portal), so look up the credential for WHATEVER login page you actually "
+        "land on, by its own domain. We hold logins for: "
+        f"{domain_list}.\n"
+        "If lookup_credential returns no match and the site requires an account, "
+        "stop and report that login is needed. NEVER reset, change, or recover a "
+        "password (no \"wachtwoord vergeten\" / \"forgot password\" flow): if a "
+        "stored password is rejected, stop and report a login failure."
+    )
     submit_clause = "Then SUBMIT the application. Confirm submission succeeded."
     return f"""You are applying to a Dutch rental listing on my behalf. Act autonomously.
 

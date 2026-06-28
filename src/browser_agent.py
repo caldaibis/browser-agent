@@ -28,7 +28,35 @@ from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from . import credentials
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Local (non-MCP) tool: look up a stored site login by domain/URL on demand, so
+# credentials never sit in the prompt and the agent can fetch whichever site it
+# actually lands on (a single application can span multiple hosts).
+CREDENTIAL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "lookup_credential",
+        "description": (
+            "Return the stored username/password for a rental site. Pass the "
+            "site's domain or current URL (e.g. 'ikwilhuren.nu'). Use this for "
+            "every email/password login instead of guessing; returns an error "
+            "string if no credential is stored for that site."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "site": {
+                    "type": "string",
+                    "description": "Domain or full URL of the login page, e.g. 'ikwilhuren.nu'.",
+                },
+            },
+            "required": ["site"],
+        },
+    },
+}
 
 # Playwright MCP tools we never want the model to use (raw JS = token bleed).
 BLOCKED_TOOLS = {"browser_evaluate", "browser_run_code_unsafe"}
@@ -120,7 +148,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
         async with ClientSession(read, write) as session:
             await session.initialize()
             mcp_tools = (await session.list_tools()).tools
-            tools = _to_openai_tools(mcp_tools)
+            tools = _to_openai_tools(mcp_tools) + [CREDENTIAL_TOOL]
             log.line(f"[agent] model={model} tools={len(tools)} cdp={cdp_url}")
 
             messages: list[dict] = [{"role": "user", "content": prompt}]
@@ -193,6 +221,27 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         args = {}
                     short = {k: (str(v)[:60]) for k, v in args.items()}
                     log.line(f"[agent] turn {turn} call {name} {short}")
+                    if name == "lookup_credential":
+                        # Handled locally; the password is returned to the model
+                        # but never written to the transcript.
+                        site = str(args.get("site", ""))
+                        cred = credentials.lookup(site)
+                        if cred:
+                            text = (
+                                f"username/email: {cred.get('username','')}\n"
+                                f"password: {cred.get('password','')}"
+                            )
+                            log.line(f"[agent]   -> credential found for {site!r} (redacted)")
+                        else:
+                            text = (
+                                f"No stored credential for {site!r}. Stored sites: "
+                                f"{', '.join(credentials.available_domains()) or '(none)'}."
+                            )
+                            log.line(f"[agent]   -> no credential for {site!r}")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": text,
+                        })
+                        continue
                     try:
                         result = await session.call_tool(name, args)
                         text = _result_text(result)
