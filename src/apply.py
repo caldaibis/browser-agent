@@ -119,7 +119,9 @@ YOUR TASK
    keep both Dutch and English sections, replace [[ADDRESS]] with the current
    property address when known, and make small listing-specific adjustments so
    it does not read like a rigid template. Do not paste the reference verbatim.
-   Do not invent new personal details. Put the full message in the main
+   Do not invent new personal details. NEVER use em dashes (—) or en dashes (–)
+   anywhere in the text you write; use a comma, period, or the word "to" instead.
+   Put the full message in the main
    message/motivation field. For a separate OPTIONAL "opmerkingen"/remarks field,
    leave it blank or write one short sentence — these often have a tight
    character limit; if a field shows [invalid] after typing, it is likely too
