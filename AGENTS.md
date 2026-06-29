@@ -40,6 +40,11 @@ form, uploads docs, submits).
 - Python 3.12, managed by **uv** (`pyproject.toml` + `uv.lock`). `uv sync` to
   install; prefix commands with `uv run` (no manual venv activate).
 - Run modules as packages: `uv run python -m src.<module>`.
+- **Use the `justfile` recipes for common workflows** instead of reinventing
+  commands — run `just` (or read the `justfile`) to list them. Covers local dev
+  (`sync`, `host`, `login`, `watch`, `dashboard`, `healthcheck`, `reauth`), VPS
+  ops (`deploy`, `pull`, `shell`, `logs`, `status`, `pause`/`resume`, `credits`,
+  `vnc`), and secret push (`push-creds`, `push-token`, `push-env`).
 - Local dev: WSL2 + WSLg (DISPLAY=:0) for headed Chromium. VPS: Xvfb (DISPLAY
   =:99). No system Chrome — use bundled Chromium. Docs live in `documents/`.
 - `state/` (profile, creds, tokens) and `logs/` are gitignored — never commit.
@@ -62,6 +67,23 @@ form, uploads docs, submits).
 - **Model:** `z-ai/glm-5.2` works well *in our own loop*. Its earlier
   empty/reasoning-only stalls were a **Hermes**-loop artifact, not the model.
   `gemini-3.5-flash` falls into degenerate loops (e.g. ArrowDown ×30) — avoid.
+- **Reasoning truncation = silent stall.** glm-5.2 is a reasoning model and emits
+  hidden reasoning tokens (counted against the completion budget) before any
+  content/tool_call. Over a big page snapshot that reasoning can exhaust the
+  completion cap mid-thought, so the API returns `finish_reason="length"` with
+  empty content AND no tool_calls. The loop reads that as "the model stopped",
+  burns its 2 nudges, and bails after a few seconds with no real attempt. This
+  sank kamernet submission #25 (29-06-2026). Fixes in `browser_agent.py`:
+  (1) reasoning is **disabled by default** via `extra_body={"reasoning":{"enabled":
+  False}}` — form-filling needs no heavy reasoning, and glm IGNORES fine-grained
+  reasoning caps (`max_tokens`/`effort` barely move it) but honours `enabled:False`
+  → 0 reasoning tokens, still correct. Re-enable with `APPLY_REASONING_EFFORT`.
+  (2) explicit `max_tokens` headroom; (3) truncated-empty turns (`finish_reason=
+  length`) are retried, not counted as a conclusion; (4) per-turn log of
+  `finish_reason` + `completion/reasoning_tokens`. NB: the reasoning *text* stays
+  hidden — only the token *count* is exposed (`usage.completion_tokens_details`).
+  Also: the transcript's tool-arg log no longer clamps urls/refs to 60 chars (that
+  clamp made a full URL look truncated and masked the real cause).
 - **Use the Playwright MCP high-level tools** (snapshot→ref→click/fill_form);
   the raw-JS path (`browser_cdp`/`browser_evaluate`) caused 50+ calls + full-page
   dumps for one task. They stay filtered out.

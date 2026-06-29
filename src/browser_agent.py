@@ -32,6 +32,23 @@ from . import credentials
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Reasoning control. glm-5.2 is a reasoning model and, left alone, burns hundreds
+# of hidden reasoning tokens before emitting content/tool_calls — over a large
+# page snapshot that can run long enough to hit the completion cap mid-reasoning
+# (finish_reason="length", empty content, no tool_calls) and look like a stall.
+# Filling a rental form is not rocket science, so we DISABLE reasoning by default.
+# Empirically glm ignores fine-grained reasoning caps (max_tokens/effort barely
+# move it) but honours {"enabled": False} → 0 reasoning tokens, and still answers
+# correctly. Override via APPLY_REASONING_EFFORT = off | minimal | low | medium |
+# high (anything but "off" re-enables reasoning at that effort).
+REASONING_EFFORT = os.environ.get("APPLY_REASONING_EFFORT", "off").lower()
+REASONING = ({"enabled": False} if REASONING_EFFORT in ("off", "none", "false", "0")
+             else {"effort": REASONING_EFFORT})
+
+# Completion cap per turn. With reasoning off the visible output (a tool call or a
+# short status) is small, so this is just generous headroom against truncation.
+MAX_TOKENS = int(os.environ.get("APPLY_MAX_TOKENS", "8000"))
+
 # Local (non-MCP) tool: look up a stored site login by domain/URL on demand, so
 # credentials never sit in the prompt and the agent can fetch whichever site it
 # actually lands on (a single application can span multiple hosts).
@@ -153,14 +170,50 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 
             messages: list[dict] = [{"role": "user", "content": prompt}]
             nudges_left = 2  # if the model stops early without finishing, prod it
+            trunc_retries_left = 4  # tolerate transient truncated/empty completions
             last_sig = None  # detect degenerate repeated-action loops
             repeats = 0
             for turn in range(1, max_turns + 1):
                 resp = await client.chat.completions.create(
                     model=model, messages=messages, tools=tools, tool_choice="auto",
+                    max_tokens=MAX_TOKENS, extra_body={"reasoning": REASONING},
                 )
-                msg = resp.choices[0].message
+                choice = resp.choices[0]
+                msg = choice.message
                 tool_calls = msg.tool_calls or []
+                finish_reason = choice.finish_reason
+
+                # Reasoning *text* is hidden, but the *count* is reported. Log it
+                # so we can tell "thought too much" (high reasoning_tokens, near the
+                # cap) from "cap too low" (finish_reason=length at modest counts).
+                usage = getattr(resp, "usage", None)
+                ctd = getattr(usage, "completion_tokens_details", None)
+                reasoning_tok = getattr(ctd, "reasoning_tokens", None)
+                completion_tok = getattr(usage, "completion_tokens", None)
+                log.line(f"[agent] turn {turn} finish={finish_reason} "
+                         f"completion_tokens={completion_tok} "
+                         f"reasoning_tokens={reasoning_tok} (cap={MAX_TOKENS})")
+
+                # A turn cut off mid-reasoning comes back as finish_reason="length"
+                # with empty content and no tool_calls. That is a truncation glitch,
+                # not the model concluding — retry (don't spend a nudge / declare
+                # done) so a long reasoning burst doesn't sink the whole run.
+                if not tool_calls and not (msg.content or "").strip() \
+                        and finish_reason == "length" and trunc_retries_left > 0:
+                    trunc_retries_left -= 1
+                    log.line(f"[agent] turn {turn} truncated (finish_reason=length, "
+                             f"empty); retrying ({trunc_retries_left} left)")
+                    # The empty assistant turn was never appended (we continue
+                    # before recording it), so just add a prod and retry.
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous turn was cut off before you produced an "
+                            "answer. Keep reasoning brief and emit your next tool "
+                            "call (or final answer) now."
+                        ),
+                    })
+                    continue
 
                 # Record the assistant turn (text + any tool calls).
                 assistant_entry: dict = {"role": "assistant", "content": msg.content or ""}
@@ -188,7 +241,8 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     if looks_unfinished and nudges_left > 0:
                         nudges_left -= 1
                         log.line(f"[agent] nudge (model stopped without a clear "
-                                 f"conclusion; {nudges_left} left)")
+                                 f"conclusion, finish_reason={finish_reason}; "
+                                 f"{nudges_left} left)")
                         messages.append({
                             "role": "user",
                             "content": (
@@ -219,7 +273,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         args = json.loads(tc.function.arguments or "{}")
                     except json.JSONDecodeError:
                         args = {}
-                    short = {k: (str(v)[:60]) for k, v in args.items()}
+                    # Keep urls/refs intact; only clamp obviously long free text so
+                    # the log doesn't mislead (a 60-char clamp made full URLs look
+                    # truncated, masking real failures during debugging).
+                    short = {k: (v if k in ("url", "ref", "element")
+                                 else str(v)[:200]) for k, v in args.items()}
                     log.line(f"[agent] turn {turn} call {name} {short}")
                     if name == "lookup_credential":
                         # Handled locally; the password is returned to the model
