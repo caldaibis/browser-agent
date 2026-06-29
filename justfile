@@ -15,6 +15,31 @@ default:
 sync:
     uv sync
 
+# offline sanity: byte-compile + import smoke + render the apply prompt (CI runs this)
+check:
+    uv run python -m compileall -q src
+    uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
+
+# preflight: verify everything needed to run the agent locally is in place.
+doctor:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    [ -f state/agent.env ] && set -a && . state/agent.env && set +a
+    rc=0
+    chk(){ if eval "$2" >/dev/null 2>&1; then printf "  ok    %s\n" "$1"; else printf "  FAIL  %s\n" "$1"; rc=1; fi; }
+    echo "preflight:"
+    chk "uv installed"                 "command -v uv"
+    chk "node/npx present (MCP)"       "command -v npx"
+    chk "OPENROUTER_API_KEY set"       '[ -n "${OPENROUTER_API_KEY:-}" ]'
+    chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
+    chk "CDP browser reachable :9222"  "curl -sf http://127.0.0.1:9222/json/version"
+    [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (start the host with 'just host')"
+    exit $rc
+
+# print the exact apply prompt for a saved listing JSON, without running anything.
+dry-prompt path="logs/last_listing.json":
+    uv run python -c "import json; from src.apply import build_prompt; print(build_prompt(json.load(open('{{path}}'))))"
+
 # run the dashboard locally at http://127.0.0.1:8000
 dashboard:
     uv run uvicorn src.dashboard.app:app --host 127.0.0.1 --port 8000 --reload

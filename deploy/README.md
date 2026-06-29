@@ -70,6 +70,19 @@ just credits       # remaining OpenRouter $ + Stekkies login (runs healthcheck)
 just restart browser-host         # reattach a clean browser if a session goes stale
 ```
 
+## CI / CD (GitHub Actions)
+- **CI** (`.github/workflows/ci.yml`) runs on every push/PR: `just check`
+  (byte-compile + import smoke + render the apply prompt). No browser/secrets.
+- **CD** (`.github/workflows/deploy.yml`) auto-deploys on push to `main` *after*
+  CI passes — same steps as `just deploy` (ff pull → `uv sync` → restart
+  orchestrator + dashboard). One-time setup:
+  1. Add a repo **secret** `VPS_SSH_KEY` = a private key whose public half is in
+     the VPS `root` user's `~/.ssh/authorized_keys` (your existing
+     `~/.ssh/id_ed25519` works; a dedicated deploy key is cleaner).
+  2. The host IP is hardcoded in `deploy.yml` (matches the `justfile`); change
+     both if the VPS moves.
+  - `just deploy` from your laptop still works as the manual fallback.
+
 ## Notes
 - The agent applies and **submits** autonomously — there is no dry-run guard.
 - `browser-host` keeps the CDP browser on `:9222`; the extractor and apply agent

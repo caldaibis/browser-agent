@@ -1,0 +1,40 @@
+name: deploy
+
+# Auto-deploy to the VPS after CI passes on main. Runs the same steps as
+# `just deploy`: fast-forward pull, uv sync, restart orchestrator + dashboard.
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+
+# Never let two deploys overlap.
+concurrency:
+  group: vps-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Only deploy when the CI run that triggered this actually succeeded.
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: your-server-ip
+          REMOTE: /home/deploy/browser-agent
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::Missing VPS_SSH_KEY secret — see deploy/README.md (Auto-deploy)"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key "root@${VPS_HOST}" "\
+            sudo -u deploy git -C ${REMOTE} pull --ff-only && \
+            sudo -u deploy bash -lc 'cd ${REMOTE} && uv sync' && \
+            systemctl restart orchestrator dashboard && \
+            echo deployed"

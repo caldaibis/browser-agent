@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Offline checks (compile + imports + prompt render)
+        run: just check
