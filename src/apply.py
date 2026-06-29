@@ -17,6 +17,7 @@ from pathlib import Path
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
 from .credentials import available_domains
 from .message_template import REFERENCE_APPLICATION_MESSAGE
+from .applicant_profile import PROFILE, INCOME_TOLERANCE
 from .browser_agent import run_agent, AgentResult
 
 # Model for the apply agent. Default: z-ai/glm-5.2 — strong tool-use/agentic
@@ -111,10 +112,40 @@ LISTING (external source: {listing.get('source_name','?')})
 LOGIN
 {login_clause}
 
+APPLICANT PROFILE (use this to judge eligibility — these are hard facts):
+{PROFILE.to_prompt_block()}
+
+ELIGIBILITY GATE — CHECK BEFORE YOU APPLY (this is mandatory):
+After opening the listing, READ the full property description and any
+requirements/conditions section BEFORE filling anything. Dutch listings state
+criteria under wording like "inkomenseis", "bruto (maand)inkomen minimaal",
+"X keer de (kale) huur", "voorwaarden", "doelgroep", "inschrijfvoorwaarden".
+Look specifically for:
+  - A minimum gross monthly income (bruto maandinkomen) or an income-to-rent
+    multiple (e.g. "4x de kale huur"). Compute the required income from the
+    multiple and the rent if only the multiple is given.
+  - Exclusion of students or woningdelers/room-sharers ("studenten en
+    woningdelers behoren niet tot onze doelgroep").
+  - Any other hard gate (max household size, required employment type, etc.).
+Compare each stated HARD requirement against the APPLICANT PROFILE above.
+  - INCOME: the applicant's gross monthly income is EUR {PROFILE.gross_monthly_income:,.2f}.
+    If a required minimum is stated and the applicant's income is below it by
+    MORE than {INCOME_TOLERANCE:.0%}, the applicant does NOT qualify. (Within
+    {INCOME_TOLERANCE:.0%} of the minimum is acceptable — proceed.) Do the
+    arithmetic explicitly before deciding.
+  - If the listing excludes students/woningdelers, the applicant is neither, so
+    that exclusion does NOT block this application.
+If ANY hard requirement is clearly NOT met, DO NOT fill or submit anything:
+STOP immediately and report `OUTCOME: not_eligible`, stating the requirement,
+the applicant's value, and the gap. Only proceed to fill the form when the
+applicant plausibly meets every stated hard requirement. If no requirements are
+stated, proceed normally.
+
 YOUR TASK
 1. Open the URL above in the browser.
-2. Find the apply / "reageer" / contact / application form for this property.
-3. Fill the application form using the applicant details contained in the
+2. Run the ELIGIBILITY GATE above. If not eligible, stop now (do not apply).
+3. Find the apply / "reageer" / contact / application form for this property.
+4. Fill the application form using the applicant details contained in the
    reference message below. For any message/motivation field, write a warm,
    natural application message inspired by the reference. Keep the same facts,
    keep both Dutch and English sections, replace [[ADDRESS]] with the current
@@ -127,7 +158,7 @@ YOUR TASK
    leave it blank or write one short sentence — these often have a tight
    character limit; if a field shows [invalid] after typing, it is likely too
    long, so shorten drastically rather than retrying the same length.
-4. Upload documents BEFORE the final submit, into whatever attachment slots the
+5. Upload documents BEFORE the final submit, into whatever attachment slots the
    form provides. Match a document to a labelled slot when the label names it
    (use the "why it matters" note to pick the right one); otherwise put it in a
    generic/extra slot. If a slot accepts multiple files, add several at once.
@@ -135,8 +166,8 @@ YOUR TASK
    the same file. The list below is ALREADY in priority order, so attach from the
    top down and stop when slots run out. Each line is "<path> — why it matters":
 {_doc_list()}
-5. {submit_clause}
-6. After you see a submission/confirmation message, you are DONE: report success
+6. {submit_clause}
+7. After you see a submission/confirmation message, you are DONE: report success
    in one short line and STOP. NEVER re-open ("Aanvraag wijzigen"/edit), modify,
    or resubmit an application you have already submitted, even to add documents.
    Report: did it submit, any errors, and what fields you could not fill.
