@@ -21,14 +21,15 @@ form, uploads docs, submits).
   (override via `APPLY_MODEL`); gemini-3.5-flash was too flaky.
 - `src/message_template.py` — reference application message; the agent customizes
   it per listing instead of pasting verbatim.
-- `documents/` — application PDFs/JPG, version-controlled so the VPS gets them
-  via git. `DOCS_DIR` (config) points here; override with the env var.
+- `documents/` — your application PDFs/JPG. **Gitignored** (never committed —
+  they hold personal data); place your own files here and copy them to the VPS
+  out of band. `DOCS_DIR` (config) points here; override with the env var.
 - `src/credentials.py` / `import_passwords.py` — per-site logins by domain.
 - `src/gmail_watch.py` — poll inbox (5s), extract Stekkies link.
 - `src/orchestrator.py` — ties it together (`--once URL` or live watch); logs the
   true `outcome` (submitted / already_applied / not_available / …) and only marks
   a listing processed when the outcome is terminal.
-- `src/notify.py` — emails you@example.com after each handled listing
+- `src/notify.py` — emails `NOTIFY_TO` after each handled listing
   (outcome + redacted summary) via Gmail `send` scope.
 - `src/healthcheck.py` (+ systemd timer, 30 min) — emails when OpenRouter credit
   is low or the Stekkies session has expired. `remaining_credit()` shared here.

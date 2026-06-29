@@ -1,10 +1,17 @@
-"""Reference message used by the apply agent for rental applications."""
+"""Reference message used by the apply agent for rental applications.
+
+This is an EXAMPLE template — replace the placeholder personal details (name,
+phone, email, and the facts in the body) with your own before running. The
+agent paraphrases this per listing rather than pasting it verbatim, and fills
+``[[ADDRESS]]`` with the listing address. Keep it consistent with
+``applicant_profile.py``.
+"""
 
 REFERENCE_APPLICATION_MESSAGE = """Beste,
 
 Graag kom ik in aanmerking voor de huurwoning aan de [[ADDRESS]]. De woning sprak mij direct aan en past goed bij mijn situatie vanwege de locatie, huurprijs en indeling. Ik zoek een nette, zelfstandige woning voor mijzelf, zonder partner of huisgenoten, waar ik voor langere tijd prettig kan wonen.
 
-Ik ben een 29-jarige Nederlandse man en ben afgestudeerd aan de my university. Op dit moment werk ik in loondienst en heb ik een vast contract als Data Scientist bij het my employer. Mijn bruto maandinkomen is €4.000,00, ik heb dus een stabiel inkomen en mijn huurdossier is compleet. Ik rook niet en heb geen huisdieren.
+Ik ben een 30-jarige Nederlandse en werk op dit moment in loondienst met een vast contract. Ik heb een stabiel inkomen en mijn huurdossier is compleet. Ik rook niet en heb geen huisdieren.
 
 Ik kan op korte termijn bezichtigen en bij een passende match snel beslissen. Mijn documenten, waaronder ID met BSN afgeschermd, werkgeversverklaring, recente loonstroken, bewijs van salarisstorting en verhuurdersverklaring, kan ik direct aanleveren.
 
@@ -23,7 +30,7 @@ Dear,
 
 I would like to apply for the rental property at [[ADDRESS]]. The property immediately caught my attention and seems to fit my situation well in terms of location, rent and layout. I am looking for a neat, independent home for myself, without a partner or housemates, where I can live comfortably for the longer term.
 
-I am a 29-year-old Dutch man and graduated from my university. I am currently employed on a permanent contract as a Data Scientist at the my employer. My gross monthly income is €4,000.00, so I have a stable income and my rental file is complete. I do not smoke and I do not have pets.
+I am 30 years old and currently employed on a permanent contract. I have a stable income and my rental file is complete. I do not smoke and I do not have pets.
 
 I am available for a viewing on short notice and can decide quickly if there is a good match. I can immediately provide my documents, including ID with BSN shielded, employer statement, recent payslips, proof of salary payment and a landlord reference.
 

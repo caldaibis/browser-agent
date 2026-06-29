@@ -1,6 +1,6 @@
 # Caddy reverse proxy for the dashboard: automatic HTTPS + Basic Auth.
 # Render to /etc/caddy/Caddyfile, substituting:
-#   __DOMAIN__       e.g. your-agent.example.org
+#   __DOMAIN__       e.g. your-agent.duckdns.org
 #   __USER__         dashboard username
 #   __HASH__         bcrypt hash from:  caddy hash-password --plaintext '<password>'
 # Then: systemctl reload caddy

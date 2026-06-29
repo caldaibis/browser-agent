@@ -51,8 +51,8 @@ uv run python -m src.browser_host --login   # opens Google, Stekkies, rental sit
 # 2. Import rental-site passwords (optional, for non-SSO sites):
 uv run python -m src.import_passwords passwords.csv   # then delete the CSV
 
-# 3. Gmail access: create a Desktop OAuth client in Google Cloud project
-#    your-gcp-project, download JSON to state/gmail_client_secret.json
+# 3. Gmail access: create a Desktop OAuth client in your own Google Cloud
+#    project, download JSON to state/gmail_client_secret.json
 #    First run authorizes in the browser and caches state/gmail_token.json.
 ```
 

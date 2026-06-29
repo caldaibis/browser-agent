@@ -3,9 +3,9 @@ Stekkies listing URL found inside.
 
 Auth: OAuth desktop flow. Put your OAuth client file at
   state/gmail_client_secret.json   (Google Cloud Console > APIs & Services >
-  Credentials > OAuth client ID > Desktop app, in project
-  your-gcp-project). First run opens a browser to authorize; the
-  token is cached in state/gmail_token.json.
+  Credentials > OAuth client ID > Desktop app, in your own Google Cloud
+  project). First run opens a browser to authorize; the token is cached in
+  state/gmail_token.json.
 
 Detection: low-latency polling (default 5s) of unread Stekkies mails. This is
 simple and robust on a local/WSL machine. (Gmail push via Pub/Sub is lower

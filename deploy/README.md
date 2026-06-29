@@ -7,7 +7,9 @@ dashboard (HTTPS + Basic Auth). No Hermes — the agent is `src/browser_agent.py
 
 Box: **Hetzner Cloud CX23** (2 vCPU / 4 GB, EU region — an EU IP reduces
 Google/rental-site bot-flagging and is low-latency to the NL sites).
-Current server: `stekkies` @ `your-server-ip` (nbg1), app user `deploy`.
+Example server: `stekkies` @ `<your-server-ip>` (nbg1), app user `deploy`.
+The `justfile` reads `VPS_HOST`, `VPS_SSH_KEY_PATH`, `VPS_REMOTE_DIR` and
+`DASHBOARD_DOMAIN` from your environment — set them to your own values.
 
 ## 1. Create the server
 ```bash
@@ -33,10 +35,12 @@ Installs uv + Chromium + Xvfb + VNC + **Node/npx** (for the Playwright MCP) +
 Caddyfile, run with `DASHBOARD_DOMAIN`, `DASHBOARD_USER`, `DASHBOARD_HASH` set
 (`DASHBOARD_HASH=$(caddy hash-password --plaintext '<pw>')`).
 
-## 4. Upload secrets (gitignored — from your laptop)
+## 4. Upload secrets + documents (gitignored — from your laptop)
 ```bash
 scp state/gmail_client_secret.json state/gmail_token.json \
     state/sources_credentials.json deploy@SERVER:/home/deploy/browser-agent/state/
+# Application documents are NOT in git (personal data) — copy them out of band:
+scp documents/* deploy@SERVER:/home/deploy/browser-agent/documents/
 # OpenRouter key (the apply agent reads it):
 printf 'OPENROUTER_API_KEY=sk-or-...\n' | ssh deploy@SERVER \
     'cat > /home/deploy/browser-agent/state/agent.env'
@@ -79,8 +83,8 @@ just restart browser-host         # reattach a clean browser if a session goes s
   1. Add a repo **secret** `VPS_SSH_KEY` = a private key whose public half is in
      the VPS `root` user's `~/.ssh/authorized_keys` (your existing
      `~/.ssh/id_ed25519` works; a dedicated deploy key is cleaner).
-  2. The host IP is hardcoded in `deploy.yml` (matches the `justfile`); change
-     both if the VPS moves.
+  2. Add a repo **secret** `VPS_HOST` = the VPS IP/host (used by `deploy.yml`);
+     set the matching `VPS_HOST` env var locally for the `justfile`.
   - `just deploy` from your laptop still works as the manual fallback.
 
 ## Notes

@@ -1,10 +1,11 @@
 # Stekkies agent — task runner.  Run `just` to list commands.
 
+# VPS connection details — override via env (e.g. export VPS_HOST=root@1.2.3.4).
 home    := env_var('HOME')
-key     := home / ".ssh/id_ed25519"
-vps     := "root@your-server-ip"
-remote  := "/home/deploy/browser-agent"
-domain  := "your-agent.example.org"
+key     := env_var_or_default('VPS_SSH_KEY_PATH', home / ".ssh/id_ed25519")
+vps     := env_var_or_default('VPS_HOST', "root@your-server-ip")
+remote  := env_var_or_default('VPS_REMOTE_DIR', "/home/deploy/browser-agent")
+domain  := env_var_or_default('DASHBOARD_DOMAIN', "your-agent.example.org")
 ssh     := "ssh -o BatchMode=yes -i " + key + " " + vps
 
 default:
@@ -162,4 +163,4 @@ push-env:
 # ------------------------------------------------------------------ dashboard ---
 # print the dashboard URL
 open:
-    @echo "https://{{domain}}  (login: caldaibis)"
+    @echo "https://{{domain}}  (Basic Auth — your dashboard user)"

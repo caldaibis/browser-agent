@@ -4,3 +4,12 @@ logs/
 __pycache__/
 *.pyc
 .playwright-mcp/
+
+# Personal application documents — never commit (keep only the README).
+documents/*
+!documents/README.md
+
+# Local env / secrets
+.env
+*.env
+passwords.csv

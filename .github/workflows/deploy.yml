@@ -22,11 +22,11 @@ jobs:
       - name: Deploy over SSH
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_HOST: your-server-ip
+          VPS_HOST: ${{ secrets.VPS_HOST }}
           REMOTE: /home/deploy/browser-agent
         run: |
-          if [ -z "$SSH_KEY" ]; then
-            echo "::error::Missing VPS_SSH_KEY secret — see deploy/README.md (Auto-deploy)"
+          if [ -z "$SSH_KEY" ] || [ -z "$VPS_HOST" ]; then
+            echo "::error::Missing VPS_SSH_KEY or VPS_HOST secret — see deploy/README.md (Auto-deploy)"
             exit 1
           fi
           mkdir -p ~/.ssh
