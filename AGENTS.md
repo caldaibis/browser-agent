@@ -112,5 +112,6 @@ form, uploads docs, submits).
   quoted-printable (must QP-decode before regex).
 - **Documents** are uploaded in a fixed priority order with a one-line purpose
   each (see `_classify` in `apply.py`): ID → werkgeversverklaring → recent
-  payslips → landlord ref → profile → UWV → jaaropgave → bank → degiro. Keep
+  payslips → landlord ref → profile → motivatiebrief → UWV → jaaropgave →
+  bank → degiro. Keep
   the expired arbeidsovereenkomst OUT; keep the bank statement trimmed.

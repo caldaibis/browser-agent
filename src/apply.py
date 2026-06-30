@@ -47,14 +47,16 @@ def _classify(name: str) -> tuple[int, str]:
         return 4, "Landlord reference — long stable tenancy, no arrears or nuisance; strong positive."
     if "huurdersprofiel" in n:
         return 5, "Tenant profile / cover sheet — summarises the whole dossier; good for a general/cover slot."
+    if "motivatiebrief" in n or "motivation" in n:
+        return 6, "Motivation letter — personal cover letter explaining why you want this home; attach for any motivation/cover-letter slot or general attachment."
     if "uwv" in n or "verzekeringsbericht" in n:
-        return 6, "UWV statement — independently confirms the permanent contract and work history."
+        return 7, "UWV statement — independently confirms the permanent contract and work history."
     if "jaaropgave" in n and "degiro" not in n:
-        return 7, "Annual income statement — secondary income proof."
+        return 8, "Annual income statement — secondary income proof."
     if "bankafschrift" in n or "bankstatement" in n:
-        return 8, "Proof of salary deposit (and rent paid) — privacy-light extract."
+        return 9, "Proof of salary deposit (and rent paid) — privacy-light extract."
     if "degiro" in n:
-        return 9, "Investment statement — extra asset proof, only for strict income-multiple cases."
+        return 10, "Investment statement — extra asset proof, only for strict income-multiple cases."
     return 50, "Additional supporting document."
 
 
