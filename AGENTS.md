@@ -58,6 +58,19 @@ form, uploads docs, submits).
   `--disable-blink-features=AutomationControlled` + no `--enable-automation`.
 - The agent needs `OPENROUTER_API_KEY` (env; on the VPS via `state/agent.env`,
   loaded by the orchestrator systemd unit). Watch for HTTP 402 (credits).
+- **VPS runtime config = `state/agent.env`**, not `.env`. Both `orchestrator`
+  and `dashboard` systemd units read it via `EnvironmentFile=`. Besides
+  `OPENROUTER_API_KEY` it carries `GOOGLE_ACCOUNT`, `NOTIFY_TO`, and the
+  `APPLICANT_*` profile vars. systemd parses `KEY=VALUE` with spaces/parens
+  fine (e.g. an `APPLICANT_EMPLOYMENT` with commas), but bash `source` chokes on
+  those — verify what a service actually sees via
+  `/proc/$(systemctl show -p MainPID --value orchestrator)/environ`, not by
+  sourcing the file.
+- **Back up `documents/` before any `git reset --hard`/pull on the VPS.** The
+  PDFs are gitignored now, but an older checkout may still have them *tracked*;
+  a hard reset to a tree where they're absent deletes them. Always
+  `tar czf <backup> documents state` first, reset, then `tar xzf <backup>
+  documents`. Run git as the deploy user (the repo is deploy-owned).
 - Node/npx is required at runtime for the Playwright MCP.
 - Stekkies only notifies; the real application is on the external source site,
   which varies per listing — hence the LLM agent for the last mile.

@@ -1,5 +1,8 @@
 # Stekkies agent — task runner.  Run `just` to list commands.
 
+# Auto-load .env (gitignored) so local secrets like VPS_HOST feed the recipes.
+set dotenv-load := true
+
 # VPS connection details — override via env (e.g. export VPS_HOST=root@1.2.3.4).
 home    := env_var('HOME')
 key     := env_var_or_default('VPS_SSH_KEY_PATH', home / ".ssh/id_ed25519")
