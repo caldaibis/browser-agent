@@ -85,8 +85,9 @@ REGISTRY: list[SiteConfig] = [
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht"),
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/amsterdam"),
     _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", needs_login=True),
-    _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/",
-           needs_login=True),
+    _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/WoningOverzicht",
+           needs_login=True,
+           parse=make_anchor_parser(r"HuisDetails\?PublicatieId=\d+")),  # VALIDATED (logged in)
     _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-utrecht",
            needs_login=True, cadence_s=120),
     # JS-SPAs whose listing list is drawn client-side from an API and which
@@ -113,7 +114,8 @@ REGISTRY: list[SiteConfig] = [
     _tier3("hurenindemix.nl", "https://www.hurenindemix.nl/aanbod/"),
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
-    _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/"),
+    _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",
+           parse=make_anchor_parser(r"/woning/[0-9a-f]{16,}")),   # VALIDATED: 94, no login
     _tier3("eye-move.nl", "https://www.eye-move.nl/woningaanbod/"),
     _tier3("stienstra.nl", "https://www.stienstra.nl/ik-zoek-een-woning"),
     # nmgwonen.mijnklantdossier.nl -> redirects to nmgwonen.nl (same aanbod);

@@ -1,7 +1,7 @@
 # Implementation Plan — Active Listing Poller
 
-Status: **plumbing complete; 12 of 26 sites live**, 2026-07-01. Code in
-`src/poller/`. See "Outcome" below for exactly what works and what is left.
+Status: **plumbing complete; 14 of 26 sites live and verified**, 2026-07-01. Code
+in `src/poller/`. See "Outcome" below for exactly what works and what is left.
 
 Author: derived from a grilling session, 2026-07-01.
 
@@ -12,22 +12,39 @@ Build-order items 1–4 are done; item 5 is done except the VPS deploy has not
 been run. Tools: `just discover` (tier triage), `just sniff <site>` (network
 sniffer — DevTools Network tab in code), `just poll` / `poll-once`.
 
-**Working & validated (12):**
+**Working & validated (14):**
 - *tier-2, plain httpx, always-on (7):* huurportaal, huurexpert, livresidential,
   ikwilhuren, vgwgroup, nmgwonen, deruitermakelaarshuis.
-- *tier-3, real browser host, validated live (5):* huurwoningen (30), funda (14),
-  vesteda (127), plaza (32), your-house (12). Gated off by default; enable with
-  `POLL_ENABLE_TIER3=1`.
+- *tier-3, real browser host, validated live (7):* huurwoningen (30), funda (14),
+  vesteda (127), plaza (32), your-house (12), woonruimte-utrecht (94, no login),
+  woningnetregioutrecht (logged in; `/HuisDetails?PublicatieId=` anchors, thin
+  social-housing stock). Gated off by default; enable with `POLL_ENABLE_TIER3=1`.
 
-**Not live yet (14 entries / ~11 sites), with reason:**
-- *Need a one-time profile login* (redirect to login wall; will render once the
-  single profile is signed in): rebowonenhuur, eye-move, hurenindemix, mijndak,
-  woningnetregioutrecht, woonruimte-utrecht, verhuurtbeter, stienstra.
-- *Deep anti-bot — challenge even to the real browser:* pararius, mijndak.
-- *JS-onclick cards, no anchors (need a DOM click-through or their API):*
-  kamernet, househunting.
+**Not live (verified individually, 2026-07-01 — logged in where creds existed):**
+- *rebowonenhuur.nl* — stored credentials REJECTED ("ongeldig"). Needs a valid
+  login before it can be watched.
+- *eye-move.nl* — login form requires a "Bedrijf" (Company) field that is not in
+  `sources_credentials.json`. Needs that value.
+- *hurenindemix.nl* — logged in fine, but the aanbod is a hash-route (`/aanbod/#/`)
+  JS card list with no `<a>` detail links. Needs a DOM click-through or its API.
+- *mijndak.nl* — national WoningNet-DAK portal; its Utrecht stock is served by
+  `utrecht.mijndak.nl` (= woningnetregioutrecht, already live), so redundant.
+- *pararius.nl* — `/inloggen` has no standard form (JS/modal) and listing pages
+  serve a challenge even to the real browser. Deepest anti-bot; hardest.
+- *verhuurtbeter.nl* — renders almost no listings (embedded widget / negligible
+  stock); no detail anchors found.
+- *kamernet.nl* — no stored creds; renders past DataDome but rooms are JS-onclick
+  cards, not anchors.
+- *househunting.nl* — no stored creds; DOM shows only office pages (listings are
+  JS cards).
+- *stienstra.nl* — no stored creds; listing search lives off the main structure.
 - *Dropped:* hurenviafrits.nl (DNS dead); nmgwonen.mijnklantdossier.nl (redirects
   to nmgwonen.nl, already covered).
+
+The generic login+verify pass (over the shared browser host, using
+`sources_credentials.json`) is what produced these per-site verdicts — the
+uncracked ones are now blocked on real inputs (valid creds, a company field) or a
+per-platform DOM parser, not on guesswork.
 
 **Deviations from the original design, and why:**
 - *Tier 1 (JSON API interception) was never needed.* No target site exposed a
