@@ -60,7 +60,14 @@ CREDENTIAL_TOOL = {
             "Return the stored username/password for a rental site. Pass the "
             "site's domain or current URL (e.g. 'ikwilhuren.nu'). Use this for "
             "every email/password login instead of guessing; returns an error "
-            "string if no credential is stored for that site."
+            "string if no credential is stored for that site. Some listing "
+            "sites redirect their login to a SHARED third-party auth provider "
+            "(e.g. eye-move.nl / mijnklantdossier.nl) that also serves other, "
+            "unrelated rental sites with DIFFERENT accounts — credentials are "
+            "stored per originating listing site, not per shared provider. If "
+            "the current login page's own domain has no stored credential, "
+            "retry this tool with THIS listing's original domain (from the "
+            "'Apply at this URL' line at the top of your task) instead."
         ),
         "parameters": {
             "type": "object",

@@ -1,6 +1,6 @@
 # Implementation Plan — Active Listing Poller
 
-Status: **plumbing complete; 14 of 26 sites live and verified**, 2026-07-01. Code
+Status: **plumbing complete; 15 sites live and verified**, 2026-07-01. Code
 in `src/poller/`. See "Outcome" below for exactly what works and what is left.
 
 Author: derived from a grilling session, 2026-07-01.
@@ -12,19 +12,20 @@ Build-order items 1–4 are done; item 5 is done except the VPS deploy has not
 been run. Tools: `just discover` (tier triage), `just sniff <site>` (network
 sniffer — DevTools Network tab in code), `just poll` / `poll-once`.
 
-**Working & validated (14):**
+**Working & validated (15):**
 - *tier-2, plain httpx, always-on (7):* huurportaal, huurexpert, livresidential,
   ikwilhuren, vgwgroup, nmgwonen, deruitermakelaarshuis.
-- *tier-3, real browser host, validated live (7):* huurwoningen (30), funda (14),
+- *tier-3, real browser host, validated live (8):* huurwoningen (30), funda (14),
   vesteda (127), plaza (32), your-house (12), woonruimte-utrecht (94, no login),
   woningnetregioutrecht (logged in; `/HuisDetails?PublicatieId=` anchors, thin
-  social-housing stock). Gated off by default; enable with `POLL_ENABLE_TIER3=1`.
+  social-housing stock), vbtverhuurmakelaars (`/woningen` → `/woning/<city>-<street>`
+  anchors; national list, city-filtered downstream). Gated off by default; enable
+  with `POLL_ENABLE_TIER3=1`.
 
 **Not live (verified individually, 2026-07-01 — logged in where creds existed):**
-- *rebowonenhuur.nl* — stored credentials REJECTED ("ongeldig"). Needs a valid
-  login before it can be watched.
-- *eye-move.nl* — login form requires a "Bedrijf" (Company) field that is not in
-  `sources_credentials.json`. Needs that value.
+- *rebowonenhuur.nl* — credentials now valid (login succeeds), but the aanbod is
+  a JS card list with no `<a>` detail links even when logged in. Needs a DOM
+  click-through or its API.
 - *hurenindemix.nl* — logged in fine, but the aanbod is a hash-route (`/aanbod/#/`)
   JS card list with no `<a>` detail links. Needs a DOM click-through or its API.
 - *mijndak.nl* — national WoningNet-DAK portal; its Utrecht stock is served by
@@ -38,8 +39,10 @@ sniffer — DevTools Network tab in code), `just poll` / `poll-once`.
 - *househunting.nl* — no stored creds; DOM shows only office pages (listings are
   JS cards).
 - *stienstra.nl* — no stored creds; listing search lives off the main structure.
-- *Dropped:* hurenviafrits.nl (DNS dead); nmgwonen.mijnklantdossier.nl (redirects
-  to nmgwonen.nl, already covered).
+- *Not rental sites / redundant:* eye-move.nl (shared third-party AUTH provider,
+  not a listing site — dropped); nmgwonen.mijnklantdossier.nl (the eye-move-auth
+  application backend; its public listings are on nmgwonen.nl, already tier-2).
+- *Dropped:* hurenviafrits.nl (DNS dead).
 
 The generic login+verify pass (over the shared browser host, using
 `sources_credentials.json`) is what produced these per-site verdicts — the

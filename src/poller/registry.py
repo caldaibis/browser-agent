@@ -107,6 +107,9 @@ REGISTRY: list[SiteConfig] = [
     _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken",
            parse=make_anchor_parser(
                r"/nl/huurwoning(?:en)?-(?:utrecht|amsterdam)/[a-z0-9-]+/[a-z0-9-]+")),
+    _tier3("vbtverhuurmakelaars.nl", "https://vbtverhuurmakelaars.nl/woningen",
+           parse=make_anchor_parser(r"/woning/[a-z]+-[a-z0-9-]+")),   # VALIDATED: /woning/<city>-<street>
+
     # Not cracked: househunting shows only office pages (listings are JS cards
     # with no anchors); kamernet renders past DataDome but its room detail links
     # are JS onclick, not <a> — both need a DOM click-through or their API.
@@ -116,10 +119,12 @@ REGISTRY: list[SiteConfig] = [
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
     _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",
            parse=make_anchor_parser(r"/woning/[0-9a-f]{16,}")),   # VALIDATED: 94, no login
-    _tier3("eye-move.nl", "https://www.eye-move.nl/woningaanbod/"),
     _tier3("stienstra.nl", "https://www.stienstra.nl/ik-zoek-een-woning"),
-    # nmgwonen.mijnklantdossier.nl -> redirects to nmgwonen.nl (same aanbod);
-    #   the tenant portal (mijnnmgwoning.nl) is login-only. Covered by nmgwonen.nl.
+    # eye-move.nl is NOT a rental site — it's a shared third-party auth provider
+    #   used by nmgwonen.mijnklantdossier.nl and vbtverhuurmakelaars.nl under
+    #   SEPARATE accounts. Dropped from the registry.
+    # nmgwonen.mijnklantdossier.nl -> its public listings live on nmgwonen.nl
+    #   (tier-2, above); mijnklantdossier is the eye-move-auth application backend.
     # hurenviafrits.nl -> DNS no longer resolves (domain dead); dropped.
 ]
 
