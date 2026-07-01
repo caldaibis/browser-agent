@@ -19,13 +19,33 @@ form, uploads docs, submits).
   (`_should_nudge_snapshot_overuse` — the exact/short-cycle repeat guard
   can't catch this: the *type* of call repeats, not its arguments, since
   each snapshot follows a *different* click), and returns a structured
-  `AgentResult(rc, outcome, summary)`. Two local (non-MCP) fallback tools,
-  `dom_scan`/`click_by_text` (`src/browser_dom_tools.py`, shared with
-  self-improvement's own browser diagnostics), give the model a way past
-  HTML dialogs/overlays that lack proper ARIA roles and never get a
-  `browser_snapshot` ref — raw DOM query + click-by-visible-text instead of
-  the accessibility tree. Not arbitrary JS: each is one fixed, narrow
-  operation, unlike the still-blocked `browser_evaluate`.
+  `AgentResult(rc, outcome, summary, resolved_url)`. Four local (non-MCP)
+  fallback tools (`src/browser_dom_tools.py`, shared with self-improvement's
+  own browser diagnostics) give the model a way past HTML dialogs/overlays
+  that lack proper ARIA roles and never get a `browser_snapshot` ref:
+  `dom_scan` (raw-DOM report), `click_by_text` (click by visible text),
+  `fill_by_label` (type into a text/email/tel/textarea input by its `<label>`
+  text — there is no other way to reach a ref-less input at all, since
+  `browser_type`/`browser_fill_form` need a snapshot ref and `click_by_text`
+  only clicks), and `select_option_by_label` (operate a custom dropdown whose
+  toggle has no text of its own, so `click_by_text` can't target it — clicks
+  the nearest ancestor-with-a-button, then the option text; guards every
+  `<form>` against a premature real submit first, since option buttons on
+  real sites often default to `type="submit"`). All four are scoped to the
+  currently *open* `<dialog>` first when one exists (`dialog_scope`) — sites
+  can reuse the same field ids across several hidden dialogs on one page
+  (verified: REBO Groep's viewing-request, brochure-download, and
+  email-upsell dialogs all use `id="first_name"` etc), so an unscoped
+  `getElementById`/`get_by_label`/`get_by_text` silently resolves to a hidden
+  duplicate — a 0×0 bounding box for a fill, or a `click_by_text` timeout for
+  a click, not an error pointing at the real cause. None of this is arbitrary
+  JS: each is one fixed, narrow operation, unlike the still-blocked
+  `browser_evaluate`. `_run()` also does a cross-source duplicate check once
+  per turn: if the browser's current tab lands on a URL already recorded as
+  processed under a *different* URL than this run's input (see
+  `poller/dedup.py`'s `known_processed_urls`), it stops immediately with
+  `already_applied` instead of re-filling/resubmitting a form the site itself
+  gives no "already applied" signal for.
 - `src/apply.py` — build the prompt, run the agent, persist a per-run transcript
   to `logs/transcripts/<ts>_<source>_<address>.log`. Apply model:
   `deepseek-v4-pro` (override via `APPLY_MODEL`);
@@ -48,7 +68,13 @@ form, uploads docs, submits).
   deterministic pre-filter (price/city/surface/room), `judge.py` is the cheap-LLM
   judgment (distance-to-centre + roommates, fail-open), `dedup.py` keys on the
   canonical (tracking-stripped) source URL and cross-checks
-  `processed_listings.jsonl`, `browser_lock.py` is a cross-process flock so the
+  `processed_listings.jsonl` (both `source_url` and `resolved_url` — the
+  latter is the real external destination an apply run discovered mid-flight,
+  e.g. after in-page redirect dialogs on an aggregator page; needed because
+  the poller discovers a listing at whatever URL it found it while the
+  Stekkies flow records the final resolved URL — two different keys for the
+  same real-world listing otherwise, see `known_processed_urls()`),
+  `browser_lock.py` is a cross-process flock so the
   poller's applier and the Stekkies orchestrator never drive the shared browser
   at once (also wired into `apply.apply()`). `registry.py` lists all 26 sites;
   `discover.py` probes which tier each site currently yields. Run: `just poll`,
@@ -221,6 +247,70 @@ form, uploads docs, submits).
 - **Already-applied = STOP, never resubmit.** Detect by control wording
   ("Aanvraag wijzigen", "Reactie intrekken", "je hebt gereageerd", "Doorgaan
   met gesprek"). Pre-filled fields / saved docs alone do NOT mean already-applied.
+- **Hof van Oslo, resolved (02-07-2026):** the above dialog-blindspot fix
+  (`dom_scan`/`click_by_text`) alone wasn't enough — three more real, verified
+  bugs surfaced only once the actual REBO Groep dialog was driven end to end.
+  (1) `dom_scan`'s "current page" picked the last-*created* tab, not the one
+  the Playwright MCP actually had selected — with several tabs open (SSO
+  popups, an inschrijfportaal tab...) that's silently the wrong tab. Fixed by
+  asking the MCP's own `browser_tabs` listing (which marks the true current
+  tab with `(current)`) and passing that URL through as a hint (`current_page`
+  in `browser_dom_tools.py`). (2) an uncaught `Locator.click` timeout inside
+  `click_by_text` propagated out and killed the whole MCP session/process —
+  now caught and returned as a normal (recoverable) tool result. (3) there was
+  no way to *type* into a ref-less dialog's inputs at all — `dom_scan` can
+  read, `click_by_text` can only click. Added `fill_by_label` and
+  `select_option_by_label` (see architecture section above) — the missing
+  piece that actually let the agent complete the form. Also found: REBO
+  Groep's page has a button labelled "Inschrijven huuraanbod" that opens a
+  **paid €34,95/year email-alert subscription**, not an application for the
+  listing — a real dark pattern, verified by inspecting the dialog's DOM
+  directly (title: "Schrijf je in voor onze e-mailservice"), not assumed;
+  `apply.py`'s prompt now warns against it by name. With all of the above,
+  the same listing went from a 60-turn timeout to a 23-turn real submission.
+- **Duplicate HTML ids break scoped lookups, not just accessibility.**
+  REBO Groep reuses `id="first_name"`/`id="email"`/etc across three different
+  `<dialog>` elements on one page (viewing request, brochure download, email
+  upsell) — invalid HTML, but real. `getElementById` and Playwright's
+  `get_by_label` (which resolves a `<label for=id>` via a similar document-wide
+  lookup) both silently resolve to whichever hidden dialog comes first in DOM
+  order, not the open one: a fill sees a 0×0 bounding box and times out with no
+  hint why. `get_by_text`, by contrast, verifiably scopes correctly to a
+  Locator's own subtree. Fix: every raw-DOM tool scopes to the currently open
+  `<dialog>` first (`dialog_scope` in `browser_dom_tools.py`), and
+  `fill_by_label`/`select_option_by_label` find inputs/dropdowns by walking up
+  from a text-matched `<label>` rather than trusting `for=id` resolution.
+- **Custom dropdown options can default to `type="submit"`.** REBO Groep's
+  "Soort inkomen" options are `<button>`s with no explicit `type="button"`
+  inside a `<form>` — clicking one to just *select* it can fire a real,
+  premature form submission before the rest of the dialog is filled (verified:
+  selecting the option early showed the browser's native "Vul dit veld in"
+  validation on every other still-empty required field). `select_option_by_label`
+  now attaches a one-time capturing submit-preventing guard to every form right
+  before clicking an option.
+- **Cross-source dedup gap: the same listing, two different keys.** The
+  Stekkies-mail path records the final external `source_url` (already resolved
+  by Stekkies' own extraction); the poller records whatever URL it discovered
+  the listing at, which for an aggregator (huurwoningen.nl) is a DIFFERENT URL
+  than the real destination reached only after clicking through in-page
+  redirect dialogs. Neither recognized the other's key as the same real-world
+  listing. This is why Hof van Oslo got stuck in an endless poller retry loop
+  in the first place (see above) AND why a manual retest of the fixed agent on
+  02-07-2026 submitted a real, duplicate second application to REBO — the
+  poller-triggered run had no way to know a Stekkies-triggered run had already
+  succeeded under a different URL. Fixed two ways: (1) `apply.py`/
+  `browser_agent.py` now capture `AgentResult.resolved_url` — the actual
+  external destination an apply run reaches mid-flight — and persist it as an
+  extra dedup key in `processed_listings.jsonl` (`orchestrator.py`,
+  `poller/watcher.py`); `dedup.known_processed_urls()` reads all of
+  `source_url`/`stekkies_url`/`resolved_url` across both the poller's and the
+  orchestrator's records. (2) since an aggregator's real destination can't be
+  resolved before opening the browser (it's in-page JS, not an HTTP redirect
+  `fetch.py` could follow), `browser_agent.py`'s `_run()` also checks the
+  *current* tab's URL against that same set once per turn — the earliest point
+  a duplicate can actually be caught — and stops immediately with
+  `already_applied` instead of re-filling/resubmitting a form the target site
+  itself gives no "already applied" signal for.
 - **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
   accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
   These are real states to report, not bugs — stop early and label them.

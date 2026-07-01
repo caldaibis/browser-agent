@@ -29,6 +29,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from . import browser_dom_tools, credentials
+from .poller import dedup as poller_dedup
 
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
@@ -135,6 +136,66 @@ CLICK_BY_TEXT_TOOL = {
         },
     },
 }
+FILL_BY_LABEL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "fill_by_label",
+        "description": (
+            "FALLBACK ONLY. Type into the text/email/tel/textarea input "
+            "associated with the given <label> text, bypassing the "
+            "accessibility-tree ref system. Use this ONLY when dom_scan shows "
+            "a form field inside a dialog invisible to browser_snapshot -- "
+            "such a field has no ref, so browser_type/browser_fill_form "
+            "cannot reach it at all. Do NOT use this instead of "
+            "browser_type/browser_fill_form for anything a snapshot ref "
+            "already covers."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Visible label text of the field, e.g. 'Voornaam'.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Text to type into that field.",
+                },
+            },
+            "required": ["label", "value"],
+        },
+    },
+}
+SELECT_OPTION_BY_LABEL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "select_option_by_label",
+        "description": (
+            "FALLBACK ONLY. Operate a custom (non-<select>) dropdown inside a "
+            "dialog invisible to browser_snapshot: opens the dropdown "
+            "associated with the given label, then clicks the option matching "
+            "the given visible text. Use this ONLY for a dropdown dom_scan "
+            "shows with no ref -- e.g. one where the toggle control has no "
+            "text of its own (an icon only), so click_by_text can't target it "
+            "either. Do NOT use this for a normal <select> or any dropdown a "
+            "snapshot ref already covers -- use browser_select_option there."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Visible label text of the dropdown field, e.g. 'Soort inkomen'.",
+                },
+                "option": {
+                    "type": "string",
+                    "description": "Visible text of the option to select, e.g. 'Loondienst'.",
+                },
+            },
+            "required": ["label", "option"],
+        },
+    },
+}
 
 # Playwright MCP tools we never want the model to use (raw JS = token bleed).
 BLOCKED_TOOLS = {"browser_evaluate", "browser_run_code_unsafe"}
@@ -152,6 +213,12 @@ class AgentResult:
     outcome: str       # one of VALID_OUTCOMES, or incomplete/timeout/error/unknown
     summary: str       # the model's final one-paragraph status
     transcript_path: str = ""
+    resolved_url: str = ""  # last distinct external URL the browser actually
+    # reached, when different from the input source_url -- e.g. an
+    # aggregator listing's real destination after in-page redirect dialogs.
+    # Callers persist this as an extra dedup key (see
+    # poller.dedup.known_processed_urls) so a listing reachable via two
+    # different entry points isn't double-submitted.
 
     @property
     def applied(self) -> bool:
@@ -227,6 +294,24 @@ def _result_text(result) -> str:
     return "\n".join(parts) if parts else "(no output)"
 
 
+_CURRENT_TAB_RE = re.compile(r"^- \d+: \(current\).*\((https?://[^)]+)\)\s*$", re.MULTILINE)
+
+
+async def _current_tab_url(session: "ClientSession") -> str | None:
+    """Ask the MCP itself which tab is current (browser_tabs marks it with
+    "(current)") so dom_scan/click_by_text -- which connect over CDP on a
+    separate Playwright client and can't see the MCP's own tab pointer --
+    look at the same tab the model has been looking at, not just the
+    last-created one. See browser_dom_tools.current_page for why that
+    fallback is unreliable here."""
+    try:
+        result = await session.call_tool("browser_tabs", {"action": "list"})
+    except Exception:
+        return None
+    m = _CURRENT_TAB_RE.search(_result_text(result))
+    return m.group(1) if m else None
+
+
 def _trailing_cycle_repeats(history: list[tuple], period: int) -> int:
     """How many consecutive times the last `period` actions repeat the
     `period` actions before them. 0 if the tail isn't such a cycle.
@@ -263,11 +348,19 @@ def _should_nudge_snapshot_overuse(snapshot_calls: int, turn: int) -> bool:
     return turn >= 10 and snapshot_calls >= max(6, turn // 2)
 
 
-async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger") -> tuple[int, str]:
+async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger",
+                source_url: str = "", resolved: dict | None = None) -> tuple[int, str]:
+    """resolved, when given, is a plain dict this fills in as {"url": ...} with
+    the last distinct external destination the browser actually reached --
+    read back by run_agent() after the call so callers can persist it as an
+    extra dedup key (see poller_dedup.known_processed_urls)."""
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         log.line("[agent] ERROR: DEEPSEEK_API_KEY not set")
         return 2, "DEEPSEEK_API_KEY not set."
+
+    source_canon = poller_dedup.canonical_url(source_url) if source_url else None
+    known_urls = poller_dedup.known_processed_urls()
 
     client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=api_key)
 
@@ -275,7 +368,10 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
         async with ClientSession(read, write) as session:
             await session.initialize()
             mcp_tools = (await session.list_tools()).tools
-            tools = _to_openai_tools(mcp_tools) + [CREDENTIAL_TOOL, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL]
+            tools = _to_openai_tools(mcp_tools) + [
+                CREDENTIAL_TOOL, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL,
+                FILL_BY_LABEL_TOOL, SELECT_OPTION_BY_LABEL_TOOL,
+            ]
             log.line(f"[agent] model={model} tools={len(tools)} cdp={cdp_url}")
 
             messages: list[dict] = [{"role": "user", "content": prompt}]
@@ -455,17 +551,63 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         continue
                     if name == "dom_scan":
                         # Local fallback, not routed through the Playwright MCP:
-                        # see DOM_SCAN_TOOL for when this is appropriate.
-                        text = await browser_dom_tools.dom_scan(cdp_url)
-                        log.line(f"[agent]   -> dom_scan ({len(text)} chars)")
+                        # see DOM_SCAN_TOOL for when this is appropriate. Ask
+                        # the MCP which tab is current so we report on the
+                        # same one the model has been looking at (see
+                        # _current_tab_url). Caught broadly like the generic
+                        # MCP call below -- a CDP/connection hiccup here must
+                        # not kill the whole run.
+                        try:
+                            current_url = await _current_tab_url(session)
+                            text = await browser_dom_tools.dom_scan(cdp_url, current_url=current_url)
+                            log.line(f"[agent]   -> dom_scan ({len(text)} chars)")
+                        except Exception as e:
+                            text = f"### Tool error\n{type(e).__name__}: {e}"
+                            log.line(f"[agent]   -> dom_scan error: {e}")
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
                         })
                         continue
                     if name == "click_by_text":
                         click_text = str(args.get("text", ""))
-                        text = await browser_dom_tools.click_by_text(cdp_url, click_text)
-                        log.line(f"[agent]   -> click_by_text {click_text!r}")
+                        try:
+                            current_url = await _current_tab_url(session)
+                            text = await browser_dom_tools.click_by_text(
+                                cdp_url, click_text, current_url=current_url)
+                            log.line(f"[agent]   -> click_by_text {click_text!r}")
+                        except Exception as e:
+                            text = f"### Tool error\n{type(e).__name__}: {e}"
+                            log.line(f"[agent]   -> click_by_text error: {e}")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                        })
+                        continue
+                    if name == "fill_by_label":
+                        field_label = str(args.get("label", ""))
+                        value = str(args.get("value", ""))
+                        try:
+                            current_url = await _current_tab_url(session)
+                            text = await browser_dom_tools.fill_by_label(
+                                cdp_url, field_label, value, current_url=current_url)
+                            log.line(f"[agent]   -> fill_by_label {field_label!r}")
+                        except Exception as e:
+                            text = f"### Tool error\n{type(e).__name__}: {e}"
+                            log.line(f"[agent]   -> fill_by_label error: {e}")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                        })
+                        continue
+                    if name == "select_option_by_label":
+                        field_label = str(args.get("label", ""))
+                        option = str(args.get("option", ""))
+                        try:
+                            current_url = await _current_tab_url(session)
+                            text = await browser_dom_tools.select_option_by_label(
+                                cdp_url, field_label, option, current_url=current_url)
+                            log.line(f"[agent]   -> select_option_by_label {field_label!r} -> {option!r}")
+                        except Exception as e:
+                            text = f"### Tool error\n{type(e).__name__}: {e}"
+                            log.line(f"[agent]   -> select_option_by_label error: {e}")
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
                         })
@@ -481,6 +623,39 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     messages.append({
                         "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
                     })
+
+                # Cross-source duplicate check: once per turn, see where the
+                # browser actually is now. An aggregator listing (e.g.
+                # huurwoningen.nl) reaches its real external destination only
+                # after clicking through in-page redirect dialogs -- there is
+                # no cheap way to resolve that URL before opening the browser,
+                # so this is the earliest point a duplicate submission (same
+                # physical listing, already handled via a different entry
+                # point -- e.g. the Stekkies-mail path recording a DIFFERENT
+                # URL for the same property) can be caught. Verified missing
+                # in production: Hof van Oslo submitted once via Stekkies
+                # (recorded under rebogroep.nl) then a SECOND time from a
+                # manual retest of this exact agent via huurwoningen.nl,
+                # because nothing cross-checked the two paths' URLs against
+                # each other before this existed.
+                current_url = await _current_tab_url(session)
+                if current_url:
+                    current_canon = poller_dedup.canonical_url(current_url)
+                    if current_canon != source_canon:
+                        if resolved is not None:
+                            resolved["url"] = current_url
+                        if current_canon in known_urls:
+                            log.line(
+                                f"[agent] DUPLICATE: current destination {current_url!r} "
+                                "already has a recorded submission from a different "
+                                "source/entry point -- stopping without resubmitting."
+                            )
+                            return 0, (
+                                f"This listing's actual destination ({current_url}) already "
+                                "has a recorded submission reached via a different source/"
+                                "entry point for the same property. Not resubmitting.\n"
+                                "OUTCOME: already_applied"
+                            )
 
                 # After answering the tool calls, prod the model if it's looping.
                 if repeats >= 2 and not repeat_nudged:
@@ -540,13 +715,16 @@ class Logger:
 
 
 def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: Path,
-              timeout_seconds: int = 900) -> AgentResult:
+              timeout_seconds: int = 900, source_url: str = "") -> AgentResult:
     log = Logger(log_path)
+    resolved: dict = {}
 
     async def _with_timeout() -> tuple[int, str]:
         try:
             return await asyncio.wait_for(
-                _run(prompt, model, max_turns, cdp_url, log), timeout=timeout_seconds)
+                _run(prompt, model, max_turns, cdp_url, log, source_url=source_url,
+                     resolved=resolved),
+                timeout=timeout_seconds)
         except asyncio.TimeoutError:
             log.line(f"[agent] TIMEOUT after {timeout_seconds}s")
             return 124, "Timed out before reaching a conclusion."
@@ -560,4 +738,5 @@ def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: P
     # Trim any OUTCOME: line out of the human summary.
     summary = re.sub(r"\n?OUTCOME:\s*[a-z_]+\s*$", "", (final_text or "").strip(),
                      flags=re.IGNORECASE).strip()
-    return AgentResult(rc=rc, outcome=outcome, summary=summary[:500])
+    return AgentResult(rc=rc, outcome=outcome, summary=summary[:500],
+                       resolved_url=resolved.get("url", ""))

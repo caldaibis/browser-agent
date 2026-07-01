@@ -75,7 +75,7 @@ def _activity(message: str) -> None:
         f.write(line + "\n")
 
 
-def _remember_processed(listing: RawListing, outcome: str) -> None:
+def _remember_processed(listing: RawListing, outcome: str, resolved_url: str = "") -> None:
     PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -86,6 +86,14 @@ def _remember_processed(listing: RawListing, outcome: str) -> None:
         "address": listing.address,
         "outcome": outcome,
     }
+    # The real external destination the agent reached, when different from
+    # listing.source_url (e.g. an aggregator page redirected in-browser to
+    # the actual landlord site) -- an extra dedup key so the Stekkies-mail
+    # path (which records the final URL directly) recognizes this listing
+    # as already handled even though it was discovered under a different
+    # URL. See poller.dedup.known_processed_urls.
+    if resolved_url:
+        rec["resolved_url"] = resolved_url
     with PROCESSED_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -231,7 +239,7 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
             if result.terminal or give_up:
                 seen.mark(listing.source_url, outcome=result.outcome,
                           source=listing.source_name, address=listing.address)
-                _remember_processed(listing, result.outcome)
+                _remember_processed(listing, result.outcome, resolved_url=result.resolved_url)
             else:
                 seen.release(listing.source_url)
         except Exception as e:  # noqa: BLE001 - one bad apply must not kill the worker

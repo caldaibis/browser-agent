@@ -211,9 +211,14 @@ TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
 - If you clicked something that should open a dialog/modal but browser_snapshot
   doesn't show it (some HTML dialogs aren't built with proper accessibility
   roles, so they never get a ref), use dom_scan — a raw-DOM fallback report,
-  not the accessibility tree — to see what's actually there, then click_by_text
-  (its exact visible text) instead of re-snapshotting repeatedly. Use these two
-  ONLY for that situation, not as your normal way to read/click the page.
+  not the accessibility tree — to see what's actually there. Then, still
+  inside that same ref-less dialog: click_by_text to click something by its
+  exact visible text, fill_by_label to type into a text/email/tel/textarea
+  field by its label text (browser_type/browser_fill_form CANNOT reach a
+  field with no ref — fill_by_label is the only way to type into one), and
+  select_option_by_label for a custom dropdown whose toggle has no text of
+  its own (an icon only) so click_by_text can't target it. Use these four
+  ONLY for that situation, not as your normal way to read/fill/click the page.
 - Tools do NOT go "offline" and there is no "cooldown" — if something fails,
   re-snapshot and retry; never claim the server crashed or ask me to type
   "retry". You run autonomously to completion.
@@ -235,6 +240,22 @@ profile — that ALONE does NOT mean you already applied. Judge "already applied
 by the control wording / an explicit "already requested/sent" status, NOT by
 pre-filled data. When the entry control is a normal apply button ("Bezichtiging
 aanvragen", "Reageer"), proceed and submit.
+
+BEWARE PAID UPSELL DIALOGS DISGUISED AS "APPLY"/"REGISTER". Some rental-agency
+sites (verified on REBO Groep, Hof van Oslo listing) have a prominent button
+labelled something like "Inschrijven huuraanbod" ("Register for rental offer")
+that actually opens a PAID email-alert subscription signup — a recurring fee
+(e.g. "€34,95 per jaar"), wording like "e-mailservice"/"zoekopdracht aanmaken" —
+NOT an application for this specific property. NEVER fill or submit a dialog
+that mentions a recurring price or a search-alert subscription; close it and
+use the real per-listing action instead: usually a button like "Bezichtiging
+aanvragen" ("Request a viewing") that opens a form asking for your name, email,
+phone, and income type to register interest in THIS property (no fee, may ask
+you to consent to a credit check once assigned — that consent checkbox is
+normal, not a red flag). Trust that concrete in-page action over prose in the
+description that tells you to sign up on a separate site/account — the direct
+dialog is usually the real application path even when the description text
+suggests a different portal.
 
 Do NOT wander the rest of the site, open your profile, or take unrelated
 account actions looking for a workaround.
@@ -295,6 +316,7 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
             cdp_url=CDP_URL,
             log_path=transcript,
             timeout_seconds=APPLY_TIMEOUT_SECONDS,
+            source_url=listing["source_url"],
         )
     # Keep the convenience "latest" copy too.
     try:

@@ -139,6 +139,7 @@ def process_source(listing: dict, msg_id: str | None = None,
                 source=source,
                 address=address,
                 outcome=result.outcome,
+                **({"resolved_url": result.resolved_url} if result.resolved_url else {}),
             )
         return _finish(
             msg_id=msg_id,
@@ -250,6 +251,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
                 source=listing.source_name,
                 address=listing.address,
                 outcome=result.outcome,
+                **({"resolved_url": result.resolved_url} if result.resolved_url else {}),
             )
         return _finish(
             msg_id=msg_id,

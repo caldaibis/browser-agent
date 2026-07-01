@@ -137,6 +137,52 @@ def release_count(url: str) -> int:
     return count
 
 
+def known_processed_urls() -> set[str]:
+    """Canonical URLs already recorded as done, from every source: the
+    poller's own seen log, the Stekkies orchestrator's processed log
+    (source_url/stekkies_url), and any resolved_url an apply run discovered
+    mid-flight (see browser_agent.py's mid-run duplicate check).
+
+    This is the read side of a real gap, not a hypothetical: the poller
+    discovers a listing at whatever URL it found it (e.g. the huurwoningen.nl
+    aggregator page), while the Stekkies-triggered flow records the FINAL
+    external source URL after Stekkies' own extraction (e.g. rebogroep.nl for
+    the same physical listing) -- two different canonical keys for the same
+    real-world application. Reaching that final URL from a huurwoningen.nl-
+    style aggregator page requires actually clicking through in-page
+    redirect dialogs (not an HTTP redirect fetch.py could resolve cheaply
+    up front), so this can't be checked before opening the browser. Verified
+    in production (Hof van Oslo, 01-07-2026 -> 02-07-2026): the Stekkies path
+    submitted successfully at 08:41 under the rebogroep.nl URL, then the
+    poller re-discovered the same listing via huurwoningen.nl for hours
+    afterward because that URL was never in this set -- and a manual re-test
+    of the fixed agent on 02-07-2026 submitted a SECOND real application
+    before this function existed. browser_agent.py calls this once per turn
+    to catch the moment the browser reaches an already-known destination,
+    not just before starting."""
+    urls: set[str] = set()
+    if SEEN_FILE.exists():
+        for line in SEEN_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = rec.get("key") or rec.get("url")
+            if key:
+                urls.add(canonical_url(key))
+    if PROCESSED_FILE.exists():
+        for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for field in ("source_url", "stekkies_url", "resolved_url"):
+                value = rec.get(field)
+                if value:
+                    urls.add(canonical_url(value))
+    return urls
+
+
 class SeenStore:
     """Thread-safe set of canonical URLs already seen/handled."""
 
@@ -160,16 +206,20 @@ class SeenStore:
         self._load_processed()
 
     def _load_processed(self) -> None:
-        # Anything the Stekkies pipeline already processed (dedup across paths).
+        # Anything the Stekkies pipeline already processed (dedup across
+        # paths) -- resolved_url is the final destination an apply run
+        # actually reached mid-flight (see known_processed_urls), which can
+        # differ from source_url for aggregator-style listings.
         if PROCESSED_FILE.exists():
             for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                url = rec.get("source_url")
-                if url:
-                    self._seen.add(canonical_url(url))
+                for field in ("source_url", "resolved_url"):
+                    url = rec.get(field)
+                    if url:
+                        self._seen.add(canonical_url(url))
 
     def is_new(self, url: str) -> bool:
         with self._lock:
