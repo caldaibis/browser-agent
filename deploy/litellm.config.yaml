@@ -1,0 +1,15 @@
+# LiteLLM proxy config for the self-improvement agent: exposes an
+# Anthropic-Messages-API-shaped endpoint (Claude Code's ANTHROPIC_BASE_URL
+# target) backed by DeepSeek instead of Anthropic. No secrets live here --
+# DEEPSEEK_API_KEY is read from the environment (already in state/agent.env
+# for the apply agent). Run with:
+#   uv run litellm --config deploy/litellm.config.yaml --port 4000 --host 127.0.0.1
+
+model_list:
+  - model_name: self-improvement-deepseek
+    litellm_params:
+      # NOT deepseek/deepseek-chat -- that's a deprecated alias for the
+      # cheaper, weaker deepseek-v4-flash. deepseek-v4-pro is the model this
+      # codebase actually uses everywhere else (src/apply.py APPLY_MODEL).
+      model: deepseek/deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY

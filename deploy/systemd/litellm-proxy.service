@@ -1,0 +1,18 @@
+[Unit]
+Description=LiteLLM proxy (Anthropic-Messages-API shape, backed by DeepSeek) for the self-improvement agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+Environment=PATH=__APP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+# DEEPSEEK_API_KEY (same key the apply agent uses) lives here:
+EnvironmentFile=__APP_DIR__/state/agent.env
+ExecStart=__APP_HOME__/.local/bin/uv run litellm --config __APP_DIR__/deploy/litellm.config.yaml --port 4000 --host 127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

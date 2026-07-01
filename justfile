@@ -36,6 +36,8 @@ doctor:
     chk "uv installed"                 "command -v uv"
     chk "node/npx present (MCP)"       "command -v npx"
     chk "DEEPSEEK_API_KEY set"         '[ -n "${DEEPSEEK_API_KEY:-}" ]'
+    chk "claude CLI present (self-improvement)" "command -v claude"
+    chk "ANTHROPIC_API_KEY set"        '[ -n "${ANTHROPIC_API_KEY:-}" ]'
     chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
     chk "CDP browser reachable :9222"  "curl -sf http://127.0.0.1:9222/json/version"
     [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (start the host with 'just host')"
@@ -52,6 +54,11 @@ dashboard:
 # run the always-on browser host locally (headed, via WSLg)
 host:
     uv run python -m src.browser_host
+
+# run the LiteLLM proxy the self-improvement agent uses to reach DeepSeek
+# (Claude Code's ANTHROPIC_BASE_URL points here; loopback-only, like CDP :9222)
+litellm-proxy:
+    uv run litellm --config deploy/litellm.config.yaml --port 4000 --host 127.0.0.1
 
 # open the browser host and the login pages for the one-time sign-ins
 login:

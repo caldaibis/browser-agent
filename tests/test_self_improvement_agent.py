@@ -1,9 +1,69 @@
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from src import self_improvement_agent
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+class TestSelfImprovementWorktree(unittest.TestCase):
+    """_create_worktree / _remove_worktree against a disposable temp repo --
+    never the real browser-agent repo."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        origin = base / "origin.git"
+        work = base / "work"
+        _git(["init", "--bare", "-b", "main", str(origin)], cwd=base)
+        _git(["clone", str(origin), str(work)], cwd=base)
+        _git(["config", "user.email", "test@example.com"], cwd=work)
+        _git(["config", "user.name", "Test"], cwd=work)
+        (work / "README.md").write_text("hello\n")
+        _git(["add", "-A"], cwd=work)
+        _git(["commit", "-m", "initial"], cwd=work)
+        _git(["push", "origin", "main"], cwd=work)
+        (work / ".venv").mkdir()
+        (work / ".venv" / "marker").write_text("fake venv\n")
+        self.work = work
+        self.worktree_base = base / "worktrees"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_create_and_remove_worktree_round_trip(self):
+        with patch.object(self_improvement_agent, "PROJECT_ROOT", self.work), \
+             patch.object(self_improvement_agent, "WORKTREE_BASE", self.worktree_base):
+            path, branch = self_improvement_agent._create_worktree()
+            try:
+                self.assertTrue(path.exists())
+                self.assertTrue((path / "README.md").exists())
+                self.assertTrue(branch.startswith("self-improvement/"))
+                self.assertTrue((path / ".venv").is_symlink())
+                self.assertEqual((path / ".venv").resolve(), (self.work / ".venv").resolve())
+                self.assertTrue((path / ".venv" / "marker").exists())
+                listed = subprocess.run(["git", "worktree", "list"], cwd=self.work,
+                                        capture_output=True, text=True, check=True)
+                self.assertIn(str(path), listed.stdout)
+            finally:
+                logger = self_improvement_agent._Logger(self.worktree_base / "cleanup.log")
+                self_improvement_agent._remove_worktree(path, branch, logger)
+                logger.close()
+
+            self.assertFalse(path.exists())
+            listed = subprocess.run(["git", "worktree", "list"], cwd=self.work,
+                                    capture_output=True, text=True, check=True)
+            self.assertNotIn(str(path), listed.stdout)
+            branches = subprocess.run(["git", "branch", "--list", branch], cwd=self.work,
+                                      capture_output=True, text=True, check=True)
+            self.assertEqual(branches.stdout.strip(), "")
 
 
 class TestSelfImprovementAgent(unittest.TestCase):
@@ -15,37 +75,21 @@ class TestSelfImprovementAgent(unittest.TestCase):
         for status in ("submitted", "already_applied", "skipped_duplicate", "no_listing_link"):
             self.assertFalse(self_improvement_agent.should_recover(status))
 
-    def test_parse_final_self_improvement_json(self):
-        result = self_improvement_agent._parse_final(
-            'SELF_IMPROVEMENT_JSON: {"action":"noop","root_cause":"site unavailable",'
-            '"summary":"external state","email_sent":false,'
-            '"code_changed":false,"deployed":false}'
-        )
+    def test_estimate_deepseek_cost_matches_verified_run(self):
+        # Real numbers from a verified run (logs/self_improvement, 2026-07-01):
+        # deepseek-v4-pro rates gave $0.030 for this usage; the SDK's own
+        # cost field reported $0.586 for the same run (~19.5x too high).
+        usage = {
+            "input_tokens": 52241,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 272256,
+            "output_tokens": 7198,
+        }
+        cost = self_improvement_agent._estimate_deepseek_cost_usd(usage)
+        self.assertAlmostEqual(cost, 0.0300, places=3)
 
-        self.assertIsNotNone(result)
-        self.assertEqual(result.action, "noop")
-        self.assertEqual(result.root_cause, "site unavailable")
-
-    def test_safe_path_refuses_sensitive_documents(self):
-        with self.assertRaises(ValueError):
-            self_improvement_agent._safe_repo_path("documents/id.pdf")
-
-    def test_diff_paths_restricted_to_repo_code(self):
-        self_improvement_agent._validate_diff_paths(
-            "--- a/src/apply.py\n"
-            "+++ b/src/apply.py\n"
-            "@@\n"
-            "-old\n"
-            "+new\n"
-        )
-        with self.assertRaises(ValueError):
-            self_improvement_agent._validate_diff_paths(
-                "--- a/state/agent.env\n"
-                "+++ b/state/agent.env\n"
-                "@@\n"
-                "-old\n"
-                "+new\n"
-            )
+    def test_estimate_deepseek_cost_handles_empty_usage(self):
+        self.assertEqual(self_improvement_agent._estimate_deepseek_cost_usd({}), 0.0)
 
     def test_browser_url_validation(self):
         self.assertTrue(self_improvement_agent._safe_browser_url("https://example.test/listing"))
@@ -67,12 +111,53 @@ class TestSelfImprovementAgent(unittest.TestCase):
         for label in ("Alles accepteren", "Meer informatie", "Details bekijken"):
             self.assertFalse(self_improvement_agent._blocked_click_label(label))
 
-    def test_self_improvement_tools_include_browser_diagnostics(self):
-        names = {tool["function"]["name"] for tool in self_improvement_agent._tools()}
-        self.assertIn("browser_open", names)
-        self.assertIn("browser_diagnostics", names)
-        self.assertIn("browser_safe_click", names)
-        self.assertIn("browser_screenshot", names)
+    def test_can_use_tool_denies_raw_git_write_via_bash(self):
+        for command in (
+            "git commit -m 'oops'",
+            "git push origin main",
+            "git reset --hard HEAD~1",
+        ):
+            result = self._run_can_use_tool("Bash", {"command": command})
+            self.assertEqual(result.behavior, "deny")
+            self.assertIn("commit_push_deploy", result.message)
+
+    def test_can_use_tool_allows_read_only_bash(self):
+        for command in ("git status", "git log -5", "just check", "rg -n TODO src"):
+            result = self._run_can_use_tool("Bash", {"command": command})
+            self.assertEqual(result.behavior, "allow")
+
+    def test_can_use_tool_allows_non_bash_tools(self):
+        result = self._run_can_use_tool("Read", {"file_path": "src/apply.py"})
+        self.assertEqual(result.behavior, "allow")
+
+    @staticmethod
+    def _run_can_use_tool(name: str, tool_input: dict):
+        import asyncio
+
+        return asyncio.run(self_improvement_agent._can_use_tool(name, tool_input, ctx=None))
+
+    def test_parse_result_reads_marker_from_text(self):
+        msg = type("FakeResult", (), {
+            "is_error": False,
+            "result": (
+                "I diagnosed the issue and it's an external state.\n"
+                'SELF_IMPROVEMENT_JSON: {"action":"noop","root_cause":"site unavailable",'
+                '"summary":"external state","email_sent":false,'
+                '"code_changed":false,"deployed":false}'
+            ),
+        })()
+        result = self_improvement_agent._parse_result(msg)
+        self.assertEqual(result.action, "noop")
+        self.assertEqual(result.root_cause, "site unavailable")
+
+    def test_parse_result_falls_back_when_no_marker(self):
+        msg = type("FakeResult", (), {
+            "is_error": True,
+            "result": "something went wrong",
+        })()
+        result = self_improvement_agent._parse_result(msg)
+        self.assertEqual(result.action, "error")
+        self.assertIn("something went wrong", result.summary)
 
     def test_send_fix_email_includes_listing_context(self):
         context = {

@@ -4,6 +4,10 @@ The normal application agent handles the rental site. This module handles the
 agent itself after an unsuccessful run: inspect redacted logs, decide whether
 the cause is an external/user-action state or a code bug, and then either do
 nothing, email the user, or patch + verify + commit + push + deploy.
+
+Driven by the Claude Agent SDK (the engine behind Claude Code) so diagnosis
+and patching use real Read/Edit/Write/Grep/Glob/Bash tools instead of
+hand-rolled reimplementations of them.
 """
 from __future__ import annotations
 
@@ -17,9 +21,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    McpSdkServerConfig,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ResultMessage,
+    TextBlock,
+    ToolPermissionContext,
+    ToolUseBlock,
+    create_sdk_mcp_server,
+    query,
+    tool,
+)
 
-from .browser_agent import DEEPSEEK_BASE_URL, AgentResult
+from .browser_agent import AgentResult
 from .config import CDP_URL, LOG_DIR, PROJECT_ROOT, SCREENSHOT_DIR
 from .dashboard.data import redact
 from .notify import send_alert
@@ -33,16 +50,35 @@ def _env(name: str, default: str) -> str:
 
 
 SELF_IMPROVEMENT_ENABLED = _env("SELF_IMPROVEMENT_ENABLED", "1") != "0"
-SELF_IMPROVEMENT_MODEL = _env("SELF_IMPROVEMENT_MODEL", os.environ.get("APPLY_MODEL", "deepseek-v4-pro"))
-SELF_IMPROVEMENT_MAX_TURNS = int(_env("SELF_IMPROVEMENT_MAX_TURNS", "18"))
-SELF_IMPROVEMENT_MAX_TOKENS = int(_env("SELF_IMPROVEMENT_MAX_TOKENS", "12000"))
+# Routed through a local LiteLLM proxy (deploy/litellm.config.yaml) backed by
+# DeepSeek, not the real Anthropic API -- see AGENTS.md gotchas for why
+# thinking/effort/output_format are not used on this path.
+SELF_IMPROVEMENT_BASE_URL = _env("SELF_IMPROVEMENT_BASE_URL", "http://127.0.0.1:4000")
+SELF_IMPROVEMENT_PROXY_MODEL = _env("SELF_IMPROVEMENT_PROXY_MODEL", "self-improvement-deepseek")
+SELF_IMPROVEMENT_MAX_TURNS = int(_env("SELF_IMPROVEMENT_MAX_TURNS", "30"))
+# ClaudeAgentOptions.max_budget_usd is enforced against the SDK's own
+# *client-side* cost estimate, which doesn't recognize a proxied model_name
+# and inflates real DeepSeek-v4-pro spend by ~19.5x (verified: a run that
+# really cost $0.03 was internally accounted as $0.586). Scaled up to match,
+# or a harder run would get cut short on inflated-phantom budget, not real
+# spend. Real spend is what _estimate_deepseek_cost_usd logs, not this cap.
+SELF_IMPROVEMENT_MAX_BUDGET_USD = float(_env("SELF_IMPROVEMENT_MAX_BUDGET_USD", "40.0"))
 SELF_IMPROVEMENT_TIMEOUT_SECONDS = int(_env("SELF_IMPROVEMENT_TIMEOUT_SECONDS", "900"))
 SELF_IMPROVEMENT_VERIFY_CMD = _env("SELF_IMPROVEMENT_VERIFY_CMD", "just check")
-SELF_IMPROVEMENT_DEPLOY_CMD = _env("SELF_IMPROVEMENT_DEPLOY_CMD", "just deploy")
 SELF_IMPROVEMENT_ALLOW_CODE_CHANGES = _env("SELF_IMPROVEMENT_ALLOW_CODE_CHANGES", "1") != "0"
+# Gates whether a verified fix is pushed straight to `main` (where the
+# existing CI/CD pipeline -- ci.yml -> deploy.yml -- deploys it
+# automatically) or to a review branch for a human to merge by hand. There is
+# no separate local deploy script anymore; pushing to `main` *is* the deploy
+# trigger. SELF_IMPROVEMENT_ALLOW_DIRTY_WORKTREE / _REQUIRE_MAIN /
+# _DEPLOY_CMD no longer apply -- work always happens in a fresh worktree
+# branched from a freshly-fetched origin/main (see _create_worktree), so
+# there's no shared/dirty checkout and no other branch it could be based on.
 SELF_IMPROVEMENT_ALLOW_DEPLOY = _env("SELF_IMPROVEMENT_ALLOW_DEPLOY", "1") != "0"
-SELF_IMPROVEMENT_ALLOW_DIRTY_WORKTREE = _env("SELF_IMPROVEMENT_ALLOW_DIRTY_WORKTREE", "0") == "1"
-SELF_IMPROVEMENT_REQUIRE_MAIN = _env("SELF_IMPROVEMENT_REQUIRE_MAIN", "1") != "0"
+
+# Sibling directory (never nested inside PROJECT_ROOT) holding one throwaway
+# worktree per self-improvement run.
+WORKTREE_BASE = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}-self-improvement-worktrees"
 
 DEFAULT_SELF_IMPROVEMENT_OUTCOMES = {
     "blocked",
@@ -64,8 +100,21 @@ SELF_IMPROVEMENT_OUTCOMES = {
 }
 
 RUN_LOG = LOG_DIR / "self_improvement.jsonl"
-TRANSCRIPTS_DIR = LOG_DIR / "transcripts"
 _MAX_TOOL_TEXT = 30000
+
+# `output_config.format` (structured output) is silently ignored by DeepSeek
+# via the LiteLLM proxy -- no error, just a free-text reply instead of
+# schema-JSON -- so the final result is a text marker parsed with this regex,
+# same convention the pre-Claude-Agent-SDK engine used.
+_RESULT_MARKER_RE = re.compile(r"SELF_IMPROVEMENT_JSON:\s*(\{.*\})", re.DOTALL)
+
+# Belt-and-suspenders: even though commit_push_deploy is the only tool that can
+# actually write git history, deny raw git-write/deploy attempts via Bash too
+# so enforcement doesn't depend on the model choosing the right tool.
+_DANGEROUS_BASH_RE = re.compile(
+    r"\bgit\s+(commit|push|reset\b|checkout\s+--|clean\s+-f)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -160,9 +209,9 @@ def run_self_improvement(context: dict) -> SelfImprovementResult:
     log_path = _new_log_path()
     logger = _Logger(log_path)
     try:
-        logger.line(f"[self-improvement] model={SELF_IMPROVEMENT_MODEL} status={context['result']['outcome']}")
+        logger.line(f"[self-improvement] model={SELF_IMPROVEMENT_PROXY_MODEL} status={context['result']['outcome']}")
         rr = asyncio.run(asyncio.wait_for(
-            _run(context, logger),
+            _execute(context, logger),
             timeout=SELF_IMPROVEMENT_TIMEOUT_SECONDS,
         ))
         return rr
@@ -172,13 +221,13 @@ def run_self_improvement(context: dict) -> SelfImprovementResult:
         logger.close()
 
 
-async def _run(context: dict, logger: "_Logger") -> SelfImprovementResult:
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
+async def _execute(context: dict, logger: "_Logger") -> SelfImprovementResult:
+    if not os.environ.get("DEEPSEEK_API_KEY"):
         logger.line("[self-improvement] DEEPSEEK_API_KEY not set; emailing user")
         send_alert(
             "⚠️ Rental self-improvement needs configuration",
-            "The self-improvement agent could not run because DEEPSEEK_API_KEY is not set.",
+            "The self-improvement agent could not run because DEEPSEEK_API_KEY is not "
+            "set (the LiteLLM proxy it talks to needs it).",
         )
         return SelfImprovementResult(
             action="emailed_user",
@@ -187,221 +236,323 @@ async def _run(context: dict, logger: "_Logger") -> SelfImprovementResult:
             email_sent=True,
         )
 
-    client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=api_key)
-    messages: list[dict[str, Any]] = [{"role": "user", "content": _prompt(context)}]
-    tools = _tools()
-
-    for turn in range(1, SELF_IMPROVEMENT_MAX_TURNS + 1):
-        resp = await client.chat.completions.create(
-            model=SELF_IMPROVEMENT_MODEL,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=SELF_IMPROVEMENT_MAX_TOKENS,
-            extra_body={"thinking": {"type": "disabled"}},
+    if not await _proxy_reachable():
+        logger.line(f"[self-improvement] LiteLLM proxy unreachable at {SELF_IMPROVEMENT_BASE_URL}; emailing user")
+        send_alert(
+            "⚠️ Rental self-improvement needs configuration",
+            "The self-improvement agent could not reach the LiteLLM proxy at "
+            f"{SELF_IMPROVEMENT_BASE_URL}. Is litellm-proxy.service running?",
         )
-        choice = resp.choices[0]
-        msg = choice.message
-        calls = msg.tool_calls or []
-        logger.line(f"[self-improvement] turn {turn} finish={choice.finish_reason} calls={len(calls)}")
-        messages.append({
-            "role": "assistant",
-            "content": msg.content or "",
-            **({"tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in calls
-            ]} if calls else {}),
-        })
-        if msg.content:
-            logger.line(f"[self-improvement] say: {msg.content.strip()[:500]}")
-        if not calls:
-            parsed = _parse_final(msg.content or "")
-            if parsed:
-                return parsed
-            messages.append({
-                "role": "user",
-                "content": "Return only the required SELF_IMPROVEMENT_JSON object, or call another tool.",
-            })
-            continue
+        return SelfImprovementResult(
+            action="emailed_user",
+            summary="LiteLLM proxy unreachable.",
+            root_cause="proxy_unreachable",
+            email_sent=True,
+        )
 
-        for tc in calls:
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            logger.line(f"[self-improvement] call {tc.function.name} {_safe_args(args)}")
-            text = await _call_tool(tc.function.name, args, context, logger)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": text[:_MAX_TOOL_TEXT],
-            })
-
-    return SelfImprovementResult(action="incomplete", summary="Hit self-improvement turn budget.")
-
-
-def _prompt(context: dict) -> str:
-    return f"""You are the self-improvement agent for a rental application bot.
-
-You are running after an unsuccessful submission. Your job is:
-1. Diagnose the root cause from the failure summary, redacted transcript, logs,
-   and code.
-2. Choose exactly one action:
-   - noop: the failure is an expected external state and no user action is useful.
-   - email_user: user action is needed, for example login/2FA/manual account issue.
-   - fix: a code/config bug is likely; patch it, run verification, commit, push,
-     and deploy using the provided tools.
-3. Be conservative about code changes. Patch only this repo and only when the
-   evidence points to a real bug that caused or will repeat this failure.
-
-Repository architecture and conventions (AGENTS.md):
-{_repo_doc("AGENTS.md")}
-
-Repository overview (README.md):
-{_repo_doc("README.md")}
-
-Initial failure context:
-{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
-
-Important constraints:
-- Do not ask the user questions. If user action is needed, send an email.
-- Do not expose passwords or personal documents. Tool output is redacted.
-- Use read_context first. Read code/logs as needed.
-- When logs/transcript are ambiguous, use browser_open/browser_diagnostics to
-  inspect the actual page in the shared logged-in browser before deciding.
-- Browser clicks are diagnostic only. Use browser_safe_click only for benign
-  navigation, cookie banners, tabs, or detail expanders. Never try to submit,
-  apply, withdraw, edit an existing application, reset passwords, upload files,
-  or change account settings from self-improvement.
-- For a code fix, apply the smallest patch, run verification, then call
-  commit_push_deploy.
-- Any repo fix/improvement MUST notify the user. The commit_push_deploy tool
-  sends that email automatically after a commit, even when push/deploy fails or
-  deploy is disabled.
-- If tools refuse code changes because policy/env/worktree blocks them, email
-  the user with the root cause and the refused action.
-
-When done, output only:
-SELF_IMPROVEMENT_JSON: {{"action":"noop|emailed_user|fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}
-"""
-
-
-def _repo_doc(name: str) -> str:
-    p = PROJECT_ROOT / name
-    if not p.exists():
-        return f"({name} not found)"
-    return redact(p.read_text(encoding="utf-8", errors="replace"))
-
-
-def _tools() -> list[dict]:
-    return [
-        _tool("read_context", "Return redacted failure context, transcript tail, recent logs, git state.", {}),
-        _tool("read_file", "Read a redacted repository file.", {
-            "path": {"type": "string"},
-            "max_bytes": {"type": "integer", "default": 20000},
-        }, ["path"]),
-        _tool("search_code", "Search repository text with ripgrep.", {
-            "pattern": {"type": "string"},
-            "path": {"type": "string", "default": "."},
-        }, ["pattern"]),
-        _tool("browser_open", (
-            "Open a URL in the shared CDP browser under the browser lock and "
-            "return safe diagnostics. Use this to verify listing/page state."
-        ), {
-            "url": {"type": "string"},
-            "settle_ms": {"type": "integer", "default": 2500},
-        }, ["url"]),
-        _tool("browser_diagnostics", (
-            "Inspect the current shared-browser page under the browser lock and "
-            "return URL/title/text excerpt/buttons/links/forms/errors."
-        ), {
-            "settle_ms": {"type": "integer", "default": 1000},
-        }),
-        _tool("browser_safe_click", (
-            "Click visible text only for benign navigation or cookie banners. "
-            "Refuses submit/apply/withdraw/password/account-destructive labels."
-        ), {
-            "text": {"type": "string"},
-            "settle_ms": {"type": "integer", "default": 1500},
-        }, ["text"]),
-        _tool("browser_screenshot", (
-            "Save a screenshot of the current shared-browser page and return "
-            "the file path plus diagnostics."
-        ), {
-            "full_page": {"type": "boolean", "default": True},
-        }),
-        _tool("apply_patch", "Apply a unified diff patch to repository files.", {
-            "diff": {"type": "string"},
-        }, ["diff"]),
-        _tool("run_verification", "Run the configured verification command.", {}),
-        _tool("git_status", "Return branch and porcelain git status.", {}),
-        _tool("git_diff", "Return current git diff.", {}),
-        _tool("commit_push_deploy", "Commit current changes, push, and deploy.", {
-            "message": {"type": "string"},
-        }, ["message"]),
-        _tool("send_user_email", "Email the configured recipient about required user action.", {
-            "subject": {"type": "string"},
-            "body": {"type": "string"},
-        }, ["subject", "body"]),
-    ]
-
-
-def _tool(name: str, description: str, props: dict, required: list[str] | None = None) -> dict:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": props,
-                "required": required or [],
+    worktree_path, branch_name = _create_worktree()
+    logger.line(f"[self-improvement] worktree {worktree_path} on branch {branch_name}")
+    try:
+        options = ClaudeAgentOptions(
+            cwd=str(worktree_path),
+            system_prompt=(
+                "You are the self-improvement agent for a Dutch rental-application "
+                "bot. You run after an apply attempt ends with a non-terminal "
+                "outcome, working in an isolated git worktree checked out from "
+                "origin/main -- a fix you commit here does not touch the live "
+                "checkout directly; commit_push_deploy pushes it to main (or a "
+                "review branch) for the existing CI/CD pipeline to deploy."
+            ),
+            allowed_tools=[
+                "Read", "Edit", "Write", "Grep", "Glob", "Bash",
+                "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
+                "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
+                "mcp__self_improve__run_verification",
+                "mcp__self_improve__commit_push_deploy",
+                "mcp__self_improve__send_user_email",
+            ],
+            disallowed_tools=["WebSearch", "WebFetch"],
+            permission_mode="bypassPermissions",
+            can_use_tool=_can_use_tool,
+            setting_sources=[],
+            mcp_servers={
+                "browser": _browser_tools(),
+                "self_improve": _self_improve_tools(context, logger, worktree_path, branch_name),
             },
-        },
+            model=SELF_IMPROVEMENT_PROXY_MODEL,
+            env={
+                # Redirect Claude Code at the local LiteLLM/DeepSeek proxy instead
+                # of api.anthropic.com. ANTHROPIC_AUTH_TOKEN only needs to be
+                # non-empty to satisfy the CLI's own "am I configured" check --
+                # the proxy doesn't validate it (confirmed with curl).
+                "ANTHROPIC_BASE_URL": SELF_IMPROVEMENT_BASE_URL,
+                "ANTHROPIC_AUTH_TOKEN": "not-required",
+            },
+            max_turns=SELF_IMPROVEMENT_MAX_TURNS,
+            max_budget_usd=SELF_IMPROVEMENT_MAX_BUDGET_USD,
+            # No thinking/effort/output_format here -- see AGENTS.md gotchas.
+        )
+
+        result_msg: ResultMessage | None = None
+        async for message in query(prompt=_one_shot_prompt(_prompt(context)), options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock) and block.text.strip():
+                        logger.line(f"[self-improvement] say: {block.text.strip()[:500]}")
+                    elif isinstance(block, ToolUseBlock):
+                        logger.line(f"[self-improvement] call {block.name} {_safe_args(block.input)}")
+                if message.usage:
+                    logger.line(f"[self-improvement] turn usage {json.dumps(message.usage, ensure_ascii=False)}")
+            elif isinstance(message, ResultMessage):
+                result_msg = message
+
+        if result_msg is None:
+            return SelfImprovementResult(action="incomplete", summary="Agent SDK query ended without a result message.")
+
+        # Log raw usage + both the SDK's own cost figure and an independent
+        # estimate from known deepseek-v4-pro per-token rates, so cost is
+        # cross-checked rather than trusted blindly (litellm's cost tracking can
+        # silently default to 0/wrong rates for a custom model_name alias).
+        est_cost = _estimate_deepseek_cost_usd(result_msg.usage or result_msg.model_usage or {})
+        logger.line(
+            f"[self-improvement] done subtype={result_msg.subtype} is_error={result_msg.is_error} "
+            f"turns={result_msg.num_turns} sdk_cost_usd={result_msg.total_cost_usd} "
+            f"estimated_cost_usd={est_cost}"
+        )
+        logger.line(f"[self-improvement] usage={json.dumps(result_msg.usage, ensure_ascii=False)}")
+        logger.line(f"[self-improvement] model_usage={json.dumps(result_msg.model_usage, ensure_ascii=False)}")
+        return _parse_result(result_msg)
+    finally:
+        _remove_worktree(worktree_path, branch_name, logger)
+
+
+# deepseek-v4-pro per-token rates (USD), cross-checked directly against
+# litellm.model_cost["deepseek/deepseek-v4-pro"] and DeepSeek's own pricing
+# docs -- not guessed. Update if DeepSeek repricing changes these.
+_DEEPSEEK_V4_PRO_RATES = {
+    "input_miss": 4.35e-7,
+    "input_hit": 3.625e-9,
+    "output": 8.7e-7,
+}
+
+
+def _estimate_deepseek_cost_usd(usage: dict) -> float:
+    input_tokens = int((usage or {}).get("input_tokens") or 0)
+    cache_read = int((usage or {}).get("cache_read_input_tokens") or 0)
+    cache_write = int((usage or {}).get("cache_creation_input_tokens") or 0)
+    output_tokens = int((usage or {}).get("output_tokens") or 0)
+    return (
+        input_tokens * _DEEPSEEK_V4_PRO_RATES["input_miss"]
+        + cache_read * _DEEPSEEK_V4_PRO_RATES["input_hit"]
+        + cache_write * _DEEPSEEK_V4_PRO_RATES["input_miss"]
+        + output_tokens * _DEEPSEEK_V4_PRO_RATES["output"]
+    )
+
+
+async def _proxy_reachable() -> bool:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{SELF_IMPROVEMENT_BASE_URL}/health/liveliness")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _one_shot_prompt(text: str):
+    """Wrap a plain prompt string as the streaming-mode input `query()` needs.
+
+    A string prompt takes a stdin-then-close path that never opens the
+    bidirectional control channel `can_use_tool` requires -- the SDK raises
+    "can_use_tool callback requires streaming mode" otherwise. One yielded
+    message reproduces a one-shot string query.
+    """
+    yield {
+        "type": "user",
+        "session_id": "",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
     }
 
 
-async def _call_tool(name: str, args: dict, context: dict, logger: "_Logger") -> str:
-    try:
-        if name == "read_context":
-            return _read_context(context)
-        if name == "read_file":
-            return _read_file(args.get("path", ""), int(args.get("max_bytes") or 20000))
-        if name == "search_code":
-            return _search_code(args.get("pattern", ""), args.get("path") or ".")
-        if name == "browser_open":
-            return await _browser_open(args.get("url", ""), int(args.get("settle_ms") or 2500))
-        if name == "browser_diagnostics":
-            return await _browser_diagnostics(int(args.get("settle_ms") or 1000))
-        if name == "browser_safe_click":
-            return await _browser_safe_click(
-                args.get("text", ""),
-                int(args.get("settle_ms") or 1500),
+def _prompt(context: dict) -> str:
+    result = context.get("result") or {}
+    transcript = result.get("transcript_path") or ""
+    log_paths = ", ".join(str(LOG_DIR / n) for n in
+                           ("runs.jsonl", "poller.jsonl", "mail_summary.jsonl", "activity.log"))
+    return f"""You are running after an unsuccessful rental-application submission. Your job:
+1. Diagnose the root cause. Start by reading AGENTS.md and README.md for repo
+   conventions, then the failure context below, the transcript tail (if any),
+   and recent entries in {log_paths}. Use Read/Grep/Glob to inspect any
+   relevant source files.
+2. Choose exactly one action:
+   - noop: the failure is an expected external state and no user action is useful.
+   - email_user: user action is needed (login/2FA/manual account issue) —
+     call send_user_email.
+   - fix: a code/config bug is likely; patch it with Read/Edit/Write, run
+     the run_verification tool, then call commit_push_deploy.
+3. Be conservative about *scope* (patch only this repo, only the smallest
+   change that addresses the evidence), but not about *whether to act*: if
+   you can point to a specific line of code whose behavior caused or will
+   repeat this failure, that is a fix, not a "model capability limitation" or
+   "LLM inefficiency" — write the patch. Reserve noop for failures with no
+   code-side cause at all (site outage, eligibility mismatch, rate limits).
+
+FAILURE_CONTEXT:
+{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
+{"TRANSCRIPT: " + transcript if transcript else ""}
+
+Constraints:
+- Do not ask the user questions; make a decision. If user action is needed,
+  send an email instead.
+- Tool output and file reads may contain redacted secrets (***) — do not try
+  to reconstruct or work around the redaction.
+- When logs/transcript are ambiguous, use browser_open/browser_diagnostics to
+  inspect the actual page in the shared logged-in browser before deciding.
+- browser_safe_click is diagnostic only — for benign navigation, cookie
+  banners, tabs, or detail expanders. Never try to submit, apply, withdraw,
+  edit an existing application, reset a password, upload a file, or change
+  account settings.
+- Never run `git commit`, `git push`, or `git reset` directly (Bash is
+  blocked from doing this) — always go through commit_push_deploy, which
+  runs verification, commits, and pushes to main (triggering the existing
+  CI/CD deploy pipeline) or to a review branch depending on policy.
+- Any repo fix MUST notify the user; commit_push_deploy emails automatically
+  after a commit, even if push fails or deploy is disabled.
+- If a tool refuses a code change (policy or verification failure), email the
+  user with the root cause and the refused action instead of retrying around it.
+
+When done, end your final message with exactly one line in this shape,
+nothing after it:
+SELF_IMPROVEMENT_JSON: {{"action":"noop|emailed_user|fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
+
+
+async def _can_use_tool(
+    tool_name: str,
+    tool_input: dict,
+    ctx: ToolPermissionContext,
+) -> PermissionResultAllow | PermissionResultDeny:
+    if tool_name == "Bash":
+        command = str((tool_input or {}).get("command") or "")
+        if _DANGEROUS_BASH_RE.search(command):
+            return PermissionResultDeny(
+                message=(
+                    "Direct git commit/push/reset via Bash is not allowed. Use the "
+                    "commit_push_deploy tool instead — it enforces verification and "
+                    "the configured push-to-main-or-review-branch policy."
+                ),
             )
-        if name == "browser_screenshot":
-            return await _browser_screenshot(bool(args.get("full_page", True)))
-        if name == "apply_patch":
-            return _apply_diff(args.get("diff", ""))
-        if name == "run_verification":
-            return _run_shell(SELF_IMPROVEMENT_VERIFY_CMD, timeout=300)
-        if name == "git_status":
-            return _git_status()
-        if name == "git_diff":
-            return _run_cmd(["git", "diff"], timeout=30)
-        if name == "commit_push_deploy":
-            return _commit_push_deploy(
-                args.get("message", "fix(self-improvement): repair apply failure"),
-                context,
-            )
-        if name == "send_user_email":
-            send_alert(str(args.get("subject") or "Rental agent needs attention"),
-                       redact(str(args.get("body") or "")))
-            return "email sent"
-    except Exception as e:  # noqa: BLE001
-        logger.line(f"[self-improvement] tool error: {type(e).__name__}: {e}")
-        return f"TOOL_ERROR {type(e).__name__}: {e}"
-    return f"unknown tool: {name}"
+    return PermissionResultAllow()
+
+
+def _browser_tools() -> McpSdkServerConfig:
+    @tool("browser_open", (
+        "Open a URL in the shared CDP browser under the browser lock and "
+        "return safe diagnostics. Use this to verify listing/page state."
+    ), {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "settle_ms": {"type": "integer", "default": 2500},
+        },
+        "required": ["url"],
+    })
+    async def browser_open(args: dict) -> dict:
+        text = await _browser_open(str(args.get("url") or ""), int(args.get("settle_ms") or 2500))
+        return {"content": [{"type": "text", "text": text}]}
+
+    @tool("browser_diagnostics", (
+        "Inspect the current shared-browser page under the browser lock and "
+        "return URL/title/text excerpt/buttons/links/forms/errors."
+    ), {
+        "type": "object",
+        "properties": {"settle_ms": {"type": "integer", "default": 1000}},
+        "required": [],
+    })
+    async def browser_diagnostics(args: dict) -> dict:
+        text = await _browser_diagnostics(int(args.get("settle_ms") or 1000))
+        return {"content": [{"type": "text", "text": text}]}
+
+    @tool("browser_safe_click", (
+        "Click visible text only for benign navigation or cookie banners. "
+        "Refuses submit/apply/withdraw/password/account-destructive labels."
+    ), {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "settle_ms": {"type": "integer", "default": 1500},
+        },
+        "required": ["text"],
+    })
+    async def browser_safe_click(args: dict) -> dict:
+        text = await _browser_safe_click(str(args.get("text") or ""), int(args.get("settle_ms") or 1500))
+        return {"content": [{"type": "text", "text": text}]}
+
+    @tool("browser_screenshot", (
+        "Save a screenshot of the current shared-browser page and return "
+        "the file path plus diagnostics."
+    ), {
+        "type": "object",
+        "properties": {"full_page": {"type": "boolean", "default": True}},
+        "required": [],
+    })
+    async def browser_screenshot(args: dict) -> dict:
+        text = await _browser_screenshot(bool(args.get("full_page", True)))
+        return {"content": [{"type": "text", "text": text}]}
+
+    return create_sdk_mcp_server(
+        name="browser",
+        tools=[browser_open, browser_diagnostics, browser_safe_click, browser_screenshot],
+    )
+
+
+def _self_improve_tools(
+    context: dict, logger: "_Logger", worktree_path: Path, branch_name: str,
+) -> McpSdkServerConfig:
+    @tool("run_verification", "Run the configured verification command and return its output.", {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    })
+    async def run_verification(args: dict) -> dict:
+        text = await asyncio.to_thread(_run_shell, SELF_IMPROVEMENT_VERIFY_CMD, 300, worktree_path)
+        return {"content": [{"type": "text", "text": text}]}
+
+    @tool("commit_push_deploy", (
+        "Commit all current changes in this worktree and push. If deploy is "
+        "allowed and main hasn't moved, pushes straight to main (the existing "
+        "CI/CD pipeline deploys it automatically); otherwise pushes a review "
+        "branch instead. Refuses on policy/verification failure."
+    ), {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+    })
+    async def commit_push_deploy(args: dict) -> dict:
+        message = str(args.get("message") or "fix(self-improvement): repair apply failure")
+        text = await asyncio.to_thread(
+            _commit_push_deploy, message, context, worktree_path, branch_name,
+        )
+        return {"content": [{"type": "text", "text": text}]}
+
+    @tool("send_user_email", "Email the configured recipient about required user action.", {
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+        },
+        "required": ["subject", "body"],
+    })
+    async def send_user_email(args: dict) -> dict:
+        subject = str(args.get("subject") or "Rental agent needs attention")
+        send_alert(subject, redact(str(args.get("body") or "")))
+        return {"content": [{"type": "text", "text": "email sent"}]}
+
+    return create_sdk_mcp_server(
+        name="self_improve",
+        tools=[run_verification, commit_push_deploy, send_user_email],
+    )
 
 
 _BLOCKED_CLICK_RE = re.compile(
@@ -643,99 +794,55 @@ def _compact(text: str, max_chars: int) -> str:
     return text[:max_chars] + " ...[truncated]"
 
 
-def _read_context(context: dict) -> str:
-    chunks = [
-        "FAILURE_CONTEXT\n" + json.dumps(_redacted(context), ensure_ascii=False, indent=2),
-        "GIT_STATUS\n" + _git_status(),
-    ]
-    transcript = context.get("result", {}).get("transcript_path")
-    if transcript:
-        chunks.append("TRANSCRIPT_TAIL\n" + _tail_file(Path(transcript), 40000))
-    for p in (LOG_DIR / "runs.jsonl", LOG_DIR / "poller.jsonl", LOG_DIR / "mail_summary.jsonl", LOG_DIR / "activity.log"):
-        chunks.append(f"{p.name.upper()}_TAIL\n" + _tail_file(p, 20000))
-    return "\n\n".join(chunks)
-
-
-def _read_file(path: str, max_bytes: int) -> str:
-    p = _safe_repo_path(path)
-    if not p.exists() or not p.is_file():
-        return f"not a file: {path}"
-    return redact(p.read_text(encoding="utf-8", errors="replace")[:max(1000, min(max_bytes, 60000))])
-
-
-def _search_code(pattern: str, path: str) -> str:
-    if not pattern:
-        return "empty pattern"
-    p = _safe_repo_path(path)
-    return _run_cmd([
-        "rg", "-n",
-        "--glob", "!state/**",
-        "--glob", "!documents/**",
-        "--glob", "!.git/**",
-        "--glob", "!.env",
-        "--",
-        pattern,
-        str(p),
-    ], timeout=30)
-
-
-def _apply_diff(diff: str) -> str:
+def _commit_push_deploy(
+    message: str, context: dict | None, worktree_path: Path, branch_name: str,
+) -> str:
     if not SELF_IMPROVEMENT_ALLOW_CODE_CHANGES:
         return "REFUSED: SELF_IMPROVEMENT_ALLOW_CODE_CHANGES=0"
-    if not SELF_IMPROVEMENT_ALLOW_DIRTY_WORKTREE and _porcelain():
-        return "REFUSED: worktree is dirty before self-improvement patch"
-    if not diff.strip():
-        return "empty diff"
-    _validate_diff_paths(diff)
-    check = subprocess.run(
-        ["git", "apply", "--check", "-"],
-        cwd=PROJECT_ROOT,
-        input=diff,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if check.returncode != 0:
-        return f"git apply --check failed\n{check.stdout}{check.stderr}"
-    applied = subprocess.run(
-        ["git", "apply", "-"],
-        cwd=PROJECT_ROOT,
-        input=diff,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return f"rc={applied.returncode}\n{applied.stdout}{applied.stderr}\n{_git_status()}"
-
-
-def _commit_push_deploy(message: str, context: dict | None = None) -> str:
-    if not SELF_IMPROVEMENT_ALLOW_CODE_CHANGES:
-        return "REFUSED: SELF_IMPROVEMENT_ALLOW_CODE_CHANGES=0"
-    branch = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10).strip()
-    if SELF_IMPROVEMENT_REQUIRE_MAIN and branch not in {"main", "master"}:
-        return f"REFUSED: current branch is {branch!r}, not main/master"
-    if not _porcelain():
+    if not _porcelain(worktree_path):
         return "nothing to commit"
-    verify = _run_shell(SELF_IMPROVEMENT_VERIFY_CMD, timeout=300)
+    verify = _run_shell(SELF_IMPROVEMENT_VERIFY_CMD, timeout=300, cwd=worktree_path)
     if not verify.startswith("rc=0\n"):
         return "verification failed, not committing\n" + verify
-    add = _run_cmd(["git", "add", "-A"], timeout=30)
-    commit = _run_cmd(["git", "commit", "-m", _commit_message(message)], timeout=60)
+    add = _run_cmd(["git", "add", "-A"], timeout=30, cwd=worktree_path)
+    commit = _run_cmd(["git", "commit", "-m", _commit_message(message)], timeout=60, cwd=worktree_path)
     if not commit.startswith("rc=0\n"):
         return "commit failed\n" + add + "\n" + commit
-    push = _run_cmd(["git", "push"], timeout=120)
-    if not push.startswith("rc=0\n"):
-        summary = "Self-improvement committed a local repo fix but push failed."
-        _send_fix_email(context, summary, commit + "\n" + push)
-        return "push failed; user email sent\n" + push
+
     if not SELF_IMPROVEMENT_ALLOW_DEPLOY:
-        summary = "Self-improvement committed and pushed a repo fix; deploy was disabled."
+        push = _run_cmd(["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
+                        timeout=120, cwd=worktree_path)
+        summary = (
+            f"Self-improvement committed a fix on branch {branch_name} for manual "
+            "review (deploy disabled -- SELF_IMPROVEMENT_ALLOW_DEPLOY=0)."
+        )
         _send_fix_email(context, summary, commit + "\n" + push)
-        return "committed and pushed; deploy skipped because SELF_IMPROVEMENT_ALLOW_DEPLOY=0; user email sent"
-    deploy = _run_shell(SELF_IMPROVEMENT_DEPLOY_CMD, timeout=600)
-    summary = "Self-improvement committed, pushed, and attempted deploy for a repo fix."
-    _send_fix_email(context, summary, commit + "\n" + push + "\n" + deploy)
-    return "committed, pushed, deploy attempted; user email sent\n" + deploy
+        return f"committed to {branch_name}; deploy disabled; pushed for review; user email sent\n" + push
+
+    # Re-fetch in case main moved during this run; only fast-forward, never
+    # attempt automatic conflict resolution.
+    _run_cmd(["git", "fetch", "origin", "main"], timeout=60, cwd=worktree_path)
+    ff_check = _run_cmd(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+                        timeout=10, cwd=worktree_path)
+    if not ff_check.startswith("rc=0"):
+        push = _run_cmd(["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
+                        timeout=120, cwd=worktree_path)
+        summary = (
+            f"Self-improvement committed a fix, but origin/main moved since this "
+            f"run branched off it -- pushed to {branch_name} instead of merging "
+            "automatically. Please review and merge by hand."
+        )
+        _send_fix_email(context, summary, commit + "\n" + push)
+        return f"main moved ahead; pushed to {branch_name} instead; user email sent\n" + push
+
+    push = _run_cmd(["git", "push", "origin", "HEAD:refs/heads/main"], timeout=120, cwd=worktree_path)
+    if not push.startswith("rc=0\n"):
+        summary = "Self-improvement committed a fix but push to main failed."
+        _send_fix_email(context, summary, commit + "\n" + push)
+        return "push to main failed; user email sent\n" + push
+    summary = "Self-improvement committed and pushed a fix directly to main -- CI/CD will deploy it automatically."
+    _send_fix_email(context, summary, commit + "\n" + push)
+    return "pushed to main; CI/CD deploy triggered; user email sent\n" + push
 
 
 def _send_fix_email(context: dict | None, summary: str, details: str) -> None:
@@ -757,82 +864,86 @@ def _send_fix_email(context: dict | None, summary: str, details: str) -> None:
     send_alert(subject, body)
 
 
-def _validate_diff_paths(diff: str) -> None:
-    allowed_prefixes = ("src/", "tests/", "deploy/", "docs/", "justfile", "pyproject.toml", "README.md")
-    paths: set[str] = set()
-    for line in diff.splitlines():
-        if line.startswith(("+++ ", "--- ")):
-            raw = line[4:].strip()
-            if raw == "/dev/null":
-                continue
-            if raw.startswith(("a/", "b/")):
-                raw = raw[2:]
-            paths.add(raw)
-    if not paths:
-        raise ValueError("diff has no file paths")
-    for raw in paths:
-        if raw.startswith("/") or ".." in Path(raw).parts:
-            raise ValueError(f"unsafe diff path: {raw}")
-        if not raw.startswith(allowed_prefixes):
-            raise ValueError(f"diff path not allowed for self-improvement: {raw}")
-
-
-def _safe_repo_path(path: str) -> Path:
-    raw = Path(path or ".")
-    p = raw if raw.is_absolute() else PROJECT_ROOT / raw
-    p = p.resolve()
-    root = PROJECT_ROOT.resolve()
-    if p != root and root not in p.parents:
-        raise ValueError(f"path outside repo: {path}")
-    rel = p.relative_to(root)
-    if rel.parts and rel.parts[0] in {"state", "documents", ".git"}:
-        raise ValueError(f"refusing sensitive path: {path}")
-    if rel.name == ".env" or rel.suffix in {".key", ".pem", ".p12"}:
-        raise ValueError(f"refusing sensitive path: {path}")
-    return p
-
-
-def _tail_file(path: Path, max_chars: int) -> str:
-    try:
-        p = _safe_repo_path(str(path))
-        if not p.exists() or not p.is_file():
-            return "(missing)"
-        text = p.read_text(encoding="utf-8", errors="replace")
-        return redact(text[-max_chars:])
-    except Exception as e:  # noqa: BLE001
-        return f"(unavailable: {type(e).__name__}: {e})"
-
-
-def _git_status() -> str:
-    return _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10) + _run_cmd(
-        ["git", "status", "--short"], timeout=10)
-
-
-def _porcelain() -> str:
-    r = subprocess.run(["git", "status", "--porcelain"], cwd=PROJECT_ROOT,
+def _porcelain(cwd: Path = PROJECT_ROOT) -> str:
+    r = subprocess.run(["git", "status", "--porcelain"], cwd=cwd,
                        capture_output=True, text=True, timeout=10)
     return r.stdout.strip()
 
 
-def _run_cmd(args: list[str], timeout: int) -> str:
-    r = subprocess.run(args, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=timeout)
+def _run_cmd(args: list[str], timeout: int, cwd: Path = PROJECT_ROOT) -> str:
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     return redact(f"rc={r.returncode}\n{r.stdout}{r.stderr}")[:_MAX_TOOL_TEXT]
 
 
-def _run_shell(command: str, timeout: int) -> str:
-    r = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True,
-                       shell=True, timeout=timeout)
+def _run_shell(command: str, timeout: int, cwd: Path = PROJECT_ROOT) -> str:
+    # UV_NO_SYNC guards against uv trying to reconcile the (symlinked, see
+    # _create_worktree) .venv against the worktree's own lock state. Setting
+    # VIRTUAL_ENV alone does NOT make uv reuse another venv -- that only
+    # happens via the `--active` CLI flag (no env-var equivalent), which the
+    # justfile's hardcoded `uv run` calls don't pass. Verified empirically:
+    # a real self-improvement run needed a full `uv sync` before this fix.
+    env = {**os.environ, "UV_NO_SYNC": "1"}
+    r = subprocess.run(command, cwd=cwd, capture_output=True, text=True,
+                       shell=True, timeout=timeout, env=env)
     return redact(f"rc={r.returncode}\n{r.stdout}{r.stderr}")[:_MAX_TOOL_TEXT]
 
 
-def _parse_final(text: str) -> SelfImprovementResult | None:
-    m = re.search(r"SELF_IMPROVEMENT_JSON:\s*(\{.*\})", text or "", re.DOTALL)
-    if not m:
-        return None
+def _create_worktree() -> tuple[Path, str]:
+    WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "worktree", "prune"], cwd=PROJECT_ROOT,
+                   capture_output=True, text=True, timeout=30)
+    subprocess.run(["git", "fetch", "origin", "main"], cwd=PROJECT_ROOT,
+                   capture_output=True, text=True, timeout=60)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = WORKTREE_BASE / ts
+    branch = f"self-improvement/{ts}"
+    r = subprocess.run(
+        ["git", "worktree", "add", str(path), "-b", branch, "origin/main"],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"git worktree add failed: {r.stdout}{r.stderr}")
+    # Symlink (not copy) the main checkout's already-synced .venv so
+    # run_verification's `uv run` calls find a fully-installed environment
+    # with no sync at all -- uv follows the symlink transparently and the
+    # worktree's pyproject.toml/uv.lock are byte-identical at checkout time.
+    # Verified empirically (including the full `just check` pipeline).
+    # Removing the worktree later only deletes this symlink, never the real
+    # venv it points at.
+    main_venv = PROJECT_ROOT / ".venv"
+    if main_venv.exists():
+        (path / ".venv").symlink_to(main_venv)
+    return path, branch
+
+
+def _remove_worktree(path: Path, branch: str, logger: "_Logger") -> None:
     try:
-        data = json.loads(m.group(1))
-    except json.JSONDecodeError:
-        return None
+        r = subprocess.run(["git", "worktree", "remove", "--force", str(path)],
+                           cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            logger.line(f"[self-improvement] worktree remove failed: {r.stdout}{r.stderr}")
+        subprocess.run(["git", "branch", "-D", branch], cwd=PROJECT_ROOT,
+                       capture_output=True, text=True, timeout=10)
+    except Exception as e:  # noqa: BLE001 - cleanup must never raise
+        logger.line(f"[self-improvement] worktree cleanup error: {type(e).__name__}: {e}")
+
+
+def _parse_result(msg: ResultMessage) -> SelfImprovementResult:
+    # DeepSeek via the LiteLLM proxy doesn't honor structured output, so the
+    # final result comes from a text marker (see _prompt) instead of
+    # msg.structured_output.
+    m = _RESULT_MARKER_RE.search(msg.result or "")
+    data: Any = None
+    if m:
+        try:
+            data = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            data = None
+    if not isinstance(data, dict):
+        return SelfImprovementResult(
+            action="error" if msg.is_error else "unknown",
+            summary=(msg.result or "no result text")[:2000],
+        )
     return SelfImprovementResult(
         action=str(data.get("action") or "unknown"),
         root_cause=str(data.get("root_cause") or ""),
@@ -861,13 +972,12 @@ def _redacted(value: Any) -> Any:
     return value
 
 
-def _safe_args(args: dict) -> dict:
-    safe = dict(args)
-    if "diff" in safe:
-        safe["diff"] = f"<diff {len(str(args.get('diff') or ''))} chars>"
-    if "body" in safe:
-        safe["body"] = redact(str(safe["body"]))[:300]
-    return safe
+def _safe_args(args: dict) -> str:
+    try:
+        rendered = json.dumps(args, ensure_ascii=False)
+    except TypeError:
+        rendered = str(args)
+    return redact(rendered)[:300]
 
 
 def _commit_message(message: str) -> str:

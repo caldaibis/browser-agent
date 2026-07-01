@@ -22,6 +22,9 @@ apt-get install -y -qq \
 # Node/npx is required for the Playwright MCP (browser automation + file upload)
 # that Hermes drives. The MCP server config travels in the copied ~/.hermes.
 
+echo "==> [1b/7] claude CLI (self-improvement agent, via claude-agent-sdk)"
+command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code >/dev/null
+
 echo "==> [2/7] app user '${APP_USER}'"
 if ! id "${APP_USER}" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "${APP_USER}"
@@ -49,7 +52,8 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chr
 
 echo "==> [6/8] systemd units"
 for unit in xvfb.service browser-host.service orchestrator.service poller.service \
-            vnc.service healthcheck.service healthcheck.timer dashboard.service; do
+            vnc.service healthcheck.service healthcheck.timer dashboard.service \
+            litellm-proxy.service; do
   sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
     "${APP_DIR}/deploy/systemd/${unit}" > "/etc/systemd/system/${unit}"
 done
@@ -75,10 +79,11 @@ else
   echo "    (set DASHBOARD_DOMAIN/USER/HASH and render deploy/Caddyfile.template -> /etc/caddy/Caddyfile)"
 fi
 
-echo "==> [8/8] enable Xvfb + browser host + health-check timer + dashboard (NOT orchestrator yet)"
+echo "==> [8/8] enable Xvfb + browser host + health-check timer + dashboard + litellm proxy (NOT orchestrator yet)"
 systemctl enable --now xvfb.service
 systemctl enable --now browser-host.service
 systemctl enable --now healthcheck.timer
+systemctl enable --now litellm-proxy.service
 systemctl enable --now dashboard.service
 
 cat <<EOF

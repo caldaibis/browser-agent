@@ -43,6 +43,42 @@ form, uploads docs, submits).
   at once (also wired into `apply.apply()`). `registry.py` lists all 26 sites;
   `discover.py` probes which tier each site currently yields. Run: `just poll`,
   `just poll-once <site>`, `just discover`.
+- `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
+  (blocked/error/incomplete/timeout/not_available/…, see
+  `SELF_IMPROVEMENT_OUTCOMES`). Drives the **Claude Agent SDK**
+  (`claude_agent_sdk.query()` — the same engine behind Claude Code: real
+  `Read`/`Edit`/`Bash`/`Grep`/`Glob`). Each run creates a **throwaway git
+  worktree** (`_create_worktree`, a sibling dir
+  `../browser-agent-self-improvement-worktrees/<ts>` branched off a
+  freshly-fetched `origin/main` — never `PROJECT_ROOT` itself, so a run can
+  never collide with the live checkout or in-progress human edits) and
+  always removes it in a `finally` (`_remove_worktree`), even on timeout.
+  Diagnoses the failure from the redacted transcript/logs/code, then either
+  does nothing, emails the user, or patches + verifies (`just check` in the
+  worktree, which finds an already-installed environment via a `.venv`
+  *symlink* to `PROJECT_ROOT`'s real one — `uv run` follows it transparently
+  since the checked-out `pyproject.toml`/`uv.lock` are byte-identical, so
+  there's no per-run `uv sync`. Setting `VIRTUAL_ENV` alone does **not**
+  achieve this — `uv` only prefers an external venv via the `--active` CLI
+  flag, which has no env-var equivalent and isn't in the justfile's `uv run`
+  calls; that was tried, empirically failed, and was replaced with the
+  symlink) + commits + pushes via a dedicated `commit_push_deploy` tool (never
+  raw `git` — a `can_use_tool` callback denies `git commit`/`git push`/`git
+  reset` through `Bash`). If `SELF_IMPROVEMENT_ALLOW_DEPLOY=1` and a
+  fast-forward is still possible, it pushes straight to `origin main` —
+  **that push is the deploy trigger**, picked up by the existing `ci.yml` ->
+  `deploy.yml` pipeline; there is no separate local deploy script anymore.
+  Otherwise (deploy disabled, or `main` moved during the run) it pushes a
+  `self-improvement/<ts>` review branch instead and emails the user to merge
+  by hand. Browser diagnostics (`browser_open`, `browser_diagnostics`,
+  `browser_safe_click`, `browser_screenshot`) are custom MCP tools over the
+  same shared CDP browser, guarded by `browser_lock`. Routed through a local
+  **LiteLLM proxy** (`deploy/litellm.config.yaml`, `just litellm-proxy`)
+  that presents an Anthropic-Messages-API-shaped endpoint backed by
+  `deepseek/deepseek-v4-pro` — real Anthropic credit is not spent. Model/
+  turns/budget/timeout via `SELF_IMPROVEMENT_PROXY_MODEL` (default
+  `self-improvement-deepseek`), `SELF_IMPROVEMENT_MAX_TURNS`,
+  `SELF_IMPROVEMENT_MAX_BUDGET_USD`, `SELF_IMPROVEMENT_TIMEOUT_SECONDS`.
 - `src/notify.py` — emails `NOTIFY_TO` after each handled listing
   (outcome + redacted summary) via Gmail `send` scope.
 - `src/healthcheck.py` (+ systemd timer, 30 min) — emails when DeepSeek credit
@@ -86,6 +122,35 @@ form, uploads docs, submits).
   `tar czf <backup> documents state` first, reset, then `tar xzf <backup>
   documents`. Run git as the deploy user (the repo is deploy-owned).
 - Node/npx is required at runtime for the Playwright MCP.
+- The self-improvement agent needs the **`claude` CLI on PATH**
+  (`npm install -g @anthropic-ai/claude-code` — `claude-agent-sdk` shells out
+  to it) and the **LiteLLM proxy running** (`litellm-proxy.service` on the
+  VPS, `just litellm-proxy` locally) — it points `ANTHROPIC_BASE_URL` at the
+  proxy (`127.0.0.1:4000`) instead of api.anthropic.com, so no real
+  `ANTHROPIC_API_KEY` is needed; `ANTHROPIC_AUTH_TOKEN` is a placeholder that
+  only satisfies the CLI's own "am I configured" check. The proxy reuses the
+  same `DEEPSEEK_API_KEY` already in `state/agent.env`.
+- **DeepSeek via LiteLLM silently mishandles two Claude-specific request
+  params — do not send them on this path.** `thinking`/`effort` wrap
+  DeepSeek's entire reply in a fake `thinking` block that rambles until it
+  hits `max_tokens` with zero real output (same "reasoning truncation =
+  silent stall" failure class as the hard-won lesson below, via a new path).
+  `output_config.format` (structured output) is silently ignored — no
+  error, just a free-text reply instead of schema-JSON — so
+  `self_improvement_agent.py` extracts the final result from a text marker,
+  not `ResultMessage.structured_output`. Verified directly against the
+  proxy with curl, not assumed.
+- **`ResultMessage.total_cost_usd` / `model_usage[...].costUSD` are wrong for
+  this proxied model — off by ~19.5x, verified, not estimated.** Claude
+  Code's own client-side cost calculator doesn't recognize a custom
+  `model_name` like `self-improvement-deepseek` and falls back to some
+  default rate. A run whose real cost (computed from the logged raw
+  `usage` tokens × deepseek-v4-pro's actual published per-token rates) was
+  $0.030 was reported by the SDK as $0.586. Trust
+  `_estimate_deepseek_cost_usd()`'s logged `estimated_cost_usd`, not the
+  SDK's own cost field — and note `max_budget_usd` is checked against the
+  SDK's *inflated* number, so it's set ~20x higher than the real dollar
+  ceiling you actually want (see the constant's comment).
 - Stekkies only notifies; the real application is on the external source site,
   which varies per listing — hence the LLM agent for the last mile.
 - Transcripts/prompts can contain plaintext site passwords — the dashboard

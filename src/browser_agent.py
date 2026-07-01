@@ -176,6 +176,30 @@ def _result_text(result) -> str:
     return "\n".join(parts) if parts else "(no output)"
 
 
+def _trailing_cycle_repeats(history: list[tuple], period: int) -> int:
+    """How many consecutive times the last `period` actions repeat the
+    `period` actions before them. 0 if the tail isn't such a cycle.
+
+    period=1 catches exact repeats (e.g. ArrowDown x30, the original case).
+    period=2/3 catches short oscillations that never repeat the *same*
+    single action back-to-back but still make no progress — e.g. click a
+    button / Escape a dialog it opened / click the same button again / Escape
+    again, forever. This looks "different" turn-to-turn (different sig each
+    time) so the period=1 check alone never fires, but the 2-action pattern
+    itself is repeating.
+    """
+    reps = 0
+    while True:
+        start = len(history) - period * (reps + 2)
+        if start < 0:
+            break
+        if history[start:start + period] == history[start + period:start + period * 2]:
+            reps += 1
+        else:
+            break
+    return reps
+
+
 async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger") -> tuple[int, str]:
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -194,8 +218,8 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
             messages: list[dict] = [{"role": "user", "content": prompt}]
             nudges_left = 2  # if the model stops early without finishing, prod it
             trunc_retries_left = 4  # tolerate transient truncated/empty completions
-            last_sig = None  # detect degenerate repeated-action loops
-            repeats = 0
+            sig_history: list[tuple] = []  # detect degenerate repeated-action loops
+            repeat_nudged = False
             for turn in range(1, max_turns + 1):
                 request = {
                     "model": model,
@@ -313,13 +337,23 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     log.line(f"[agent] DONE after {turn} turns")
                     return 0, content
 
-                # Detect degenerate repeated-action loops (e.g. ArrowDown x30).
+                # Detect degenerate repeated-action loops: exact repeats (e.g.
+                # ArrowDown x30) and short oscillations (e.g. click a button /
+                # Escape the dialog it opened / click it again / Escape again)
+                # that never repeat the same single action back-to-back but
+                # still make no progress. See _trailing_cycle_repeats.
                 sig = tuple((tc.function.name, tc.function.arguments) for tc in tool_calls)
-                repeats = repeats + 1 if sig == last_sig else 0
-                last_sig = sig
+                sig_history.append(sig)
+                del sig_history[:-24]  # keep a short trailing window (period=3 needs >=6*3)
+                repeats = max(
+                    (_trailing_cycle_repeats(sig_history, period) for period in (1, 2, 3)),
+                    default=0,
+                )
+                if repeats == 0:
+                    repeat_nudged = False
                 if repeats >= 4:
-                    log.line(f"[agent] ABORT: same action repeated {repeats + 1}x with no progress")
-                    return 1, "Repeated the same action without progress."
+                    log.line(f"[agent] ABORT: action cycle repeated {repeats + 1}x with no progress")
+                    return 1, "Repeated the same action (or short cycle of actions) without progress."
 
                 for tc in tool_calls:
                     name = tc.function.name
@@ -365,7 +399,8 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     })
 
                 # After answering the tool calls, prod the model if it's looping.
-                if repeats == 2:
+                if repeats >= 2 and not repeat_nudged:
+                    repeat_nudged = True
                     log.line("[agent] repeat-guard nudge")
                     messages.append({
                         "role": "user",
