@@ -22,7 +22,7 @@ sync:
 # offline sanity: byte-compile + import smoke + render the apply prompt (CI runs this)
 check:
     uv run python -m compileall -q src
-    uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
+    uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; import src.poller.watcher, src.poller.discover, src.poller.registry, src.poller.sniff; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
 
 # preflight: verify everything needed to run the agent locally is in place.
 doctor:
@@ -64,6 +64,22 @@ once url:
 watch:
     uv run python -m src.orchestrator
 
+# run the active site poller locally (watches all enabled sources directly)
+poll:
+    uv run python -m src.poller.watcher
+
+# one diagnostic poll of a single site (no apply), e.g. `just poll-once pararius.nl`
+poll-once name:
+    uv run python -m src.poller.watcher --once "{{name}}"
+
+# probe every registered site: which tier currently yields listings
+discover *names:
+    uv run python -m src.poller.discover {{names}}
+
+# sniff a site's JSON/XHR APIs for tier-1 discovery, e.g. `just sniff vesteda.com`
+sniff target:
+    uv run python -m src.poller.sniff "{{target}}"
+
 # run the health check locally (credit + Stekkies login)
 healthcheck:
     uv run python -m src.healthcheck
@@ -90,7 +106,7 @@ deploy:
     git push
     {{ssh}} 'sudo -u deploy git -C {{remote}} pull --ff-only'
     {{ssh}} 'sudo -u deploy bash -lc "cd {{remote}} && uv sync"'
-    {{ssh}} 'systemctl restart orchestrator dashboard'
+    {{ssh}} 'systemctl restart orchestrator dashboard; systemctl is-enabled poller >/dev/null 2>&1 && systemctl restart poller || true'
     @echo "deployed + restarted"
 
 # just pull latest on the VPS (no restart)
@@ -120,7 +136,7 @@ activity:
 
 # status of all services
 status:
-    {{ssh}} 'for s in orchestrator browser-host dashboard caddy xvfb healthcheck.timer; do printf "%-18s %s\\n" "$s" "$(systemctl is-active $s)"; done'
+    {{ssh}} 'for s in orchestrator poller browser-host dashboard caddy xvfb healthcheck.timer; do printf "%-18s %s\\n" "$s" "$(systemctl is-active $s)"; done'
 
 # restart a service, e.g. `just restart browser-host`
 restart svc:
@@ -131,6 +147,16 @@ pause:
     {{ssh}} 'systemctl stop orchestrator' && echo paused
 resume:
     {{ssh}} 'systemctl start orchestrator' && echo resumed
+
+# follow the poller journal
+poll-logs:
+    {{ssh}} 'journalctl -u poller -f'
+
+# pause / resume the active site poller
+poll-pause:
+    {{ssh}} 'systemctl stop poller' && echo paused
+poll-resume:
+    {{ssh}} 'systemctl start poller' && echo resumed
 
 # remaining OpenRouter credit (+ Stekkies login) via the health check on the VPS
 credits:

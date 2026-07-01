@@ -29,6 +29,19 @@ form, uploads docs, submits).
 - `src/orchestrator.py` — ties it together (`--once URL` or live watch); logs the
   true `outcome` (submitted / already_applied / not_available / …) and only marks
   a listing processed when the outcome is terminal.
+- `src/poller/` — **active site poller** (the "don't wait for Stekkies mail" path;
+  design in `docs/poller-plan.md`). Watches source sites directly and feeds the
+  same `apply.py`. `watcher.py` runs each enabled site on its own cadence+jitter,
+  `fetch.py` does httpx GET + block/challenge detection, `parsers.py` has a
+  generic schema.org JSON-LD parser (tier-2 default), `filters.py` is the
+  deterministic pre-filter (price/city/surface/room), `judge.py` is the cheap-LLM
+  judgment (distance-to-centre + roommates, fail-open), `dedup.py` keys on the
+  canonical (tracking-stripped) source URL and cross-checks
+  `processed_listings.jsonl`, `browser_lock.py` is a cross-process flock so the
+  poller's applier and the Stekkies orchestrator never drive the shared browser
+  at once (also wired into `apply.apply()`). `registry.py` lists all 26 sites;
+  `discover.py` probes which tier each site currently yields. Run: `just poll`,
+  `just poll-once <site>`, `just discover`.
 - `src/notify.py` — emails `NOTIFY_TO` after each handled listing
   (outcome + redacted summary) via Gmail `send` scope.
 - `src/healthcheck.py` (+ systemd timer, 30 min) — emails when OpenRouter credit

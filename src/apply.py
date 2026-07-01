@@ -19,6 +19,7 @@ from .credentials import available_domains
 from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .applicant_profile import PROFILE, INCOME_TOLERANCE
 from .browser_agent import run_agent, AgentResult
+from .poller.browser_lock import browser_lock
 
 # Model for the apply agent. Default: z-ai/glm-5.2 — strong tool-use/agentic
 # model. (Its earlier empty-response failure was a Hermes-loop quirk; our own
@@ -258,14 +259,17 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
 
     print(f"[apply] launching agent ({model}) for {listing['source_url']}")
     print(f"[apply] transcript: {transcript}")
-    result = run_agent(
-        prompt=prompt,
-        model=model,
-        max_turns=APPLY_MAX_TURNS,
-        cdp_url=CDP_URL,
-        log_path=transcript,
-        timeout_seconds=APPLY_TIMEOUT_SECONDS,
-    )
+    # Exclusive browser lock: only one component drives the shared CDP browser
+    # at a time. Coordinates the Stekkies orchestrator and the poller's applier.
+    with browser_lock():
+        result = run_agent(
+            prompt=prompt,
+            model=model,
+            max_turns=APPLY_MAX_TURNS,
+            cdp_url=CDP_URL,
+            log_path=transcript,
+            timeout_seconds=APPLY_TIMEOUT_SECONDS,
+        )
     # Keep the convenience "latest" copy too.
     try:
         (LOG_DIR / "last_apply_output.txt").write_text(
