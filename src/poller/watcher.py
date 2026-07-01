@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import sys
 from datetime import datetime
@@ -33,6 +34,9 @@ from .parsers import parse_jsonld
 from .registry import by_name, enabled_sites
 
 POLL_LOG = LOG_DIR / "poller.jsonl"
+
+# Tier-3 render settle time (ms) after DOM load, for the listing JS to populate.
+SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
 
 # Backoff schedule (seconds) applied on consecutive blocks, capped.
 _BACKOFF = [60, 300, 900, 1800, 3600]
@@ -61,8 +65,12 @@ async def _render_tier3(site: SiteConfig) -> str:
                 ctx = b.contexts[0] if b.contexts else await b.new_context()
                 pg = await ctx.new_page()
                 try:
-                    await pg.goto(site.list_url, wait_until="networkidle")
-                    await pg.wait_for_timeout(1500)
+                    # domcontentloaded + a fixed settle beats "networkidle":
+                    # many listing SPAs (funda) hold connections open and never
+                    # go idle, which would time the goto out.
+                    await pg.goto(site.list_url, wait_until="domcontentloaded",
+                                  timeout=45000)
+                    await pg.wait_for_timeout(SETTLE_MS)
                     return await pg.content()
                 finally:
                     await pg.close()

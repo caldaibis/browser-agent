@@ -32,9 +32,14 @@ def passes(listing: RawListing) -> tuple[bool, str]:
     if listing.price is not None and listing.price > MAX_PRICE:
         return False, f"price €{listing.price:.0f} > €{MAX_PRICE:.0f}"
 
-    haystack = f"{listing.city} {listing.address}".lower()
+    # City often lives only in the URL path (e.g. huurwoningen's JSON-LD address
+    # is just the street), so include source_url in the haystack. This both
+    # rescues real listings whose parsed address lacks a locality AND cheaply
+    # vetoes other-city listings (e.g. an ikwilhuren /object/delft-... URL)
+    # before they cost an LLM-judge call.
+    haystack = f"{listing.city} {listing.address} {listing.source_url}".lower()
     if CITIES and haystack.strip() and not any(c in haystack for c in CITIES):
-        return False, f"city not in {CITIES}: {haystack.strip()!r}"
+        return False, f"city not in {CITIES}: {(listing.city + ' ' + listing.address).strip()!r}"
 
     if listing.surface is not None and listing.surface < MIN_SURFACE:
         return False, f"surface {listing.surface:.0f}m² < {MIN_SURFACE:.0f}m²"

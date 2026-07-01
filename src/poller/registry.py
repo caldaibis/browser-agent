@@ -77,10 +77,13 @@ REGISTRY: list[SiteConfig] = [
 
     # ---- tier-3: Cloudflare / DataDome / TLS-fingerprint / login-walled ----
     # (need the shared Chromium host running; httpx alone gets 403/challenge.)
+    # VALIDATED against the live host = renders + parses listings today.
+    _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/utrecht/"),   # VALIDATED: 30 JSON-LD
+    _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/amsterdam/"),
+    # pararius/mijndak serve a challenge/empty page even to the real browser
+    # (deepest protection) — kept for reference; need a challenge-solve/login.
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht"),
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/amsterdam"),
-    _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/utrecht/"),
-    _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/amsterdam/"),
     _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", needs_login=True),
     _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/",
            needs_login=True),
@@ -93,11 +96,18 @@ REGISTRY: list[SiteConfig] = [
     # pages. Each still needs its rendered-DOM parser tuned once against the
     # running host (parse defaults to JSON-LD; most will need an anchor/DOM
     # parser) — do that with `just host` up, then flip POLL_ENABLE_TIER3=1.
+    _tier3("funda.nl", "https://www.funda.nl/zoeken/huur?selected_area=%5B%22utrecht%22,%22amsterdam%22%5D",
+           parse=make_anchor_parser(r"/detail/huur/[a-z-]+/[^/]+/\d+/")),          # VALIDATED: 14
+    _tier3("plaza.newnewnew.space", "https://plaza.newnewnew.space/aanbod",
+           needs_login=True,
+           parse=make_anchor_parser(r"/aanbod/huurwoningen/details/\d+-")),         # VALIDATED: 32
+    _tier3("your-house.nl", "https://your-house.nl/woningaanbod/huur",
+           parse=make_anchor_parser(r"/woningaanbod/huur/[a-z-]+/[^/?]+/\d")),      # VALIDATED: 12
+    # Not yet cracked: vesteda renders listing cards without anchors (needs a DOM
+    # click-through or its API); househunting shows only office pages; kamernet
+    # renders (past DataDome) but its detail-link pattern isn't wired yet.
     _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken"),
-    _tier3("funda.nl", "https://www.funda.nl/zoeken/huur?selected_area=%5B%22utrecht%22,%22amsterdam%22%5D"),
-    _tier3("plaza.newnewnew.space", "https://plaza.newnewnew.space/aanbod", needs_login=True),
     _tier3("househunting.nl", "https://www.househunting.nl/aanbod/"),
-    _tier3("your-house.nl", "https://your-house.nl/woningaanbod/huur"),
     _tier3("hurenindemix.nl", "https://www.hurenindemix.nl/aanbod/"),
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),

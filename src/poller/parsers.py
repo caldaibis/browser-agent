@@ -14,6 +14,7 @@ not the parser, decides whether an empty result means trouble).
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 from html.parser import HTMLParser
@@ -155,12 +156,12 @@ def make_anchor_parser(path_pattern: str) -> "callable":
     path_re = re.compile(path_pattern)
 
     def parse(payload: object, site: SiteConfig) -> list[RawListing]:
-        html = payload if isinstance(payload, str) else ""
+        doc = payload if isinstance(payload, str) else ""
         base = site.list_url or site.endpoint
         seen: set[str] = set()
         out: list[RawListing] = []
-        for href in href_re.findall(html):
-            full = urljoin(base, href)
+        for href in href_re.findall(doc):
+            full = urljoin(base, html.unescape(href))
             if not path_re.search(full) or full in seen:
                 continue
             seen.add(full)

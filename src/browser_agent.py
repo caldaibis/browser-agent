@@ -101,10 +101,22 @@ class AgentResult:
         return self.outcome in VALID_OUTCOMES
 
 
-def _parse_outcome(final_text: str, rc: int) -> str:
-    m = re.search(r"OUTCOME:\s*([a-z_]+)", final_text or "", re.IGNORECASE)
+_OUTCOME_RE = re.compile(r"OUTCOME:\s*([a-z_]+)", re.IGNORECASE)
+
+
+def _extract_outcome(text: str) -> str | None:
+    """Return the declared outcome if `text` contains the mandatory final
+    'OUTCOME: <x>' line from the apply prompt, else None."""
+    m = _OUTCOME_RE.search(text or "")
     if m and m.group(1).lower() in VALID_OUTCOMES:
         return m.group(1).lower()
+    return None
+
+
+def _parse_outcome(final_text: str, rc: int) -> str:
+    outcome = _extract_outcome(final_text)
+    if outcome:
+        return outcome
     if rc == 124:
         return "timeout"
     if rc == 2:
@@ -195,14 +207,20 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                          f"reasoning_tokens={reasoning_tok} (cap={MAX_TOKENS})")
 
                 # A turn cut off mid-reasoning comes back as finish_reason="length"
-                # with empty content and no tool_calls. That is a truncation glitch,
-                # not the model concluding — retry (don't spend a nudge / declare
-                # done) so a long reasoning burst doesn't sink the whole run.
+                # with empty content and no tool_calls — a truncation glitch. We've
+                # also seen finish_reason="stop" with empty content and no
+                # tool_calls at the same completion-token cost as the model's own
+                # successful bare-arg tool calls elsewhere in the same transcript —
+                # almost certainly a tool call OpenRouter failed to surface, not a
+                # deliberate conclusion (the prompt requires a non-empty OUTCOME
+                # line, which empty content can never satisfy). Treat both as the
+                # same transport glitch: retry (don't spend a nudge / declare done).
                 if not tool_calls and not (msg.content or "").strip() \
-                        and finish_reason == "length" and trunc_retries_left > 0:
+                        and finish_reason in ("length", "stop") and trunc_retries_left > 0:
                     trunc_retries_left -= 1
-                    log.line(f"[agent] turn {turn} truncated (finish_reason=length, "
-                             f"empty); retrying ({trunc_retries_left} left)")
+                    log.line(f"[agent] turn {turn} truncated/dropped "
+                             f"(finish_reason={finish_reason}, empty); retrying "
+                             f"({trunc_retries_left} left)")
                     # The empty assistant turn was never appended (we continue
                     # before recording it), so just add a prod and retry.
                     messages.append({
@@ -230,32 +248,34 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 
                 if not tool_calls:
                     content = (msg.content or "").strip()
-                    # Guard against the model ending early by dumping a page
-                    # snapshot or stalling before it actually submitted/uploaded.
-                    looks_unfinished = (
-                        not content
-                        or content.startswith("- ")          # raw snapshot YAML
-                        or "[ref=e" in content               # snapshot refs
-                        or len(content) > 1500               # huge = page dump
-                    )
-                    if looks_unfinished and nudges_left > 0:
-                        nudges_left -= 1
-                        log.line(f"[agent] nudge (model stopped without a clear "
-                                 f"conclusion, finish_reason={finish_reason}; "
-                                 f"{nudges_left} left)")
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "That was not a usable final answer. If you have "
-                                "ALREADY submitted (saw a confirmation), reply with a "
-                                "one-line success confirmation and nothing else — do "
-                                "NOT re-open or resubmit. Otherwise continue: fill "
-                                "remaining fields, upload documents, and submit. If "
-                                "blocked, state the exact reason in one short "
-                                "paragraph. No page snapshots."
-                            ),
-                        })
-                        continue
+                    # The prompt mandates the final answer end with an exact
+                    # 'OUTCOME: <x>' line. Anything lacking that (empty content,
+                    # a raw page/snapshot dump, or narration about an intended
+                    # action that never happened) is not a usable conclusion.
+                    if _extract_outcome(content) is None:
+                        if nudges_left > 0:
+                            nudges_left -= 1
+                            log.line(f"[agent] nudge (model stopped without a "
+                                     f"valid OUTCOME line, finish_reason="
+                                     f"{finish_reason}; {nudges_left} left)")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "That was not a usable final answer. If you have "
+                                    "ALREADY submitted (saw a confirmation), reply with a "
+                                    "one-line success confirmation and nothing else — do "
+                                    "NOT re-open or resubmit. Otherwise continue: fill "
+                                    "remaining fields, upload documents, and submit. If "
+                                    "blocked, state the exact reason in one short "
+                                    "paragraph. No page snapshots. End with the "
+                                    "mandatory 'OUTCOME: <x>' line."
+                                ),
+                            })
+                            continue
+                        log.line(f"[agent] STOP after {turn} turns: exhausted "
+                                 f"nudges without a valid OUTCOME line "
+                                 f"(finish_reason={finish_reason})")
+                        return 1, content
                     log.line(f"[agent] DONE after {turn} turns")
                     return 0, content
 
