@@ -9,15 +9,15 @@ probing on 2026-07-01):
     HTML with detail-page links but no JSON-LD; we scrape the links (URL only,
     price/size come later from the apply/judge stage).
   - **tier 3** (rendered tab): site is Cloudflare/DataDome/TLS-fingerprint
-    protected or login-walled, so httpx gets a 403/challenge. The watcher opens
-    the page in the real shared Chromium (over CDP, under the browser lock) and
-    parses the rendered HTML. These need the browser host running.
-  - **AWAITING TIER-1** (enabled=False): SPA whose list is drawn from a JSON API
-    we have not captured yet. Fetching the HTML yields 0 listings. Capture the
-    API call (DevTools → Network → Copy as cURL) and turn it into a tier-1 entry
-    (endpoint/params/parse). Left disabled so it doesn't poll fruitlessly.
+    protected, login-walled, or a JS-SPA that blocks both httpx and throwaway
+    headless Chromium. The watcher opens the page in the real shared Chromium
+    (over CDP, under the browser lock, with the host's anti-automation flags)
+    and parses the rendered HTML. These need the browser host running and are
+    OFF by default (POLL_ENABLE_TIER3=1). Each tier-3 SPA still needs its
+    rendered-DOM parser tuned once against the live host.
 
-Re-run `python -m src.poller.discover` any time to re-check.
+Re-run `python -m src.poller.discover` any time to re-check, and use
+`python -m src.poller.sniff <site>` (network sniffer) to hunt a JSON API.
 """
 from __future__ import annotations
 
@@ -49,12 +49,6 @@ def _tier3(name: str, list_url: str, *, parse=None, cadence_s: int = 180,
                       parse=parse or parse_jsonld, cadence_s=cadence_s, **kw)
 
 
-def _pending(name: str, list_url: str, **kw) -> SiteConfig:
-    """SPA awaiting a tier-1 API cURL. Kept for reference; disabled until then."""
-    return SiteConfig(name=name, tier=2, list_url=list_url,
-                      parse=parse_jsonld, enabled=False, **kw)
-
-
 REGISTRY: list[SiteConfig] = [
     # ---- working now: tier-2 JSON-LD --------------------------------------
     _jsonld("huurportaal.nl", "https://huurportaal.nl/huurwoningen/utrecht"),
@@ -73,6 +67,13 @@ REGISTRY: list[SiteConfig] = [
             r"/object/[a-z0-9-]+/"),
     _anchor("ikwilhuren.nu", "https://ikwilhuren.nu/aanbod/amsterdam",
             r"/object/[a-z0-9-]+/"),
+    _anchor("vgwgroup.nl", "https://vgwgroup.nl/aanbod-lange-termijnverhuur/",
+            r"/woningen/[a-z0-9-]+[0-9a-f]{16}"),
+    _anchor("nmgwonen.nl", "https://nmgwonen.nl/woningaanbod/",
+            r"/woning/[a-z0-9-]+/"),
+    _anchor("deruitermakelaarshuis.nl",
+            "https://www.deruitermakelaarshuis.nl/aanbod/?_status=te-huur",
+            r"/aanbod/[a-z0-9-]+-[a-z0-9-]+/"),
 
     # ---- tier-3: Cloudflare / DataDome / TLS-fingerprint / login-walled ----
     # (need the shared Chromium host running; httpx alone gets 403/challenge.)
@@ -85,23 +86,24 @@ REGISTRY: list[SiteConfig] = [
            needs_login=True),
     _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-utrecht",
            needs_login=True, cadence_s=120),
-
-    # ---- awaiting tier-1 API cURL (SPA; HTML has no listings) --------------
-    _pending("vesteda.com", "https://www.vesteda.com/nl/woningen"),
-    _pending("funda.nl", "https://www.funda.nl/zoeken/huur"),
-    _pending("plaza.newnewnew.space", "https://plaza.newnewnew.space/", needs_login=True),
-    _pending("househunting.nl", "https://www.househunting.nl/aanbod/"),
-    _pending("your-house.nl", "https://your-house.nl/woningaanbod/"),
-    _pending("stienstra.nl", "https://www.stienstra.nl/ik-zoek-een-woning"),
-    _pending("hurenindemix.nl", "https://www.hurenindemix.nl/aanbod/"),
-    _pending("vgwgroup.nl", "https://vgwgroup.nl/aanbod-lange-termijnverhuur/"),
-    _pending("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
-    _pending("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
-    _pending("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/"),
-    _pending("eye-move.nl", "https://www.eye-move.nl/woningaanbod/"),
-    _pending("nmgwonen.nl", "https://nmgwonen.nl/woningaanbod/"),
-    _pending("deruitermakelaarshuis.nl",
-             "https://www.deruitermakelaarshuis.nl/aanbod/?_status=te-huur"),
+    # JS-SPAs whose listing list is drawn client-side from an API and which
+    # block plain httpx AND throwaway headless Chromium (bot-detected / served a
+    # 404/challenge). They render fine in the project's real anti-automation
+    # browser host, so they are tier-3. URLs below are the confirmed live search
+    # pages. Each still needs its rendered-DOM parser tuned once against the
+    # running host (parse defaults to JSON-LD; most will need an anchor/DOM
+    # parser) — do that with `just host` up, then flip POLL_ENABLE_TIER3=1.
+    _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken"),
+    _tier3("funda.nl", "https://www.funda.nl/zoeken/huur?selected_area=%5B%22utrecht%22,%22amsterdam%22%5D"),
+    _tier3("plaza.newnewnew.space", "https://plaza.newnewnew.space/aanbod", needs_login=True),
+    _tier3("househunting.nl", "https://www.househunting.nl/aanbod/"),
+    _tier3("your-house.nl", "https://your-house.nl/woningaanbod/huur"),
+    _tier3("hurenindemix.nl", "https://www.hurenindemix.nl/aanbod/"),
+    _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
+    _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
+    _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/"),
+    _tier3("eye-move.nl", "https://www.eye-move.nl/woningaanbod/"),
+    _tier3("stienstra.nl", "https://www.stienstra.nl/ik-zoek-een-woning"),
     # nmgwonen.mijnklantdossier.nl -> redirects to nmgwonen.nl (same aanbod);
     #   the tenant portal (mijnnmgwoning.nl) is login-only. Covered by nmgwonen.nl.
     # hurenviafrits.nl -> DNS no longer resolves (domain dead); dropped.
