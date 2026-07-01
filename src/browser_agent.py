@@ -28,7 +28,7 @@ from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from . import credentials
+from . import browser_dom_tools, credentials
 
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
@@ -81,6 +81,57 @@ CREDENTIAL_TOOL = {
                 },
             },
             "required": ["site"],
+        },
+    },
+}
+
+# Local (non-MCP) fallback tools for when the Playwright MCP's accessibility-
+# tree snapshot doesn't show something known to be on the page -- seen
+# repeatedly on real listings: an HTML dialog/overlay built without proper
+# ARIA roles never gets a browser_snapshot ref, so browser_click can't target
+# it and browser_handle_dialog doesn't apply (that's for native JS dialogs,
+# not in-page HTML). These query the raw DOM / click by visible text instead
+# of the accessibility tree -- narrow, fixed operations, NOT arbitrary JS
+# (BLOCKED_TOOLS below still applies).
+DOM_SCAN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "dom_scan",
+        "description": (
+            "FALLBACK ONLY. Raw-DOM page report (title/url/text + every "
+            "button, link, and form field found by direct DOM query) -- NOT "
+            "the accessibility tree browser_snapshot uses. Use this ONLY when "
+            "you know something is on the page (e.g. you just clicked a "
+            "button that should open a dialog/modal) but browser_snapshot "
+            "doesn't show it. Waits briefly first so a just-opened dialog has "
+            "time to render. Do NOT use this as your primary way to read the "
+            "page -- prefer browser_snapshot; this is slower and has no refs, "
+            "only visible text."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+CLICK_BY_TEXT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "click_by_text",
+        "description": (
+            "FALLBACK ONLY. Click the first element whose VISIBLE TEXT "
+            "matches (not a browser_snapshot ref). Use this ONLY when "
+            "dom_scan shows an element you need to click (e.g. inside a "
+            "dialog invisible to browser_snapshot) but it has no ref you can "
+            "pass to browser_click. Do NOT use this instead of browser_click "
+            "for anything a snapshot ref already covers."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Visible text of the element to click, e.g. 'Ja, ik ga akkoord'.",
+                },
+            },
+            "required": ["text"],
         },
     },
 }
@@ -200,6 +251,18 @@ def _trailing_cycle_repeats(history: list[tuple], period: int) -> int:
     return reps
 
 
+def _should_nudge_snapshot_overuse(snapshot_calls: int, turn: int) -> bool:
+    """True once browser_snapshot has dominated the turns so far despite the
+    prompt's own 'don't re-snapshot after every click' guidance -- verified in
+    production to not be reliably followed on its own (Hof van Oslo,
+    01-07-2026: ~29 of 60 turns were snapshots, each following a *different*
+    click, so the exact/short-cycle repeat guard never fires -- the repeated
+    element is the call TYPE, not its arguments). One-shot course-correction,
+    not a hard cap.
+    """
+    return turn >= 10 and snapshot_calls >= max(6, turn // 2)
+
+
 async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger") -> tuple[int, str]:
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -212,7 +275,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
         async with ClientSession(read, write) as session:
             await session.initialize()
             mcp_tools = (await session.list_tools()).tools
-            tools = _to_openai_tools(mcp_tools) + [CREDENTIAL_TOOL]
+            tools = _to_openai_tools(mcp_tools) + [CREDENTIAL_TOOL, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL]
             log.line(f"[agent] model={model} tools={len(tools)} cdp={cdp_url}")
 
             messages: list[dict] = [{"role": "user", "content": prompt}]
@@ -220,6 +283,8 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
             trunc_retries_left = 4  # tolerate transient truncated/empty completions
             sig_history: list[tuple] = []  # detect degenerate repeated-action loops
             repeat_nudged = False
+            snapshot_calls = 0  # detect excessive re-snapshotting (see _should_nudge_snapshot_overuse)
+            snapshot_nudged = False
             for turn in range(1, max_turns + 1):
                 request = {
                     "model": model,
@@ -388,6 +453,25 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             "role": "tool", "tool_call_id": tc.id, "content": text,
                         })
                         continue
+                    if name == "dom_scan":
+                        # Local fallback, not routed through the Playwright MCP:
+                        # see DOM_SCAN_TOOL for when this is appropriate.
+                        text = await browser_dom_tools.dom_scan(cdp_url)
+                        log.line(f"[agent]   -> dom_scan ({len(text)} chars)")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                        })
+                        continue
+                    if name == "click_by_text":
+                        click_text = str(args.get("text", ""))
+                        text = await browser_dom_tools.click_by_text(cdp_url, click_text)
+                        log.line(f"[agent]   -> click_by_text {click_text!r}")
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                        })
+                        continue
+                    if name == "browser_snapshot":
+                        snapshot_calls += 1
                     try:
                         result = await session.call_tool(name, args)
                         text = _result_text(result)
@@ -410,6 +494,24 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             "then either do something clearly different, or if you cannot "
                             "proceed, stop and report the exact status in one short "
                             "paragraph (no page snapshots)."
+                        ),
+                    })
+                if not snapshot_nudged and _should_nudge_snapshot_overuse(snapshot_calls, turn):
+                    snapshot_nudged = True
+                    log.line(f"[agent] snapshot-overuse nudge "
+                             f"({snapshot_calls} snapshots in {turn} turns)")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"You've taken {snapshot_calls} snapshots in {turn} turns. "
+                            "A click/type result usually already tells you whether it "
+                            "worked -- you rarely need a fresh browser_snapshot right "
+                            "after every action. Only re-snapshot when the page has "
+                            "genuinely changed (new URL, a dialog opened/closed) and you "
+                            "need new refs. If a dialog or overlay seems to have opened "
+                            "but browser_snapshot doesn't show it, use dom_scan (raw DOM, "
+                            "not the accessibility tree) instead of re-snapshotting "
+                            "repeatedly."
                         ),
                     })
 

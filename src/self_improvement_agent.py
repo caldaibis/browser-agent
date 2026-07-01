@@ -37,6 +37,7 @@ from claude_agent_sdk import (
 )
 
 from .browser_agent import AgentResult
+from .browser_dom_tools import compact, current_page, evaluate_controls, evaluate_fields
 from .config import CDP_URL, LOG_DIR, PROJECT_ROOT, SCREENSHOT_DIR
 from .dashboard.data import redact
 from .notify import send_alert
@@ -644,7 +645,7 @@ async def _browser_diagnostics_async(settle_ms: int) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(CDP_URL)
         try:
-            page = await _current_page(browser)
+            page = await current_page(browser)
             events = _attach_browser_event_collectors(page)
             if settle_ms:
                 await page.wait_for_timeout(settle_ms)
@@ -659,7 +660,7 @@ async def _browser_safe_click_async(text: str, settle_ms: int) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(CDP_URL)
         try:
-            page = await _current_page(browser)
+            page = await current_page(browser)
             events = _attach_browser_event_collectors(page)
             await page.get_by_text(text, exact=False).first.click(timeout=7000)
             if settle_ms:
@@ -675,7 +676,7 @@ async def _browser_screenshot_async(full_page: bool) -> str:
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(CDP_URL)
         try:
-            page = await _current_page(browser)
+            page = await current_page(browser)
             path = SCREENSHOT_DIR / f"self_improvement_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             path.parent.mkdir(parents=True, exist_ok=True)
             await page.screenshot(path=str(path), full_page=full_page, timeout=30000)
@@ -688,15 +689,6 @@ async def _browser_screenshot_async(full_page: bool) -> str:
             return redact(json.dumps(report, ensure_ascii=False, indent=2))
         finally:
             await browser.close()
-
-
-async def _current_page(browser):
-    ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-    if ctx.pages:
-        page = ctx.pages[-1]
-    else:
-        page = await ctx.new_page()
-    return page
 
 
 def _attach_browser_event_collectors(page) -> dict[str, list[str]]:
@@ -722,12 +714,12 @@ async def _page_report(page, events: dict[str, list[str]], *, include_screenshot
     except Exception:
         pass
 
-    controls = await _evaluate_controls(page)
-    fields = await _evaluate_fields(page)
+    controls = await evaluate_controls(page)
+    fields = await evaluate_fields(page)
     report = {
         "url": page.url,
         "title": await page.title(),
-        "text_excerpt": _compact(body_text, 6000),
+        "text_excerpt": compact(body_text, 6000),
         "buttons_and_links": controls[:80],
         "form_fields": fields[:80],
         "console_errors": events.get("console", [])[-20:],
@@ -739,59 +731,6 @@ async def _page_report(page, events: dict[str, list[str]], *, include_screenshot
         await page.screenshot(path=str(path), full_page=True, timeout=30000)
         report["screenshot_path"] = str(path)
     return redact(json.dumps(report, ensure_ascii=False, indent=2))
-
-
-async def _evaluate_controls(page) -> list[dict]:
-    script = """
-    els => els.map(el => {
-      const text = (el.innerText || el.value || el.getAttribute('aria-label') ||
-        el.getAttribute('title') || '').replace(/\\s+/g, ' ').trim();
-      const href = el.href || el.getAttribute('href') || '';
-      return {
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute('type') || '',
-        text: text.slice(0, 160),
-        href: href.slice(0, 240),
-        disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'
-      };
-    }).filter(x => x.text || x.href)
-    """
-    try:
-        return await page.locator(
-            "a, button, input[type=button], input[type=submit], [role=button]"
-        ).evaluate_all(script)
-    except Exception:
-        return []
-
-
-async def _evaluate_fields(page) -> list[dict]:
-    script = """
-    els => els.map(el => {
-      const id = el.id || '';
-      const label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
-      const text = (el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
-        (label && label.innerText) || el.getAttribute('name') || id || '')
-        .replace(/\\s+/g, ' ').trim();
-      return {
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute('type') || '',
-        label: text.slice(0, 160),
-        required: !!el.required || el.getAttribute('aria-required') === 'true',
-        disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true'
-      };
-    }).filter(x => x.label || x.type)
-    """
-    try:
-        return await page.locator("input, textarea, select").evaluate_all(script)
-    except Exception:
-        return []
-
-
-def _compact(text: str, max_chars: int) -> str:
-    text = re.sub(r"\s+", " ", text or "").strip()
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + " ...[truncated]"
 
 
 def _commit_push_deploy(

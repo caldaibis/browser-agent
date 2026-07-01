@@ -208,6 +208,12 @@ TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
 - Snapshot discipline: do NOT re-snapshot after every click. Re-snapshot only
   when the page has clearly changed (new page, modal opened/closed) and you need
   fresh refs. Redundant snapshots waste the whole budget.
+- If you clicked something that should open a dialog/modal but browser_snapshot
+  doesn't show it (some HTML dialogs aren't built with proper accessibility
+  roles, so they never get a ref), use dom_scan — a raw-DOM fallback report,
+  not the accessibility tree — to see what's actually there, then click_by_text
+  (its exact visible text) instead of re-snapshotting repeatedly. Use these two
+  ONLY for that situation, not as your normal way to read/click the page.
 - Tools do NOT go "offline" and there is no "cooldown" — if something fails,
   re-snapshot and retry; never claim the server crashed or ask me to type
   "retry". You run autonomously to completion.

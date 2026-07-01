@@ -14,8 +14,18 @@ form, uploads docs, submits).
   AsyncOpenAI (DeepSeek) tool-calling over the **Playwright MCP**
   (`npx @playwright/mcp@latest --cdp-endpoint http://127.0.0.1:9222`) for
   snapshot/click/fill_form/file_upload. Filters raw-JS tools (browser_evaluate,
-  browser_run_code_unsafe), has a repeat-action guard + capped nudges, and
-  returns a structured `AgentResult(rc, outcome, summary)`.
+  browser_run_code_unsafe), has a repeat-action guard + capped nudges, a
+  one-shot nudge when `browser_snapshot` dominates the turns so far
+  (`_should_nudge_snapshot_overuse` — the exact/short-cycle repeat guard
+  can't catch this: the *type* of call repeats, not its arguments, since
+  each snapshot follows a *different* click), and returns a structured
+  `AgentResult(rc, outcome, summary)`. Two local (non-MCP) fallback tools,
+  `dom_scan`/`click_by_text` (`src/browser_dom_tools.py`, shared with
+  self-improvement's own browser diagnostics), give the model a way past
+  HTML dialogs/overlays that lack proper ARIA roles and never get a
+  `browser_snapshot` ref — raw DOM query + click-by-visible-text instead of
+  the accessibility tree. Not arbitrary JS: each is one fixed, narrow
+  operation, unlike the still-blocked `browser_evaluate`.
 - `src/apply.py` — build the prompt, run the agent, persist a per-run transcript
   to `logs/transcripts/<ts>_<source>_<address>.log`. Apply model:
   `deepseek-v4-pro` (override via `APPLY_MODEL`);
@@ -192,6 +202,22 @@ form, uploads docs, submits).
 - **Use the Playwright MCP high-level tools** (snapshot→ref→click/fill_form);
   the raw-JS path (`browser_cdp`/`browser_evaluate`) caused 50+ calls + full-page
   dumps for one task. They stay filtered out.
+- **Accessibility-tree snapshots miss dialogs built without proper ARIA
+  roles.** Seen repeatedly on real listings, most recently Hof van Oslo via
+  REBO Groep (01-07-2026): a "credit check" consent dialog opened and
+  intercepted all clicks, but `browser_snapshot` never showed it (no
+  `dialog`/`button` role on its markup) — the agent burned ~18 of 60 turns
+  trying screenshots, `boxes` snapshots, and console/network inspection
+  before giving up. `browser_handle_dialog` doesn't help either — that's for
+  native JS `alert`/`confirm`, not in-page HTML. Fix: `dom_scan`/
+  `click_by_text` (raw DOM query + click-by-visible-text, `src/
+  browser_dom_tools.py`) as a narrow, explicitly-scoped fallback — not a
+  reopening of raw JS. Also seen in the same transcript: ~29 of 60 turns
+  were `browser_snapshot` calls, each after a *different* click, so neither
+  the prompt's own "don't re-snapshot every click" guidance nor the
+  exact/short-cycle repeat guard caught it (the repeated element is the call
+  *type*, not its arguments) — `_should_nudge_snapshot_overuse` adds a
+  one-shot code-level nudge for this specific pattern.
 - **Already-applied = STOP, never resubmit.** Detect by control wording
   ("Aanvraag wijzigen", "Reactie intrekken", "je hebt gereageerd", "Doorgaan
   met gesprek"). Pre-filled fields / saved docs alone do NOT mean already-applied.

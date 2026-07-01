@@ -5,10 +5,11 @@ Run: uv run python -m unittest tests/test_browser_agent_loop.py -v
 """
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src import browser_agent
 
@@ -52,6 +53,23 @@ class _FakeAsyncOpenAI:
         self.chat = SimpleNamespace(completions=_FakeCompletions(responses))
 
 
+class _FakeFunctionCall:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCall:
+    def __init__(self, id_, name, arguments="{}"):
+        self.id = id_
+        self.function = _FakeFunctionCall(name, arguments)
+
+
+class _FakeToolResult:
+    def __init__(self, text):
+        self.content = [SimpleNamespace(text=text)]
+
+
 class _FakeMcpSession:
     async def initialize(self):
         pass
@@ -61,6 +79,19 @@ class _FakeMcpSession:
 
     async def call_tool(self, name, args):  # pragma: no cover - not exercised
         raise AssertionError(f"unexpected tool call: {name}({args})")
+
+
+class _FakeMcpSessionPermissive:
+    """Like _FakeMcpSession but succeeds for any tool name, for tests that
+    need many turns of real browser_snapshot/browser_click calls."""
+    async def initialize(self):
+        pass
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=[])
+
+    async def call_tool(self, name, args):
+        return _FakeToolResult(f"ok: {name} {args}")
 
 
 class _FakeAsyncCM:
@@ -82,10 +113,10 @@ class _CollectingLogger:
         self.lines.append(s)
 
 
-def _patch_agent(responses):
+def _patch_agent(responses, session=None):
     """Patch the OpenAI + MCP boundary so _run runs against canned responses."""
     fake_client = _FakeAsyncOpenAI(responses)
-    fake_session = _FakeMcpSession()
+    fake_session = session if session is not None else _FakeMcpSession()
     return (
         patch.object(browser_agent, "AsyncOpenAI", lambda *a, **kw: fake_client),
         patch.object(browser_agent, "stdio_client", lambda params: _FakeAsyncCM((None, None))),
@@ -115,6 +146,24 @@ class TestExtractOutcome(unittest.TestCase):
         self.assertEqual(browser_agent._parse_outcome("", 2), "error")
         self.assertEqual(browser_agent._parse_outcome("", 1), "incomplete")
         self.assertEqual(browser_agent._parse_outcome("", 0), "unknown")
+
+
+class TestShouldNudgeSnapshotOveruse(unittest.TestCase):
+    def test_below_turn_floor_never_nudges(self):
+        self.assertFalse(browser_agent._should_nudge_snapshot_overuse(20, 9))
+
+    def test_few_snapshots_relative_to_turns_no_nudge(self):
+        self.assertFalse(browser_agent._should_nudge_snapshot_overuse(2, 20))
+
+    def test_hof_van_oslo_ratio_triggers_well_before_the_end(self):
+        # The real transcript ended at 29 snapshots in 60 turns, but at that
+        # steady ~1-in-2 ratio the one-shot nudge should have already fired
+        # partway through -- e.g. by turn 20 with 14 snapshots so far.
+        self.assertTrue(browser_agent._should_nudge_snapshot_overuse(14, 20))
+
+    def test_threshold_boundary(self):
+        self.assertTrue(browser_agent._should_nudge_snapshot_overuse(6, 11))
+        self.assertFalse(browser_agent._should_nudge_snapshot_overuse(5, 11))
 
 
 class TestRunLoop(unittest.IsolatedAsyncioTestCase):
@@ -162,6 +211,62 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser_agent._parse_outcome(text, rc), "incomplete")
         nudge_lines = [l for l in log.lines if "[agent] nudge" in l]
         self.assertEqual(len(nudge_lines), 2, "both nudges should have been spent, not skipped")
+
+    async def test_excessive_resnapshotting_triggers_one_shot_nudge(self):
+        """Hof van Oslo via REBO Groep (01-07-2026): ~29 of 60 turns were
+        browser_snapshot, each following a *different* click, so the
+        exact/short-cycle repeat guard never fires (the repeated element is
+        the call TYPE, not its arguments). Alternate snapshot/click(unique
+        ref) for 11 turns -- the nudge should fire exactly once, at turn 11
+        (turn>=10 and snapshot_calls>=max(6, turn//2) => 6>=6)."""
+        responses = []
+        for i in range(1, 12):
+            if i % 2 == 1:
+                responses.append(_FakeResponse(
+                    tool_calls=[_FakeToolCall(f"id{i}", "browser_snapshot", "{}")]))
+            else:
+                responses.append(_FakeResponse(tool_calls=[_FakeToolCall(
+                    f"id{i}", "browser_click", json.dumps({"target": f"e{i}"}))]))
+        responses.append(_FakeResponse(content="Done.\nOUTCOME: blocked",
+                                        tool_calls=None, finish_reason="stop"))
+        patches = _patch_agent(responses, session=_FakeMcpSessionPermissive())
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2]:
+            rc, text = await browser_agent._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake", log=log,
+            )
+        self.assertEqual(browser_agent._parse_outcome(text, rc), "blocked")
+        nudge_lines = [l for l in log.lines if "snapshot-overuse nudge" in l]
+        self.assertEqual(len(nudge_lines), 1,
+                          "should fire exactly once, not every subsequent turn")
+
+    async def test_dom_scan_and_click_by_text_handled_locally_not_via_mcp(self):
+        """dom_scan/click_by_text are local fallback tools (src/
+        browser_dom_tools.py) -- must NOT go through session.call_tool
+        (the strict _FakeMcpSession raises on any MCP call), and must be
+        dispatched to browser_dom_tools with the run's cdp_url."""
+        responses = [
+            _FakeResponse(tool_calls=[_FakeToolCall("id1", "dom_scan", "{}")]),
+            _FakeResponse(tool_calls=[_FakeToolCall(
+                "id2", "click_by_text", json.dumps({"text": "Ja, ik ga akkoord"}))]),
+            _FakeResponse(content="Done.\nOUTCOME: submitted",
+                          tool_calls=None, finish_reason="stop"),
+        ]
+        patches = _patch_agent(responses)  # strict session: raises on MCP call_tool
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2], \
+             patch.object(browser_agent.browser_dom_tools, "dom_scan",
+                          AsyncMock(return_value="dom report")) as mock_scan, \
+             patch.object(browser_agent.browser_dom_tools, "click_by_text",
+                          AsyncMock(return_value="clicked")) as mock_click:
+            rc, text = await browser_agent._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake-cdp", log=log,
+            )
+        self.assertEqual(browser_agent._parse_outcome(text, rc), "submitted")
+        mock_scan.assert_awaited_once_with("http://fake-cdp")
+        mock_click.assert_awaited_once_with("http://fake-cdp", "Ja, ik ga akkoord")
 
 
 if __name__ == "__main__":
