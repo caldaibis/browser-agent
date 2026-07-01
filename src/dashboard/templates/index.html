@@ -117,7 +117,7 @@
   <article>
     <header><strong>Recent Submissions</strong> · <a href="/submissions">all submissions</a></header>
     <table>
-      <thead><tr><th>When</th><th>Listing</th><th>Origin</th><th>Status</th></tr></thead>
+      <thead><tr><th>When</th><th>Listing</th><th>Origin</th><th>Status</th><th>LLM</th></tr></thead>
       <tbody>
         {% for s in recent %}
         <tr>
@@ -131,6 +131,7 @@
           </td>
           <td><span class="badge origin">{{ s.origin_label }}</span></td>
           <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
+          <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
         </tr>
         {% endfor %}
       </tbody>

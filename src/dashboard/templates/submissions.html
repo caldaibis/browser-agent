@@ -36,6 +36,7 @@
         <th>Origin</th>
         <th>Status</th>
         <th>Took</th>
+        <th>LLM</th>
         <th>vs Stekkies</th>
         <th>vs Huurwoningen</th>
       </tr>
@@ -55,6 +56,13 @@
         <td><span class="badge origin">{{ s.origin_label }}</span></td>
         <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
         <td class="muted-txt nowrap">{{ (s.seconds|round(0)|int)|string + 's' if s.seconds else '—' }}</td>
+        <td class="muted-txt nowrap">
+          {% if s.token_usage %}
+          {{ s.token_usage.display_summary }}
+          {% else %}
+          —
+          {% endif %}
+        </td>
         <td class="{{ 'delta-win' if r and r.poller_won_stekkies else 'delta-loss' if r and r.stekkies_lead_s is not none else 'delta-none' }}">
           {{ fmt_delta(r.stekkies_lead_s) if r else '—' }}
         </td>
@@ -63,7 +71,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="muted-txt">No submissions match these filters.</td></tr>
+      <tr><td colspan="8" class="muted-txt">No submissions match these filters.</td></tr>
       {% endfor %}
     </tbody>
   </table>

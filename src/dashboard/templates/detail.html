@@ -20,6 +20,18 @@
         <tr><th>Poller detected by</th><td>{{ sub.detected_by_label or '—' }}</td></tr>
         {% endif %}
         <tr><th>Duration</th><td>{{ (sub.seconds|round(1))|string + 's' if sub.seconds else '—' }}</td></tr>
+        <tr><th>LLM cost</th><td>{{ sub.token_usage.display_cost if sub.token_usage else '—' }}</td></tr>
+        {% if sub.token_usage %}
+        <tr><th>LLM tokens</th><td>
+          {{ sub.token_usage.display_tokens }}
+          <span class="muted-txt">
+            (input {{ sub.token_usage.input_tokens if sub.token_usage.input_tokens is not none else 'unknown' }},
+            output {{ sub.token_usage.output_tokens }},
+            reasoning {{ sub.token_usage.reasoning_tokens }})
+          </span>
+        </td></tr>
+        <tr><th>LLM model</th><td>{{ sub.token_usage.model or 'unknown' }}{% if sub.token_usage.cost_is_partial %} <span class="muted-txt">(cost is output-only lower bound; older transcript lacks input tokens)</span>{% endif %}</td></tr>
+        {% endif %}
         <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
       </tbody>
     </table>

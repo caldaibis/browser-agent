@@ -218,11 +218,24 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 # cap) from "cap too low" (finish_reason=length at modest counts).
                 usage = getattr(resp, "usage", None)
                 ctd = getattr(usage, "completion_tokens_details", None)
+                ptd = getattr(usage, "prompt_tokens_details", None)
+                prompt_tok = getattr(usage, "prompt_tokens", None)
                 reasoning_tok = getattr(ctd, "reasoning_tokens", None)
                 completion_tok = getattr(usage, "completion_tokens", None)
+                total_tok = getattr(usage, "total_tokens", None)
+                cache_hit_tok = (
+                    getattr(usage, "prompt_cache_hit_tokens", None)
+                    or getattr(ptd, "cached_tokens", None)
+                )
+                cache_miss_tok = getattr(usage, "prompt_cache_miss_tokens", None)
                 log.line(f"[agent] turn {turn} finish={finish_reason} "
+                         f"prompt_tokens={prompt_tok} "
                          f"completion_tokens={completion_tok} "
-                         f"reasoning_tokens={reasoning_tok} (cap={MAX_TOKENS})")
+                         f"total_tokens={total_tok} "
+                         f"reasoning_tokens={reasoning_tok} "
+                         f"cache_hit_tokens={cache_hit_tok} "
+                         f"cache_miss_tokens={cache_miss_tok} "
+                         f"(cap={MAX_TOKENS})")
 
                 # A turn cut off mid-reasoning comes back as finish_reason="length"
                 # with empty content and no tool_calls — a truncation glitch. We've

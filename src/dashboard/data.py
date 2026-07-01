@@ -8,6 +8,7 @@ through redact(), and *.prompt.txt is never read here.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections import Counter, defaultdict
@@ -36,6 +37,17 @@ ATTEMPT_STATUSES = {
 }
 SERVICES = ["orchestrator", "poller", "browser-host", "xvfb", "dashboard", "healthcheck.timer"]
 
+# DeepSeek publishes model prices per 1M tokens. These defaults match the
+# official DeepSeek pricing page checked on 2026-07-01; override with
+# LLM_MODEL_PRICES_JSON or the global LLM_*_USD_PER_1M env vars if pricing
+# changes before the next code update.
+DEFAULT_MODEL_PRICES = {
+    "deepseek-v4-pro": {"input": 0.435, "cached_input": 0.003625, "output": 0.87},
+    "deepseek-v4-flash": {"input": 0.14, "cached_input": 0.0028, "output": 0.28},
+    "deepseek-chat": {"input": 0.14, "cached_input": 0.0028, "output": 0.28},
+    "deepseek-reasoner": {"input": 0.14, "cached_input": 0.0028, "output": 0.28},
+}
+
 
 def _slug(text: str) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "-", (text or "").strip()).strip("-").lower()
@@ -61,6 +73,7 @@ class Submission:
     msg_id: str = ""
     msg_received_ts: str = ""
     detected_ts: str = ""
+    token_usage: "TokenUsage | None" = None
 
     @property
     def when(self) -> datetime | None:
@@ -98,6 +111,40 @@ class Submission:
     @property
     def key(self) -> str:
         return canonical_url(self.source_url) if self.source_url else ""
+
+
+@dataclass
+class TokenUsage:
+    model: str = ""
+    input_tokens: int | None = None
+    output_tokens: int = 0
+    total_tokens: int | None = None
+    reasoning_tokens: int = 0
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    cost_is_partial: bool = False
+
+    @property
+    def display_tokens(self) -> str:
+        if self.total_tokens is not None:
+            return f"{format_count(self.total_tokens)} tok"
+        if self.input_tokens is not None:
+            return f"{format_count(self.input_tokens + self.output_tokens)} tok"
+        return f"{format_count(self.output_tokens)} out"
+
+    @property
+    def display_cost(self) -> str:
+        if self.estimated_cost_usd is None:
+            return "—"
+        prefix = "≥" if self.cost_is_partial else ""
+        return f"{prefix}{format_usd(self.estimated_cost_usd)}"
+
+    @property
+    def display_summary(self) -> str:
+        if self.estimated_cost_usd is None:
+            return self.display_tokens
+        return f"{self.display_cost} · {self.display_tokens}"
 
 
 @dataclass
@@ -165,6 +212,185 @@ def format_delta(seconds: float | None) -> str:
     return f"poller +{text}" if ahead else f"mail +{text}"
 
 
+def format_count(value: int | None) -> str:
+    if value is None:
+        return "—"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
+def format_usd(value: float | None) -> str:
+    if value is None:
+        return "—"
+    if value < 0.01:
+        return f"${value:.4f}"
+    return f"${value:.2f}"
+
+
+_USAGE_FIELD_RE = re.compile(r"([a-z_]+)=([0-9]+|None)")
+_MODEL_RE = re.compile(r"\[agent\]\s+model=([^\s]+)")
+
+
+def _int_or_none(value: str | None) -> int | None:
+    if not value or value == "None":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _pricing_table() -> dict[str, dict[str, float]]:
+    prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
+    raw = os.environ.get("LLM_MODEL_PRICES_JSON", "")
+    if raw:
+        try:
+            for model, vals in json.loads(raw).items():
+                prices[str(model).lower()] = {
+                    "input": float(vals["input"]),
+                    "cached_input": float(vals.get("cached_input", vals["input"])),
+                    "output": float(vals["output"]),
+                }
+        except Exception:
+            pass
+    global_input = os.environ.get("LLM_INPUT_USD_PER_1M")
+    global_cached = os.environ.get("LLM_CACHED_INPUT_USD_PER_1M")
+    global_output = os.environ.get("LLM_OUTPUT_USD_PER_1M")
+    if global_input and global_output:
+        try:
+            for vals in prices.values():
+                vals["input"] = float(global_input)
+                vals["cached_input"] = float(global_cached or global_input)
+                vals["output"] = float(global_output)
+        except ValueError:
+            pass
+    return prices
+
+
+def _estimate_cost(
+    *,
+    model: str,
+    input_tokens: int | None,
+    output_tokens: int,
+    cache_hit_tokens: int,
+    cache_miss_tokens: int | None,
+) -> tuple[float | None, bool]:
+    prices = _pricing_table().get((model or "").lower())
+    if not prices:
+        return None, False
+    output_cost = output_tokens * prices["output"] / 1_000_000
+    if input_tokens is None:
+        return output_cost if output_tokens else None, bool(output_tokens)
+
+    if cache_hit_tokens and cache_miss_tokens is None:
+        cache_miss_tokens = max(input_tokens - cache_hit_tokens, 0)
+    if cache_hit_tokens or cache_miss_tokens is not None:
+        miss = cache_miss_tokens if cache_miss_tokens is not None else input_tokens
+        input_cost = (
+            cache_hit_tokens * prices["cached_input"] / 1_000_000
+            + miss * prices["input"] / 1_000_000
+        )
+    else:
+        input_cost = input_tokens * prices["input"] / 1_000_000
+    return input_cost + output_cost, False
+
+
+def parse_token_usage(text: str) -> TokenUsage | None:
+    """Parse per-turn usage lines from an apply transcript.
+
+    Older transcripts only logged completion/reasoning tokens. For those rows
+    we still show output tokens and a lower-bound output cost.
+    """
+    if not text:
+        return None
+    model = ""
+    input_tokens: int | None = None
+    output_tokens = 0
+    total_tokens: int | None = None
+    reasoning_tokens = 0
+    cache_hit_tokens = 0
+    cache_miss_tokens: int | None = None
+    saw_usage = False
+    saw_prompt = False
+    for line in text.splitlines():
+        model_match = _MODEL_RE.search(line)
+        if model_match:
+            model = model_match.group(1)
+        if "completion_tokens=" not in line:
+            continue
+        fields = {k: _int_or_none(v) for k, v in _USAGE_FIELD_RE.findall(line)}
+        if not fields:
+            continue
+        saw_usage = True
+        prompt = fields.get("prompt_tokens") or fields.get("input_tokens")
+        if prompt is not None:
+            saw_prompt = True
+            input_tokens = (input_tokens or 0) + prompt
+        completion = fields.get("completion_tokens") or fields.get("output_tokens")
+        if completion is not None:
+            output_tokens += completion
+        total = fields.get("total_tokens")
+        if total is not None:
+            total_tokens = (total_tokens or 0) + total
+        reasoning = fields.get("reasoning_tokens")
+        if reasoning is not None:
+            reasoning_tokens += reasoning
+        hit = (
+            fields.get("cache_hit_tokens")
+            or fields.get("prompt_cache_hit_tokens")
+            or fields.get("cached_tokens")
+        )
+        if hit is not None:
+            cache_hit_tokens += hit
+        miss = fields.get("cache_miss_tokens") or fields.get("prompt_cache_miss_tokens")
+        if miss is not None:
+            cache_miss_tokens = (cache_miss_tokens or 0) + miss
+    if not saw_usage:
+        return None
+    if not saw_prompt:
+        input_tokens = None
+        total_tokens = None
+    cost, partial = _estimate_cost(
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_hit_tokens=cache_hit_tokens,
+        cache_miss_tokens=cache_miss_tokens,
+    )
+    return TokenUsage(
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cache_hit_tokens=cache_hit_tokens,
+        cache_miss_tokens=cache_miss_tokens,
+        estimated_cost_usd=cost,
+        cost_is_partial=partial,
+    )
+
+
+@lru_cache(maxsize=512)
+def _parse_token_usage_file(path: str, mtime_ns: int) -> TokenUsage | None:
+    try:
+        return parse_token_usage(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def token_usage_for_submission(sub: Submission) -> TokenUsage | None:
+    p = find_transcript(sub)
+    if not p:
+        return None
+    try:
+        return _parse_token_usage_file(str(p), p.stat().st_mtime_ns)
+    except Exception:
+        return None
+
+
 def load_submissions() -> list[Submission]:
     out: list[Submission] = []
     if not MAIL_SUMMARY.exists():
@@ -177,7 +403,7 @@ def load_submissions() -> list[Submission]:
             r = json.loads(line)
         except json.JSONDecodeError:
             continue
-        out.append(Submission(
+        sub = Submission(
             id=i,
             ts=r.get("ts", ""),
             status=r.get("status", "unknown"),
@@ -192,7 +418,9 @@ def load_submissions() -> list[Submission]:
             msg_id=r.get("msg_id") or "",
             msg_received_ts=r.get("msg_received_ts") or "",
             detected_ts=r.get("detected_ts") or "",
-        ))
+        )
+        sub.token_usage = token_usage_for_submission(sub)
+        out.append(sub)
     return out
 
 
