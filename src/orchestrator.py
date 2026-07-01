@@ -13,7 +13,8 @@ from datetime import datetime
 from .config import LOG_DIR, PROJECT_ROOT
 from .stekkies import extract_listing
 from .apply import apply
-from .gmail_watch import mark_read, watch
+from .gmail_watch import message_received_ts, mark_read, watch
+from .poller.dedup import canonical_url
 from .notify import send_status_email
 
 
@@ -57,6 +58,7 @@ def _processed_keys() -> set[str]:
             value = rec.get(field)
             if value:
                 keys.add(value)
+                keys.add(canonical_url(value))
     return keys
 
 
@@ -72,6 +74,7 @@ _NO_EMAIL_STATUSES = {"skipped_duplicate", "no_listing_link"}
 
 
 def _finish(**kw) -> dict:
+    kw.setdefault("trigger", "stekkies_mail" if kw.get("msg_id") else "manual")
     rec = _mail_summary(**kw)
     msg_id = rec.get("msg_id") or "-"
     status = rec.get("status")
@@ -84,13 +87,18 @@ def _finish(**kw) -> dict:
     return rec
 
 
-def process(stekkies_url: str, msg_id: str | None = None) -> dict:
+def process(stekkies_url: str, msg_id: str | None = None,
+            trigger: str | None = None) -> dict:
     t0 = time.time()
+    received_ts = message_received_ts(msg_id) if msg_id else None
     _log("listing_received", msg_id=msg_id, url=stekkies_url)
-    if stekkies_url in _processed_keys():
+    keys = _processed_keys()
+    if stekkies_url in keys or canonical_url(stekkies_url) in keys:
         _log("duplicate_listing_skipped", msg_id=msg_id, url=stekkies_url)
         return _finish(
             msg_id=msg_id,
+            trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+            msg_received_ts=received_ts,
             stekkies_url=stekkies_url,
             status="skipped_duplicate",
             mark_read=True,
@@ -108,6 +116,8 @@ def process(stekkies_url: str, msg_id: str | None = None) -> dict:
             _log("no_source_url", note="cannot apply without external link")
             return _finish(
                 msg_id=msg_id,
+                trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+                msg_received_ts=received_ts,
                 stekkies_url=stekkies_url,
                 source=listing.source_name,
                 address=listing.address,
@@ -115,10 +125,12 @@ def process(stekkies_url: str, msg_id: str | None = None) -> dict:
                 mark_read=True,
                 message="Could not find an external source URL, so no application was submitted.",
             )
-        if listing.source_url in _processed_keys():
+        if listing.source_url in keys or canonical_url(listing.source_url) in keys:
             _log("duplicate_source_skipped", msg_id=msg_id, source_url=listing.source_url)
             return _finish(
                 msg_id=msg_id,
+                trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+                msg_received_ts=received_ts,
                 stekkies_url=stekkies_url,
                 source_url=listing.source_url,
                 source=listing.source_name,
@@ -144,6 +156,8 @@ def process(stekkies_url: str, msg_id: str | None = None) -> dict:
             )
         return _finish(
             msg_id=msg_id,
+            trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+            msg_received_ts=received_ts,
             stekkies_url=stekkies_url,
             source_url=listing.source_url,
             source=listing.source_name,
@@ -159,6 +173,8 @@ def process(stekkies_url: str, msg_id: str | None = None) -> dict:
         traceback.print_exc()
         return _finish(
             msg_id=msg_id,
+            trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+            msg_received_ts=received_ts,
             stekkies_url=stekkies_url,
             status="error",
             mark_read=True,
@@ -176,12 +192,14 @@ def main() -> int:
         if not url:
             result = _finish(
                 msg_id=msg_id,
+                trigger="stekkies_mail",
+                msg_received_ts=message_received_ts(msg_id),
                 status="no_listing_link",
                 mark_read=True,
                 message="Stekkies email matched the Gmail query but no listing link was found.",
             )
         else:
-            result = process(url, msg_id=msg_id)
+            result = process(url, msg_id=msg_id, trigger="stekkies_mail")
         if result.get("mark_read"):
             try:
                 mark_read(msg_id)

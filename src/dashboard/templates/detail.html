@@ -1,34 +1,81 @@
 {% extends "base.html" %}
 {% block title %}{{ sub.address or 'Submission' }}{% endblock %}
 {% block content %}
-<p><a href="/submissions">← submissions</a></p>
+<p><a href="/submissions">submissions</a></p>
 <h3>{{ sub.address or 'Listing' }}
-  <span class="badge {{ status_class(sub.status) }}">{{ sub.status }}</span></h3>
+  <span class="badge {{ status_class(sub.status) }}">{{ sub.status }}</span>
+  <span class="badge origin">{{ sub.origin_label }}</span>
+</h3>
 
-<table>
-  <tbody>
-    <tr><th>When</th><td>{{ sub.ts.replace('T',' ') }}</td></tr>
-    <tr><th>Source</th><td>{{ sub.source or '—' }}</td></tr>
-    <tr><th>Listing</th><td>
-      {% if sub.source_url %}<a href="{{ sub.source_url }}" target="_blank" rel="noopener">{{ sub.source_url }}</a>{% else %}—{% endif %}
-    </td></tr>
-    <tr><th>Stekkies</th><td><a href="{{ sub.stekkies_url }}" target="_blank" rel="noopener">{{ sub.stekkies_url }}</a></td></tr>
-    <tr><th>Duration</th><td>{{ (sub.seconds|round(1))|string + 's' if sub.seconds else '—' }}</td></tr>
-    <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
-  </tbody>
-</table>
+<div class="grid2">
+  <article>
+    <header><strong>Submission</strong></header>
+    <table>
+      <tbody>
+        <tr><th>Finished</th><td>{{ sub.ts.replace('T',' ') }}</td></tr>
+        <tr><th>Detected</th><td>{{ (sub.detected_ts or sub.msg_received_ts or '—').replace('T',' ') }}</td></tr>
+        <tr><th>Origin</th><td>{{ sub.origin_label }}</td></tr>
+        <tr><th>Source</th><td>{{ sub.source or '—' }}</td></tr>
+        <tr><th>Duration</th><td>{{ (sub.seconds|round(1))|string + 's' if sub.seconds else '—' }}</td></tr>
+        <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
+      </tbody>
+    </table>
+  </article>
+
+  <article>
+    <header><strong>Mail Race</strong></header>
+    {% if race %}
+    <table>
+      <tbody>
+        <tr><th>Poller detected</th><td>{{ race.poller_ts.replace('T',' ') }}</td></tr>
+        <tr>
+          <th>Stekkies mail</th>
+          <td class="{{ 'delta-win' if race.poller_won_stekkies else 'delta-loss' if race.stekkies_lead_s is not none else 'delta-none' }}">
+            {{ race.stekkies_ts.replace('T',' ') if race.stekkies_ts else 'not seen' }}
+            <span class="nowrap">({{ fmt_delta(race.stekkies_lead_s) }})</span>
+          </td>
+        </tr>
+        <tr>
+          <th>Huurwoningen mail</th>
+          <td class="{{ 'delta-win' if race.poller_won_huurwoningen else 'delta-loss' if race.huurwoningen_lead_s is not none else 'delta-none' }}">
+            {{ race.huurwoningen_ts.replace('T',' ') if race.huurwoningen_ts else 'not seen' }}
+            <span class="nowrap">({{ fmt_delta(race.huurwoningen_lead_s) }})</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted-txt">No poller race record for this listing.</p>
+    {% endif %}
+  </article>
+</div>
+
+<article>
+  <header><strong>Links</strong></header>
+  <table>
+    <tbody>
+      <tr><th>Listing</th><td>
+        {% if sub.source_url %}<a href="{{ sub.source_url }}" target="_blank" rel="noopener">{{ sub.source_url }}</a>{% else %}—{% endif %}
+      </td></tr>
+      <tr><th>Stekkies</th><td>
+        {% if sub.stekkies_url %}<a href="{{ sub.stekkies_url }}" target="_blank" rel="noopener">{{ sub.stekkies_url }}</a>{% else %}—{% endif %}
+      </td></tr>
+      <tr><th>Gmail message</th><td>{{ sub.msg_id or '—' }}</td></tr>
+    </tbody>
+  </table>
+</article>
 
 {% if sub.status not in ['submitted','already_applied','skipped_duplicate'] and sub.stekkies_url %}
 <form hx-post="/action/retry?url={{ sub.stekkies_url|urlencode }}" hx-swap="none"
       onsubmit="this.querySelector('button').setAttribute('aria-busy','true')">
   <button class="contrast">Retry this listing</button>
-  <small class="muted-txt">Re-runs the agent now (briefly shares the browser with the watcher).</small>
+  <small class="muted-txt">Re-runs the Stekkies flow now.</small>
 </form>
 {% endif %}
 
 <article>
-  <header><strong>Agent transcript</strong> <span class="muted-txt">(secrets redacted)</span></header>
+  <header><strong>Agent Transcript</strong> <span class="muted-txt">(secrets redacted)</span></header>
   {% if transcript %}<pre class="transcript">{{ transcript }}</pre>
-  {% else %}<p class="muted-txt">No transcript (the agent did not run for this listing — e.g. duplicate skip or no source URL).</p>{% endif %}
+  {% else %}<p class="muted-txt">No transcript for this listing.</p>{% endif %}
 </article>
 {% endblock %}

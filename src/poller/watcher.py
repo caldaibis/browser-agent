@@ -27,13 +27,15 @@ from ..config import LOG_DIR
 from ..notify import send_alert
 from . import filters, judge
 from .browser_lock import browser_lock
-from .dedup import SeenStore
+from .dedup import PROCESSED_FILE, SeenStore
 from .fetch import Blocked, fetch
 from .models import RawListing, SiteConfig
 from .parsers import parse_jsonld
 from .registry import by_name, enabled_sites
 
 POLL_LOG = LOG_DIR / "poller.jsonl"
+MAIL_SUMMARY_LOG = LOG_DIR / "mail_summary.jsonl"
+ACTIVITY_LOG = LOG_DIR / "activity.log"
 
 # Tier-3 render settle time (ms) after DOM load, for the listing JS to populate.
 SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
@@ -48,6 +50,35 @@ def _log(event: str, **kw) -> None:
     with POLL_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     print(f"[poll] {event}: " + " ".join(f"{k}={v}" for k, v in kw.items()))
+
+
+def _summary(**kw) -> dict:
+    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "trigger": "poller", **kw}
+    MAIL_SUMMARY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with MAIL_SUMMARY_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
+
+
+def _activity(message: str) -> None:
+    ts = datetime.now().isoformat(timespec="seconds")
+    line = f"[{ts}] {message}"
+    with ACTIVITY_LOG.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def _remember_processed(listing: RawListing, outcome: str) -> None:
+    PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "trigger": "poller",
+        "source_url": listing.source_url,
+        "source": listing.source_name,
+        "address": listing.address,
+        "outcome": outcome,
+    }
+    with PROCESSED_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 async def _render_tier3(site: SiteConfig) -> str:
@@ -136,18 +167,43 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
 
     while True:
         listing = await queue.get()
+        t0 = datetime.now()
         try:
             _log("apply_start", url=listing.source_url, source=listing.source_name)
             result = await asyncio.to_thread(apply, listing.to_listing())
+            seconds = round((datetime.now() - t0).total_seconds(), 1)
             _log("apply_done", url=listing.source_url,
-                 outcome=result.outcome, rc=result.rc)
+                 outcome=result.outcome, rc=result.rc, seconds=seconds)
+            rec = _summary(
+                source_url=listing.source_url,
+                source=listing.source_name,
+                address=listing.address or listing.title,
+                status=result.outcome,
+                returncode=result.rc,
+                seconds=seconds,
+                detected_ts=listing.detected_ts,
+                message=result.summary or f"Poller agent finished with outcome={result.outcome} (rc={result.rc}).",
+            )
+            _activity(
+                f"trigger=poller status={rec.get('status')} source={rec.get('source') or 'unknown source'} "
+                f"address={rec.get('address') or 'unknown address'} - {rec.get('message')}"
+            )
             # Mark seen only on a terminal outcome, mirroring the orchestrator:
             # transient failures stay retryable on the next poll.
             if getattr(result, "terminal", True):
                 seen.mark(listing.source_url, outcome=result.outcome,
                           source=listing.source_name, address=listing.address)
+                _remember_processed(listing, result.outcome)
         except Exception as e:  # noqa: BLE001 - one bad apply must not kill the worker
             _log("apply_error", url=listing.source_url, error=f"{type(e).__name__}: {e}")
+            _summary(
+                source_url=listing.source_url,
+                source=listing.source_name,
+                address=listing.address or listing.title,
+                status="error",
+                detected_ts=listing.detected_ts,
+                message=f"{type(e).__name__}: {e}",
+            )
         finally:
             queue.task_done()
 
@@ -198,6 +254,7 @@ async def _consider(l: RawListing, queue: "asyncio.Queue[RawListing]",
         _log("judged_out", url=l.source_url, reason=reason)
         seen.mark(l.source_url, judged=reason)
         return
+    l.detected_ts = l.detected_ts or datetime.now().isoformat(timespec="seconds")
     _log("qualified", url=l.source_url, source=l.source_name,
          address=l.address, judge=reason)
     await queue.put(l)

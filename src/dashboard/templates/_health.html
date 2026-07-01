@@ -31,7 +31,10 @@
     <button class="secondary" hx-post="/action/healthcheck" hx-swap="none"
             onclick="this.setAttribute('aria-busy','true')">Run health check</button>
     <button class="secondary" hx-post="/action/pause" hx-swap="none"
-            hx-confirm="Pause the inbox watcher?">Pause</button>
-    <button hx-post="/action/resume" hx-swap="none">Resume</button>
+            hx-confirm="Pause the inbox watcher?">Pause inbox</button>
+    <button hx-post="/action/resume" hx-swap="none">Resume inbox</button>
+    <button class="secondary" hx-post="/action/poller-pause" hx-swap="none"
+            hx-confirm="Pause the active site poller?">Pause poller</button>
+    <button hx-post="/action/poller-resume" hx-swap="none">Resume poller</button>
   </footer>
 </article>

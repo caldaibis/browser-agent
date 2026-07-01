@@ -8,31 +8,97 @@
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.3/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
-    :root { --pico-font-size: 95%; }
-    main.container { max-width: 1100px; }
-    .badge { padding: .15rem .55rem; border-radius: 1rem; font-size: .78rem; font-weight: 600; white-space: nowrap; }
-    .badge.ok   { background:#d8f5e0; color:#137a3b; }
-    .badge.warn { background:#fdeccf; color:#8a5a00; }
-    .badge.bad  { background:#fcdada; color:#a11; }
-    .badge.muted{ background:#e9ecef; color:#555; }
-    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1rem; }
-    .card  { background:var(--pico-card-background-color); border:1px solid var(--pico-muted-border-color); border-radius:.5rem; padding:1rem; }
-    .card .big { font-size:1.9rem; font-weight:700; line-height:1; }
-    .card .lbl { color:var(--pico-muted-color); font-size:.8rem; text-transform:uppercase; letter-spacing:.03em; }
-    table td, table th { padding:.4rem .5rem; font-size:.9rem; }
-    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; }
-    @media (max-width:800px){ .grid2{grid-template-columns:1fr;} }
-    pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.35; }
-    .dot { height:.7rem; width:.7rem; border-radius:50%; display:inline-block; margin-right:.4rem; }
-    .dot.up{background:#1a9e4b;} .dot.down{background:#c0392b;} .dot.unk{background:#999;}
-    nav.top a { margin-right:1rem; }
+    :root {
+      --pico-font-size: 94%;
+      --line: #d9e0e7;
+      --panel: #ffffff;
+      --soft: #f6f8fb;
+      --ink-2: #4d5b67;
+      --accent: #1769aa;
+      --good: #16794a;
+      --warn: #946200;
+      --bad: #b3261e;
+    }
+    body { background: #f4f6f8; }
+    main.container { max-width: 1280px; }
+    nav.top {
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 1rem;
+      padding: .65rem 0;
+    }
+    nav.top strong { letter-spacing: 0; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.45rem;
+      padding: .12rem .5rem;
+      border-radius: .35rem;
+      font-size: .76rem;
+      font-weight: 700;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+    .badge.ok   { background:#e0f3e9; color:var(--good); border-color:#b9dfcb; }
+    .badge.warn { background:#fff1d2; color:var(--warn); border-color:#ead39c; }
+    .badge.bad  { background:#fde2df; color:var(--bad); border-color:#f3b7b1; }
+    .badge.muted{ background:#edf1f5; color:#53606b; border-color:#d8e0e7; }
+    .badge.origin { background:#e8f2fb; color:#195f95; border-color:#bfd8ee; }
+    .metric-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.75rem; }
+    .metric {
+      background: var(--panel);
+      border:1px solid var(--line);
+      border-radius:8px;
+      padding:.8rem .9rem;
+      min-width: 0;
+    }
+    .metric .big { font-size:1.65rem; font-weight:750; line-height:1.05; }
+    .metric .lbl { color:var(--ink-2); font-size:.76rem; text-transform:uppercase; }
+    .metric .hint { color:var(--pico-muted-color); font-size:.78rem; margin-top:.15rem; }
+    article {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: none;
+      background: var(--panel);
+    }
+    article > header {
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+      padding: .7rem .9rem;
+    }
+    table td, table th { padding:.46rem .55rem; font-size:.88rem; vertical-align: top; }
+    table th { color: var(--ink-2); font-size:.76rem; text-transform:uppercase; }
+    .grid2 { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; }
+    .grid3 { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:1rem; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:.75rem; align-items:end; margin-bottom:1rem; }
+    .toolbar label { min-width: 12rem; margin:0; }
+    .toolbar .actions { margin-left:auto; display:flex; gap:.5rem; }
     .muted-txt { color:var(--pico-muted-color); }
+    .nowrap { white-space: nowrap; }
+    .truncate {
+      max-width: 36rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .delta-win { color: var(--good); font-weight: 700; }
+    .delta-loss { color: var(--bad); font-weight: 700; }
+    .delta-none { color: var(--pico-muted-color); }
+    pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.35; }
+    .dot { height:.65rem; width:.65rem; border-radius:50%; display:inline-block; margin-right:.4rem; }
+    .dot.up{background:var(--good);} .dot.down{background:var(--bad);} .dot.unk{background:#8a96a3;}
+    @media (max-width:1050px){ .metric-grid{grid-template-columns:repeat(3,1fr);} .grid3{grid-template-columns:1fr;} }
+    @media (max-width:760px){
+      .metric-grid{grid-template-columns:repeat(2,1fr);}
+      .grid2{grid-template-columns:1fr;}
+      table { display:block; overflow-x:auto; }
+      .toolbar .actions { margin-left:0; }
+    }
   </style>
 </head>
 <body>
   <main class="container">
     <nav class="top">
-      <ul><li><strong>🏠 Stekkies Agent</strong></li></ul>
+      <ul><li><strong>Stekkies Agent</strong></li></ul>
       <ul>
         <li><a href="/">Overview</a></li>
         <li><a href="/submissions">Submissions</a></li>
@@ -40,7 +106,7 @@
     </nav>
     {% block content %}{% endblock %}
     <footer class="muted-txt" style="margin:2rem 0;font-size:.8rem;">
-      Autonomous Stekkies responder · read-only data from logs · secrets redacted
+      Autonomous responder · read-only data from logs · secrets redacted
     </footer>
   </main>
 </body>

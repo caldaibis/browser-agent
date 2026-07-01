@@ -26,6 +26,7 @@ class RawListing:
     surface: Optional[float] = None    # m², numeric when known
     listing_type: str = ""             # e.g. "apartment", "room" — raw site label
     title: str = ""
+    detected_ts: str = ""              # when the watcher first qualified it
 
     def to_listing(self) -> dict:
         """Shape handed to ``apply.apply()`` — it needs only source_url; the

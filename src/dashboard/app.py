@@ -33,37 +33,47 @@ if data.SCREENSHOTS_DIR.exists():
 
 # Status -> Pico/color class for badges
 STATUS_CLASS = {
-    "submitted": "ok", "already_applied": "muted", "not_available": "muted",
+    "submitted": "ok", "applied": "ok", "already_applied": "muted", "not_available": "muted",
     "not_eligible": "warn", "login_required": "warn", "blocked": "warn",
     "skipped_duplicate": "muted", "no_source_url": "muted", "no_listing_link": "muted",
     "timeout": "bad", "incomplete": "bad", "error": "bad",
 }
 templates.env.globals["status_class"] = lambda s: STATUS_CLASS.get(s, "muted")
+templates.env.globals["fmt_delta"] = data.format_delta
 
 
 @app.get("/", response_class=HTMLResponse)
 def overview(request: Request):
     subs = list(reversed(data.load_submissions()))
+    mail_events = data.load_mail_events()
     stats = data.compute_stats(subs)
+    race = data.race_report(subs, mail_events)
     return templates.TemplateResponse(request, "index.html", {
-        "stats": stats, "recent": subs[:12],
+        "stats": stats, "recent": subs[:12], "race": race,
+        "mail_events": mail_events[:10],
         "health": data.health(), "stats_json": json.dumps(stats),
     })
 
 
 @app.get("/submissions", response_class=HTMLResponse)
-def submissions(request: Request, status: str = "", source: str = ""):
+def submissions(request: Request, status: str = "", source: str = "", origin: str = ""):
     subs = list(reversed(data.load_submissions()))
     if status:
         subs = [s for s in subs if s.status == status]
     if source:
         subs = [s for s in subs if s.source == source]
+    if origin:
+        subs = [s for s in subs if s.origin == origin]
     all_subs = data.load_submissions()
+    mail_events = data.load_mail_events()
+    race = data.race_report(all_subs, mail_events)
     return templates.TemplateResponse(request, "submissions.html", {
         "subs": subs,
         "statuses": sorted({s.status for s in all_subs}),
         "sources": sorted({s.source for s in all_subs if s.source}),
-        "f_status": status, "f_source": source,
+        "origins": sorted({s.origin for s in all_subs if s.origin}),
+        "f_status": status, "f_source": source, "f_origin": origin,
+        "race_by_url": {r.source_url: r for r in race["rows"]},
     })
 
 
@@ -72,8 +82,11 @@ def submission_detail(request: Request, sub_id: int):
     sub = data.get_submission(sub_id)
     if not sub:
         return HTMLResponse("Not found", status_code=404)
+    race = data.race_report(data.load_submissions(), data.load_mail_events())
+    race_by_url = {r.source_url: r for r in race["rows"]}
     return templates.TemplateResponse(request, "detail.html", {
         "sub": sub, "transcript": data.load_transcript(sub),
+        "race": race_by_url.get(sub.source_url),
     })
 
 
@@ -113,10 +126,31 @@ def action_resume():
     return JSONResponse({"ok": ok, "msg": msg or "orchestrator started"})
 
 
+@app.post("/action/poller-pause")
+def action_poller_pause():
+    ok, msg = _systemctl("stop", "poller")
+    return JSONResponse({"ok": ok, "msg": msg or "poller stopped"})
+
+
+@app.post("/action/poller-resume")
+def action_poller_resume():
+    ok, msg = _systemctl("start", "poller")
+    return JSONResponse({"ok": ok, "msg": msg or "poller started"})
+
+
 @app.post("/action/healthcheck")
 def action_healthcheck():
     ok, msg = _systemctl("start", "healthcheck.service")
     return JSONResponse({"ok": ok, "msg": msg or "health check triggered"})
+
+
+@app.post("/action/refresh-mail-index")
+def action_refresh_mail_index():
+    try:
+        events = data.load_mail_events(force=True)
+        return JSONResponse({"ok": True, "msg": f"indexed {len(events)} mail signals"})
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=500)
 
 
 @app.post("/action/retry")

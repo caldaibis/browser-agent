@@ -12,12 +12,14 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
 from ..config import LOG_DIR, PROJECT_ROOT
+from ..gmail_watch import recent_mail_events
 from ..healthcheck import remaining_credit, CREDIT_THRESHOLD_USD
+from ..poller.dedup import canonical_url
 
 MAIL_SUMMARY = LOG_DIR / "mail_summary.jsonl"
 ACTIVITY_LOG = LOG_DIR / "activity.log"
@@ -25,13 +27,14 @@ TRANSCRIPTS_DIR = LOG_DIR / "transcripts"
 SCREENSHOTS_DIR = LOG_DIR / "screenshots"
 ALERTS_FILE = PROJECT_ROOT / "state" / "alerts.json"
 CREDS_FILE = PROJECT_ROOT / "state" / "sources_credentials.json"
+MAIL_EVENTS_CACHE = PROJECT_ROOT / "state" / "dashboard_mail_events.json"
 
 # Outcomes that represent a real apply attempt (for success-rate maths).
 ATTEMPT_STATUSES = {
-    "submitted", "already_applied", "not_available", "not_eligible",
+    "submitted", "applied", "already_applied", "not_available", "not_eligible",
     "login_required", "blocked", "timeout", "incomplete", "error",
 }
-SERVICES = ["orchestrator", "browser-host", "xvfb", "healthcheck.timer"]
+SERVICES = ["orchestrator", "poller", "browser-host", "xvfb", "dashboard", "healthcheck.timer"]
 
 
 def _slug(text: str) -> str:
@@ -53,13 +56,102 @@ class Submission:
     stekkies_url: str
     seconds: float | None
     message: str
+    trigger: str = ""
+    msg_id: str = ""
+    msg_received_ts: str = ""
+    detected_ts: str = ""
 
     @property
     def when(self) -> datetime | None:
-        try:
-            return datetime.fromisoformat(self.ts)
-        except Exception:
-            return None
+        return parse_ts(self.ts)
+
+    @property
+    def origin(self) -> str:
+        if self.trigger:
+            return self.trigger
+        if self.msg_id or self.stekkies_url:
+            return "stekkies_mail"
+        return "unknown"
+
+    @property
+    def origin_label(self) -> str:
+        return {
+            "poller": "Poller",
+            "stekkies_mail": "Stekkies mail",
+            "manual": "Manual",
+        }.get(self.origin, self.origin.replace("_", " ").title() or "Unknown")
+
+    @property
+    def event_time(self) -> datetime | None:
+        return parse_ts(self.detected_ts) or parse_ts(self.msg_received_ts) or self.when
+
+    @property
+    def key(self) -> str:
+        return canonical_url(self.source_url) if self.source_url else ""
+
+
+@dataclass
+class MailEvent:
+    provider: str
+    msg_id: str
+    received_ts: str
+    subject: str
+    source_url: str = ""
+    stekkies_url: str = ""
+
+    @property
+    def when(self) -> datetime | None:
+        return parse_ts(self.received_ts)
+
+    @property
+    def key(self) -> str:
+        return canonical_url(self.source_url) if self.source_url else ""
+
+
+@dataclass
+class RaceInfo:
+    source_url: str
+    source: str
+    address: str
+    status: str
+    poller_ts: str = ""
+    stekkies_ts: str = ""
+    huurwoningen_ts: str = ""
+    stekkies_lead_s: float | None = None
+    huurwoningen_lead_s: float | None = None
+
+    @property
+    def poller_won_stekkies(self) -> bool:
+        return self.stekkies_lead_s is not None and self.stekkies_lead_s > 0
+
+    @property
+    def poller_won_huurwoningen(self) -> bool:
+        return self.huurwoningen_lead_s is not None and self.huurwoningen_lead_s > 0
+
+
+def parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def format_delta(seconds: float | None) -> str:
+    if seconds is None:
+        return "no mail yet"
+    ahead = seconds >= 0
+    seconds = abs(seconds)
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    if mins >= 60:
+        text = f"{mins // 60}h {mins % 60}m"
+    elif mins:
+        text = f"{mins}m {secs}s"
+    else:
+        text = f"{secs}s"
+    return f"poller +{text}" if ahead else f"mail +{text}"
 
 
 def load_submissions() -> list[Submission]:
@@ -84,8 +176,64 @@ def load_submissions() -> list[Submission]:
             stekkies_url=r.get("stekkies_url") or "",
             seconds=r.get("seconds"),
             message=r.get("message") or "",
+            trigger=r.get("trigger") or "",
+            msg_id=r.get("msg_id") or "",
+            msg_received_ts=r.get("msg_received_ts") or "",
+            detected_ts=r.get("detected_ts") or "",
         ))
     return out
+
+
+def _read_mail_events_cache() -> list[dict]:
+    try:
+        return json.loads(MAIL_EVENTS_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _write_mail_events_cache(events: list[dict]) -> None:
+    MAIL_EVENTS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    MAIL_EVENTS_CACHE.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_mail_events(days: int = 30, max_age_minutes: int = 15,
+                     force: bool = False) -> list[MailEvent]:
+    raw = _read_mail_events_cache()
+    stale = True
+    if MAIL_EVENTS_CACHE.exists():
+        age = datetime.now() - datetime.fromtimestamp(MAIL_EVENTS_CACHE.stat().st_mtime)
+        stale = age > timedelta(minutes=max_age_minutes)
+    if force or stale:
+        try:
+            raw = recent_mail_events(days=days)
+            _write_mail_events_cache(raw)
+        except Exception:
+            raw = raw or []
+
+    # Stekkies source URLs are only known after the orchestrator extracts the
+    # listing. Fill them from mail_summary records with the same Gmail msg_id or
+    # Stekkies redirect URL.
+    by_msg = {s.msg_id: s.source_url for s in load_submissions() if s.msg_id and s.source_url}
+    by_stekkies = {
+        s.stekkies_url: s.source_url
+        for s in load_submissions()
+        if s.stekkies_url and s.source_url
+    }
+    events: list[MailEvent] = []
+    for r in raw:
+        source_url = r.get("source_url") or ""
+        if r.get("provider") == "stekkies":
+            source_url = source_url or by_msg.get(r.get("msg_id", ""), "")
+            source_url = source_url or by_stekkies.get(r.get("stekkies_url", ""), "")
+        events.append(MailEvent(
+            provider=r.get("provider", ""),
+            msg_id=r.get("msg_id", ""),
+            received_ts=r.get("received_ts", ""),
+            subject=r.get("subject", ""),
+            source_url=source_url,
+            stekkies_url=r.get("stekkies_url", ""),
+        ))
+    return events
 
 
 def get_submission(sub_id: int) -> Submission | None:
@@ -101,8 +249,9 @@ def get_submission(sub_id: int) -> Submission | None:
 def compute_stats(subs: list[Submission]) -> dict:
     by_status = Counter(s.status for s in subs)
     attempts = [s for s in subs if s.status in ATTEMPT_STATUSES]
-    submitted = by_status.get("submitted", 0)
+    submitted = by_status.get("submitted", 0) + by_status.get("applied", 0)
     by_source = Counter(s.source for s in attempts if s.source)
+    by_origin = Counter(s.origin for s in attempts)
     per_day: dict[str, int] = defaultdict(int)
     for s in attempts:
         w = s.when
@@ -116,8 +265,75 @@ def compute_stats(subs: list[Submission]) -> dict:
         "success_rate": round(100 * submitted / len(attempts), 1) if attempts else 0.0,
         "by_status": dict(by_status.most_common()),
         "by_source": dict(by_source.most_common()),
+        "by_origin": dict(by_origin.most_common()),
         "per_day": dict(sorted(per_day.items())),
         "avg_seconds": round(sum(durations) / len(durations), 1) if durations else 0.0,
+    }
+
+
+def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
+    by_key: dict[str, list[Submission]] = defaultdict(list)
+    for s in subs:
+        if s.key:
+            by_key[s.key].append(s)
+
+    mail_by_key: dict[str, dict[str, list[MailEvent]]] = defaultdict(lambda: defaultdict(list))
+    for e in mail_events:
+        if e.key:
+            mail_by_key[e.key][e.provider].append(e)
+
+    rows: list[RaceInfo] = []
+    for key, records in by_key.items():
+        pollers = [s for s in records if s.origin == "poller"]
+        if not pollers:
+            continue
+        pollers.sort(key=lambda s: s.event_time or datetime.max)
+        p = pollers[0]
+        p_time = p.event_time
+        if p_time is None:
+            continue
+
+        stekkies_times = [e.when for e in mail_by_key[key].get("stekkies", []) if e.when]
+        # Also use Stekkies-triggered submissions; they carry msg_received_ts
+        # when available and are the only way to map Stekkies redirects to source URLs.
+        stekkies_times += [
+            s.event_time for s in records
+            if s.origin == "stekkies_mail" and s.event_time
+        ]
+        huur_times = [e.when for e in mail_by_key[key].get("huurwoningen", []) if e.when]
+
+        st = min(stekkies_times) if stekkies_times else None
+        hw = min(huur_times) if huur_times else None
+        rows.append(RaceInfo(
+            source_url=p.source_url,
+            source=p.source,
+            address=p.address,
+            status=p.status,
+            poller_ts=p.event_time.isoformat(timespec="seconds") if p.event_time else "",
+            stekkies_ts=st.isoformat(timespec="seconds") if st else "",
+            huurwoningen_ts=hw.isoformat(timespec="seconds") if hw else "",
+            stekkies_lead_s=(st - p_time).total_seconds() if st else None,
+            huurwoningen_lead_s=(hw - p_time).total_seconds() if hw else None,
+        ))
+    rows.sort(key=lambda r: r.poller_ts, reverse=True)
+
+    def _summary(provider: str) -> dict:
+        attr = "stekkies_lead_s" if provider == "stekkies" else "huurwoningen_lead_s"
+        vals = [getattr(r, attr) for r in rows if getattr(r, attr) is not None]
+        wins = [v for v in vals if v > 0]
+        losses = [v for v in vals if v < 0]
+        return {
+            "matched": len(vals),
+            "poller_wins": len(wins),
+            "mail_wins": len(losses),
+            "no_mail": len(rows) - len(vals),
+            "avg_lead_s": round(sum(wins) / len(wins), 1) if wins else None,
+        }
+
+    return {
+        "rows": rows,
+        "stekkies": _summary("stekkies"),
+        "huurwoningen": _summary("huurwoningen"),
     }
 
 
@@ -196,7 +412,11 @@ def service_status() -> dict[str, str]:
         try:
             r = subprocess.run(["systemctl", "is-active", svc],
                                capture_output=True, text=True, timeout=5)
-            out[svc] = (r.stdout or r.stderr or "unknown").strip()
+            text = (r.stdout or r.stderr or "unknown").strip()
+            first = text.splitlines()[0] if text else "unknown"
+            if "System has not been booted with systemd" in text:
+                first = "unavailable"
+            out[svc] = first[:80]
         except Exception:
             out[svc] = "unknown"
     return out
