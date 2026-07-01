@@ -16,7 +16,7 @@ from .apply import apply
 from .gmail_watch import message_received_ts, mark_read, watch_events
 from .poller.dedup import active_claim_keys, canonical_url
 from .notify import send_status_email
-from .recovery_agent import recover_after_apply, recover_exception
+from .self_improvement_agent import improve_after_apply, improve_exception
 
 
 PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
@@ -124,7 +124,7 @@ def process_source(listing: dict, msg_id: str | None = None,
         result = apply(listing)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
-        recover_after_apply(
+        improve_after_apply(
             listing=listing,
             result=result,
             trigger=trigger,
@@ -156,7 +156,7 @@ def process_source(listing: dict, msg_id: str | None = None,
     except Exception as e:
         _log("error", error=str(e))
         traceback.print_exc()
-        recover_exception(
+        improve_exception(
             listing=listing,
             error=e,
             trigger=trigger,
@@ -232,7 +232,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
         result = apply(d)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
-        recover_after_apply(
+        improve_after_apply(
             listing=d,
             result=result,
             trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
@@ -268,7 +268,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
     except Exception as e:
         _log("error", error=str(e))
         traceback.print_exc()
-        recover_exception(
+        improve_exception(
             listing={"stekkies_url": stekkies_url},
             error=e,
             trigger=trigger or ("stekkies_mail" if msg_id else "manual"),

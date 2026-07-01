@@ -185,9 +185,9 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
             seconds = round((datetime.now() - t0).total_seconds(), 1)
             _log("apply_done", url=listing.source_url,
                  outcome=result.outcome, rc=result.rc, seconds=seconds)
-            from ..recovery_agent import recover_after_apply
+            from ..self_improvement_agent import improve_after_apply
             await asyncio.to_thread(
-                recover_after_apply,
+                improve_after_apply,
                 listing=listing.to_listing(),
                 result=result,
                 trigger="poller",
@@ -219,9 +219,9 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 seen.release(listing.source_url)
         except Exception as e:  # noqa: BLE001 - one bad apply must not kill the worker
             _log("apply_error", url=listing.source_url, error=f"{type(e).__name__}: {e}")
-            from ..recovery_agent import recover_exception
+            from ..self_improvement_agent import improve_exception
             await asyncio.to_thread(
-                recover_exception,
+                improve_exception,
                 listing=listing.to_listing(),
                 error=e,
                 trigger="poller",
