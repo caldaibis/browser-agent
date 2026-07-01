@@ -103,10 +103,12 @@ REGISTRY: list[SiteConfig] = [
            parse=make_anchor_parser(r"/aanbod/huurwoningen/details/\d+-")),         # VALIDATED: 32
     _tier3("your-house.nl", "https://your-house.nl/woningaanbod/huur",
            parse=make_anchor_parser(r"/woningaanbod/huur/[a-z-]+/[^/?]+/\d")),      # VALIDATED: 12
-    # Not yet cracked: vesteda renders listing cards without anchors (needs a DOM
-    # click-through or its API); househunting shows only office pages; kamernet
-    # renders (past DataDome) but its detail-link pattern isn't wired yet.
-    _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken"),
+    _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken",
+           parse=make_anchor_parser(
+               r"/nl/huurwoning(?:en)?-(?:utrecht|amsterdam)/[a-z0-9-]+/[a-z0-9-]+")),
+    # Not cracked: househunting shows only office pages (listings are JS cards
+    # with no anchors); kamernet renders past DataDome but its room detail links
+    # are JS onclick, not <a> — both need a DOM click-through or their API.
     _tier3("househunting.nl", "https://www.househunting.nl/aanbod/"),
     _tier3("hurenindemix.nl", "https://www.hurenindemix.nl/aanbod/"),
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
