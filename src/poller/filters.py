@@ -1,8 +1,8 @@
 """Deterministic pre-filter on structured RawListing fields.
 
-Cheap, runs before any LLM judgment. Only vetoes on facts the site actually
-published; anything unknown passes through to the LLM/apply stage (fail-open,
-because in this market a missed listing is worse than a wasted look).
+Cheap, runs before any LLM judgment. Rent is a hard user cap, so poller listings
+must have a known parsed price by default; URL-only parser output is not enough
+to submit autonomously.
 
 The distance-to-center and roommate judgments are NOT here — they need semantic
 reading of the address/description and live in ``judge.py``.
@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import os
 
+from ..rent_policy import MAX_RENT
 from .models import RawListing
 
-MAX_PRICE = float(os.environ.get("POLL_MAX_PRICE", "1750"))
 MIN_SURFACE = float(os.environ.get("POLL_MIN_SURFACE", "30"))
+REQUIRE_KNOWN_PRICE = os.environ.get("POLL_REQUIRE_KNOWN_PRICE", "1") != "0"
 # Cities we apply in. Matched case-insensitively as a substring of city/address.
 CITIES = tuple(
     c.strip().lower()
@@ -29,8 +30,10 @@ _ROOM_MARKERS = ("kamer", "room", "studentenkamer", "shared", "gedeeld")
 
 def passes(listing: RawListing) -> tuple[bool, str]:
     """Return (ok, reason). ok=False means a hard, published fact vetoes it."""
-    if listing.price is not None and listing.price > MAX_PRICE:
-        return False, f"price €{listing.price:.0f} > €{MAX_PRICE:.0f}"
+    if listing.price is None and REQUIRE_KNOWN_PRICE:
+        return False, f"price unknown; max rent is €{MAX_RENT:.0f}"
+    if listing.price is not None and listing.price > MAX_RENT:
+        return False, f"price €{listing.price:.0f} > €{MAX_RENT:.0f}"
 
     # City often lives only in the URL path (e.g. huurwoningen's JSON-LD address
     # is just the street), so include source_url in the haystack. This both

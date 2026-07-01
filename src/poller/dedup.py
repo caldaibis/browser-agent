@@ -9,14 +9,21 @@ path is never re-applied by the poller.
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
+import fcntl
 from urllib.parse import urlparse, urlunparse
 
 from ..config import PROJECT_ROOT
 
 SEEN_FILE = PROJECT_ROOT / "state" / "poller_seen.jsonl"
 PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
+CLAIMS_FILE = PROJECT_ROOT / "state" / "listing_claims.jsonl"
+LOCK_FILE = PROJECT_ROOT / "state" / "dedup.lock"
+CLAIM_TTL_SECONDS = int(os.environ.get("LISTING_CLAIM_TTL_SECONDS", "7200"))
 
 # Query params that never identify a listing — strip them before keying.
 _TRACKING_PREFIXES = ("utm_", "gclid", "fbclid", "mc_")
@@ -29,6 +36,8 @@ def canonical_url(url: str) -> str:
     sorted for stability."""
     p = urlparse(url.strip())
     host = (p.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
     scheme = p.scheme or "https"
     path = p.path.rstrip("/") or "/"
 
@@ -46,12 +55,72 @@ def canonical_url(url: str) -> str:
     return urlunparse((scheme, netloc, path, "", query, ""))
 
 
+@contextmanager
+def _dedup_lock():
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _append_claim(key: str, url: str, status: str, **meta) -> None:
+    CLAIMS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "epoch": time.time(),
+        "key": key,
+        "url": url,
+        "status": status,
+        **meta,
+    }
+    with CLAIMS_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def active_claim_keys(now: float | None = None) -> set[str]:
+    """Canonical URLs currently reserved by another apply attempt.
+
+    Claims are append-only with a TTL so a crashed poller does not block a
+    listing forever.
+    """
+    now = now or time.time()
+    active: dict[str, float] = {}
+    if not CLAIMS_FILE.exists():
+        return set()
+    for line in CLAIMS_FILE.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        key = rec.get("key") or (canonical_url(rec["url"]) if rec.get("url") else "")
+        key = canonical_url(key) if key else ""
+        if not key:
+            continue
+        status = rec.get("status")
+        if status == "claimed":
+            epoch = float(rec.get("epoch") or 0)
+            if epoch and now - epoch <= CLAIM_TTL_SECONDS:
+                active[key] = epoch
+            else:
+                active.pop(key, None)
+        elif status in {"released", "terminal"}:
+            active.pop(key, None)
+    return set(active)
+
+
 class SeenStore:
     """Thread-safe set of canonical URLs already seen/handled."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._seen: set[str] = set()
+        self._reserved: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -59,9 +128,12 @@ class SeenStore:
         if SEEN_FILE.exists():
             for line in SEEN_FILE.read_text(encoding="utf-8").splitlines():
                 try:
-                    self._seen.add(json.loads(line)["key"])
+                    rec = json.loads(line)
                 except (json.JSONDecodeError, KeyError):
                     continue
+                key = rec.get("key") or rec.get("url")
+                if key:
+                    self._seen.add(canonical_url(key))
         self._load_processed()
 
     def _load_processed(self) -> None:
@@ -79,17 +151,50 @@ class SeenStore:
     def is_new(self, url: str) -> bool:
         with self._lock:
             self._load_processed()
-            return canonical_url(url) not in self._seen
+            key = canonical_url(url)
+            return (
+                key not in self._seen
+                and key not in self._reserved
+                and key not in active_claim_keys()
+            )
+
+    def reserve(self, url: str, **meta) -> bool:
+        """Reserve a URL before queueing/applying it.
+
+        This closes the long window where an apply is in progress but the URL is
+        not yet terminal in ``processed_listings.jsonl``. Reservations are
+        process-local immediately and persisted as short-lived claims so the
+        separate orchestrator process can also skip the same source URL.
+        """
+        key = canonical_url(url)
+        with self._lock:
+            with _dedup_lock():
+                self._load_processed()
+                if key in self._seen or key in self._reserved or key in active_claim_keys():
+                    return False
+                self._reserved.add(key)
+                _append_claim(key, url, "claimed", **meta)
+                return True
+
+    def release(self, url: str) -> None:
+        """Release a non-terminal reservation so a future poll can retry."""
+        key = canonical_url(url)
+        with self._lock:
+            with _dedup_lock():
+                self._reserved.discard(key)
+                _append_claim(key, url, "released")
 
     def mark(self, url: str, **meta) -> None:
         """Record a canonical URL as seen (idempotent, persisted)."""
         key = canonical_url(url)
         with self._lock:
-            if key in self._seen:
-                return
-            self._seen.add(key)
-            SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-            rec = {"ts": datetime.now().isoformat(timespec="seconds"),
-                   "key": key, "url": url, **meta}
-            with SEEN_FILE.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            with _dedup_lock():
+                if key not in self._seen:
+                    self._seen.add(key)
+                    SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+                           "key": key, "url": url, **meta}
+                    with SEEN_FILE.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                self._reserved.discard(key)
+                _append_claim(key, url, "terminal", **meta)

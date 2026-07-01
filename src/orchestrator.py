@@ -14,7 +14,7 @@ from .config import LOG_DIR, PROJECT_ROOT
 from .stekkies import extract_listing
 from .apply import apply
 from .gmail_watch import message_received_ts, mark_read, watch_events
-from .poller.dedup import canonical_url
+from .poller.dedup import active_claim_keys, canonical_url
 from .notify import send_status_email
 
 
@@ -88,7 +88,8 @@ def _finish(**kw) -> dict:
 
 
 def _source_duplicate(source_url: str, keys: set[str]) -> bool:
-    return source_url in keys or canonical_url(source_url) in keys
+    key = canonical_url(source_url)
+    return source_url in keys or key in keys or key in active_claim_keys()
 
 
 def process_source(listing: dict, msg_id: str | None = None,

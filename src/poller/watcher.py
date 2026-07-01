@@ -24,7 +24,7 @@ from datetime import datetime
 import httpx
 
 from ..config import LOG_DIR
-from ..notify import send_alert
+from ..notify import send_alert, send_status_email
 from . import filters, judge
 from .browser_lock import browser_lock
 from .dedup import PROCESSED_FILE, SeenStore
@@ -188,15 +188,18 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 f"trigger=poller status={rec.get('status')} source={rec.get('source') or 'unknown source'} "
                 f"address={rec.get('address') or 'unknown address'} - {rec.get('message')}"
             )
+            send_status_email(rec)
             # Mark seen only on a terminal outcome, mirroring the orchestrator:
             # transient failures stay retryable on the next poll.
             if getattr(result, "terminal", True):
                 seen.mark(listing.source_url, outcome=result.outcome,
                           source=listing.source_name, address=listing.address)
                 _remember_processed(listing, result.outcome)
+            else:
+                seen.release(listing.source_url)
         except Exception as e:  # noqa: BLE001 - one bad apply must not kill the worker
             _log("apply_error", url=listing.source_url, error=f"{type(e).__name__}: {e}")
-            _summary(
+            rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
                 address=listing.address or listing.title,
@@ -204,6 +207,8 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 detected_ts=listing.detected_ts,
                 message=f"{type(e).__name__}: {e}",
             )
+            send_status_email(rec)
+            seen.release(listing.source_url)
         finally:
             queue.task_done()
 
@@ -255,6 +260,10 @@ async def _consider(l: RawListing, queue: "asyncio.Queue[RawListing]",
         seen.mark(l.source_url, judged=reason)
         return
     l.detected_ts = l.detected_ts or datetime.now().isoformat(timespec="seconds")
+    if not seen.reserve(l.source_url, source=l.source_name,
+                        address=l.address or l.title):
+        _log("duplicate_skipped", url=l.source_url, reason="already reserved")
+        return
     _log("qualified", url=l.source_url, source=l.source_name,
          address=l.address, judge=reason)
     await queue.put(l)

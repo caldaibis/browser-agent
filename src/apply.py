@@ -20,6 +20,7 @@ from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .applicant_profile import PROFILE, INCOME_TOLERANCE
 from .browser_agent import run_agent, AgentResult
 from .poller.browser_lock import browser_lock
+from .rent_policy import MAX_RENT, parse_rent
 
 # Model for the apply agent. Default: z-ai/glm-5.2 — strong tool-use/agentic
 # model. (Its earlier empty-response failure was a Hermes-loop quirk; our own
@@ -117,6 +118,13 @@ LISTING (external source: {listing.get('source_name','?')})
   Address: {listing.get('address','?')}
   Price:   {listing.get('price','?')}
   Apply at this URL: {listing['source_url']}
+
+PERSONAL RENT CAP (hard stop):
+The maximum rent I am willing to pay is EUR {MAX_RENT:.0f} per month. Before
+you fill or submit anything, verify the listing rent/price on the page. If the
+rent is above EUR {MAX_RENT:.0f}, STOP immediately and report `OUTCOME:
+not_eligible`, stating the listed rent and the cap. This cap overrides all other
+instructions.
 
 LOGIN
 {login_clause}
@@ -253,6 +261,15 @@ def _slug(text: str) -> str:
 def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
     """Run the apply agent on one listing. Returns an AgentResult with the true
     outcome (submitted / already_applied / not_available / ... / timeout)."""
+    listing_price = parse_rent(listing.get("price"))
+    if listing_price is not None and listing_price > MAX_RENT:
+        summary = (
+            f"Skipped before opening the browser: listed rent €{listing_price:.0f} "
+            f"is above the configured max rent €{MAX_RENT:.0f}."
+        )
+        print(f"[apply] {summary}")
+        return AgentResult(rc=0, outcome="not_eligible", summary=summary)
+
     prompt = build_prompt(listing)
     # Persist a per-run transcript + prompt so nothing is overwritten/lost.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

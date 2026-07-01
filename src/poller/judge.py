@@ -19,7 +19,7 @@ from openai import AsyncOpenAI
 from .models import RawListing
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-JUDGE_MODEL = os.environ.get("POLL_JUDGE_MODEL", "google/gemini-2.5-flash-lite")
+JUDGE_MODEL = os.environ.get("POLL_JUDGE_MODEL", "deepseek/deepseek-v4-flash")
 MAX_CYCLING_MIN = int(os.environ.get("POLL_MAX_CYCLING_MIN", "15"))
 
 _SYSTEM = (
