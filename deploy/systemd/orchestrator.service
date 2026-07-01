@@ -10,7 +10,7 @@ WorkingDirectory=__APP_DIR__
 Environment=DISPLAY=__DISPLAY__
 Environment=PATH=__APP_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
-# Secrets (OPENROUTER_API_KEY, optional APPLY_MODEL overrides) live here:
+# Secrets (DEEPSEEK_API_KEY, optional APPLY_MODEL overrides) live here:
 EnvironmentFile=__APP_DIR__/state/agent.env
 ExecStart=__APP_HOME__/.local/bin/uv run python -m src.orchestrator
 Restart=always

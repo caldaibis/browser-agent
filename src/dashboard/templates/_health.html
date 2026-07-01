@@ -14,9 +14,9 @@
     <div>
       <div>
         <span class="dot {{ 'down' if health.credit_low else 'up' if health.credit is not none else 'unk' }}"></span>
-        OpenRouter credit —
+        DeepSeek credit —
         {% if health.credit is not none %}
-          <strong>${{ '%.2f'|format(health.credit) }}</strong>
+          <strong>{{ health.credit_currency }} {{ '%.2f'|format(health.credit) }}</strong>
           {% if health.credit_low %}<span class="badge bad">LOW</span>{% endif %}
         {% else %}<span class="muted-txt">unknown</span>{% endif %}
       </div>

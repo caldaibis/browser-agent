@@ -1,6 +1,6 @@
 """Periodic health checks that email you when action is needed:
 
-  1. Low OpenRouter credit  — so applications don't silently stop.
+  1. Low DeepSeek credit  — so applications don't silently stop.
   2. Stekkies session expired — so you can re-login (the server can't read new
      listings without it). Source-site logins are surfaced reactively per-listing
      via the login_required / no_source_url outcome emails.
@@ -19,7 +19,10 @@ from .config import PROJECT_ROOT, CDP_URL
 from .notify import send_alert
 
 ALERTS_FILE = PROJECT_ROOT / "state" / "alerts.json"
-CREDIT_THRESHOLD_USD = float(os.environ.get("CREDIT_THRESHOLD_USD", "2"))
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+CREDIT_CURRENCY = os.environ.get("CREDIT_CURRENCY", "USD").upper()
+CREDIT_THRESHOLD = float(os.environ.get("CREDIT_THRESHOLD", os.environ.get("CREDIT_THRESHOLD_USD", "2")))
+CREDIT_THRESHOLD_USD = CREDIT_THRESHOLD  # backward-compatible import for older code
 SERVER_HINT = os.environ.get("SERVER_SSH", "root@your-server-ip")
 
 
@@ -35,38 +38,49 @@ def _save(state: dict) -> None:
     ALERTS_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
-def remaining_credit() -> float | None:
-    """Remaining OpenRouter credit in USD, or None if unavailable. Shared by the
-    health check and the dashboard."""
-    key = os.environ.get("OPENROUTER_API_KEY")
+def remaining_credit() -> tuple[float, str] | None:
+    """Remaining DeepSeek credit, or None if unavailable.
+
+    Returns ``(amount, currency)`` for the configured CREDIT_CURRENCY when
+    present, otherwise the first balance returned by DeepSeek.
+    """
+    key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         return None
     try:
         req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/credits",
+            f"{DEEPSEEK_BASE_URL.rstrip('/')}/user/balance",
             headers={"Authorization": f"Bearer {key}"},
         )
-        data = json.load(urllib.request.urlopen(req, timeout=20))["data"]
-        return float(data["total_credits"]) - float(data["total_usage"])
+        data = json.load(urllib.request.urlopen(req, timeout=20))
+        balances = data.get("balance_infos") or []
+        if not balances:
+            return None
+        selected = next(
+            (b for b in balances if str(b.get("currency", "")).upper() == CREDIT_CURRENCY),
+            balances[0],
+        )
+        return float(selected["total_balance"]), str(selected["currency"]).upper()
     except Exception as e:
         print(f"[health] credit check error: {e}")
         return None
 
 
 def check_credits(state: dict) -> None:
-    remaining = remaining_credit()
-    if remaining is None:
+    credit = remaining_credit()
+    if credit is None:
         print("[health] credit unavailable; skipping credit check")
         return
-    print(f"[health] OpenRouter credit remaining: ${remaining:.2f} (threshold ${CREDIT_THRESHOLD_USD:.2f})")
+    remaining, currency = credit
+    print(f"[health] DeepSeek credit remaining: {currency} {remaining:.2f} (threshold {CREDIT_THRESHOLD:.2f})")
     if remaining < CREDIT_THRESHOLD_USD:
         if not state.get("low_credit_sent"):
             send_alert(
-                f"⚠️ Stekkies bot: low OpenRouter credit (${remaining:.2f})",
-                f"Remaining OpenRouter credit is ${remaining:.2f}, below the "
-                f"${CREDIT_THRESHOLD_USD:.2f} threshold.\n\n"
-                f"Applications will stop once it hits $0. Top up:\n"
-                f"  https://openrouter.ai/settings/credits\n",
+                f"⚠️ Stekkies bot: low DeepSeek credit ({currency} {remaining:.2f})",
+                f"Remaining DeepSeek credit is {currency} {remaining:.2f}, below the "
+                f"{CREDIT_THRESHOLD:.2f} threshold.\n\n"
+                f"Applications will stop once it hits 0. Top up:\n"
+                f"  https://platform.deepseek.com/top_up\n",
             )
             state["low_credit_sent"] = True
     else:

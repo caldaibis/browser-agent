@@ -19,7 +19,7 @@ with a CDP debugging port. Both the Stekkies extractor and the apply agent
 **attach to it over CDP**, so every session lives in one profile you sign into
 once: Google (enables "Sign in with Google" SSO on Funda etc.), Stekkies, and all
 rental sites. The apply agent drives it via the Playwright MCP (`--cdp-endpoint`),
-and needs `OPENROUTER_API_KEY` set.
+and needs `DEEPSEEK_API_KEY` set.
 
 ## Layout
 - `src/config.py`       — paths, URLs, `CDP_URL`.
@@ -30,7 +30,7 @@ and needs `OPENROUTER_API_KEY` set.
 - `src/import_passwords.py` — load a Google Password Manager CSV into the creds JSON.
 - `src/message_template.py` — reference application message the agent customizes.
 - `src/apply.py`        — build the task prompt (SSO-first, creds, docs), run the agent.
-- `src/browser_agent.py` — the agent loop (OpenRouter + Playwright MCP); returns a structured outcome.
+- `src/browser_agent.py` — the agent loop (DeepSeek + Playwright MCP); returns a structured outcome.
 - `src/gmail_watch.py`  — detect new Stekkies mails, extract the listing link.
 - `src/orchestrator.py` — ties it all together.
 - `state/`              — Chromium profile, creds, Gmail token, agent.env (do not commit).
@@ -80,7 +80,7 @@ address/source when known, return code, duration, and the short outcome message.
 ## Dashboard
 `src/dashboard/` is a FastAPI app (run `uv run uvicorn src.dashboard.app:app`)
 showing stats/charts, submissions, per-listing **redacted** transcripts, a live
-health panel (services + OpenRouter credit + Stekkies login), and safe actions
+health panel (services + DeepSeek credit + Stekkies login), and safe actions
 (retry / pause / resume / run health check). On the VPS it runs as
 `dashboard.service` on `127.0.0.1:8000` behind **Caddy** (auto-HTTPS + Basic
 Auth) at the DuckDNS domain. Transcripts are scrubbed of credentials and

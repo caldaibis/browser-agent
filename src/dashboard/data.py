@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..config import LOG_DIR, PROJECT_ROOT
 from ..gmail_watch import recent_mail_events
-from ..healthcheck import remaining_credit, CREDIT_THRESHOLD_USD
+from ..healthcheck import remaining_credit, CREDIT_THRESHOLD
 from ..poller.dedup import canonical_url
 
 MAIL_SUMMARY = LOG_DIR / "mail_summary.jsonl"
@@ -438,12 +438,15 @@ def login_health() -> dict:
 
 
 def health() -> dict:
-    credit = remaining_credit()
+    credit_info = remaining_credit()
+    credit = credit_info[0] if credit_info is not None else None
+    credit_currency = credit_info[1] if credit_info is not None else None
     return {
         "services": service_status(),
         "credit": credit,
-        "credit_low": (credit is not None and credit < CREDIT_THRESHOLD_USD),
-        "credit_threshold": CREDIT_THRESHOLD_USD,
+        "credit_currency": credit_currency,
+        "credit_low": (credit is not None and credit < CREDIT_THRESHOLD),
+        "credit_threshold": CREDIT_THRESHOLD,
         **login_health(),
     }
 

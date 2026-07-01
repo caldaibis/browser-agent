@@ -1,7 +1,7 @@
 """Minimal browser agent loop — our lightweight replacement for Hermes.
 
 Connects to the Playwright MCP server (stdio) attached to our shared CDP browser,
-exposes its tools to an OpenRouter-hosted LLM, and runs a tool-calling loop until
+exposes its tools to a DeepSeek-hosted LLM, and runs a tool-calling loop until
 the model produces a final text answer or the turn budget is hit.
 
 What this gives us over Hermes: full control, our logging, no 1.2 GB harness —
@@ -9,7 +9,7 @@ just the agentic loop + MCP client. The Playwright MCP (the genuinely valuable
 piece: snapshot/click/fill_form/file_upload) is unchanged.
 
 Env:
-  OPENROUTER_API_KEY   required — your OpenRouter key.
+  DEEPSEEK_API_KEY   required — your DeepSeek key.
 
 Public API:
   run_agent(...) -> AgentResult  (rc, outcome, summary)
@@ -30,20 +30,23 @@ from mcp.client.stdio import stdio_client
 
 from . import credentials
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
-# Reasoning control. glm-5.2 is a reasoning model and, left alone, burns hundreds
-# of hidden reasoning tokens before emitting content/tool_calls — over a large
-# page snapshot that can run long enough to hit the completion cap mid-reasoning
-# (finish_reason="length", empty content, no tool_calls) and look like a stall.
-# Filling a rental form is not rocket science, so we DISABLE reasoning by default.
-# Empirically glm ignores fine-grained reasoning caps (max_tokens/effort barely
-# move it) but honours {"enabled": False} → 0 reasoning tokens, and still answers
-# correctly. Override via APPLY_REASONING_EFFORT = off | minimal | low | medium |
-# high (anything but "off" re-enables reasoning at that effort).
+# Reasoning control. DeepSeek thinking mode can burn hidden reasoning
+# tokens before emitting content/tool_calls. Over a large page snapshot that can
+# hit the completion cap mid-reasoning (finish_reason="length", empty content,
+# no tool_calls) and look like a stall. Filling a rental form is not rocket
+# science, so we DISABLE reasoning by default. Override via
+# APPLY_REASONING_EFFORT = off | low | medium | high | max (anything but
+# "off" re-enables reasoning at that effort).
 REASONING_EFFORT = os.environ.get("APPLY_REASONING_EFFORT", "off").lower()
-REASONING = ({"enabled": False} if REASONING_EFFORT in ("off", "none", "false", "0")
-             else {"effort": REASONING_EFFORT})
+if REASONING_EFFORT == "minimal":
+    REASONING_EFFORT = "low"
+THINKING = (
+    {"type": "disabled"}
+    if REASONING_EFFORT in ("off", "none", "false", "0")
+    else {"type": "enabled"}
+)
 
 # Completion cap per turn. With reasoning off the visible output (a tool call or a
 # short status) is small, so this is just generous headroom against truncation.
@@ -173,12 +176,12 @@ def _result_text(result) -> str:
 
 
 async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger") -> tuple[int, str]:
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        log.line("[agent] ERROR: OPENROUTER_API_KEY not set")
-        return 2, "OPENROUTER_API_KEY not set."
+        log.line("[agent] ERROR: DEEPSEEK_API_KEY not set")
+        return 2, "DEEPSEEK_API_KEY not set."
 
-    client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
+    client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=api_key)
 
     async with stdio_client(_mcp_params(cdp_url)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -193,10 +196,17 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
             last_sig = None  # detect degenerate repeated-action loops
             repeats = 0
             for turn in range(1, max_turns + 1):
-                resp = await client.chat.completions.create(
-                    model=model, messages=messages, tools=tools, tool_choice="auto",
-                    max_tokens=MAX_TOKENS, extra_body={"reasoning": REASONING},
-                )
+                request = {
+                    "model": model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "max_tokens": MAX_TOKENS,
+                    "extra_body": {"thinking": THINKING},
+                }
+                if THINKING["type"] == "enabled":
+                    request["reasoning_effort"] = REASONING_EFFORT
+                resp = await client.chat.completions.create(**request)
                 choice = resp.choices[0]
                 msg = choice.message
                 tool_calls = msg.tool_calls or []
@@ -218,7 +228,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 # also seen finish_reason="stop" with empty content and no
                 # tool_calls at the same completion-token cost as the model's own
                 # successful bare-arg tool calls elsewhere in the same transcript —
-                # almost certainly a tool call OpenRouter failed to surface, not a
+                # almost certainly a tool call the provider failed to surface, not a
                 # deliberate conclusion (the prompt requires a non-empty OUTCOME
                 # line, which empty content can never satisfy). Treat both as the
                 # same transport glitch: retry (don't spend a nudge / declare done).
@@ -242,6 +252,9 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 
                 # Record the assistant turn (text + any tool calls).
                 assistant_entry: dict = {"role": "assistant", "content": msg.content or ""}
+                reasoning_content = getattr(msg, "reasoning_content", None)
+                if reasoning_content:
+                    assistant_entry["reasoning_content"] = reasoning_content
                 if tool_calls:
                     assistant_entry["tool_calls"] = [
                         {"id": tc.id, "type": "function",

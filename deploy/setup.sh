@@ -87,7 +87,7 @@ cat <<EOF
   1. Upload secrets:
        scp state/gmail_client_secret.json state/gmail_token.json \\
            state/sources_credentials.json ${APP_USER}@SERVER:${APP_DIR}/state/
-       # create ${APP_DIR}/state/agent.env with: OPENROUTER_API_KEY=sk-or-...
+       # create ${APP_DIR}/state/agent.env with: DEEPSEEK_API_KEY=sk-...
   2. One-time logins via VNC:
        systemctl start vnc.service
        # from your laptop:  ssh -L 5900:localhost:5900 ${APP_USER}@SERVER

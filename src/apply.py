@@ -2,7 +2,7 @@
 
 Builds a precise task prompt (source URL, reference message, document list,
 auto-submit instruction) and runs the lightweight agent loop in
-`src.browser_agent` (OpenRouter LLM + Playwright MCP over our shared CDP
+`src.browser_agent` (DeepSeek LLM + Playwright MCP over our shared CDP
 browser). The agent adapts to whatever application form the source site shows.
 
 Run standalone:  python -m src.apply logs/last_listing.json
@@ -22,11 +22,8 @@ from .browser_agent import run_agent, AgentResult
 from .poller.browser_lock import browser_lock
 from .rent_policy import MAX_RENT, parse_rent
 
-# Model for the apply agent. Default: z-ai/glm-5.2 — strong tool-use/agentic
-# model. (Its earlier empty-response failure was a Hermes-loop quirk; our own
-# OpenRouter loop reads content/tool_calls directly.) gemini-3.5-flash proved
-# too flaky (degenerate loops). Override via APPLY_MODEL.
-APPLY_MODEL = os.environ.get("APPLY_MODEL", "z-ai/glm-5.2")
+# Model for the apply agent. Override via APPLY_MODEL.
+APPLY_MODEL = os.environ.get("APPLY_MODEL", "deepseek-v4-pro")
 APPLY_MAX_TURNS = int(os.environ.get("APPLY_MAX_TURNS", "60"))
 APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
 

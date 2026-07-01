@@ -7,7 +7,7 @@
   - price/surface: does the listing clearly fit the configured rent band and
     minimum square meters when the raw parser fields are sparse or ambiguous?
 
-Runs the judge model (POLL_JUDGE_MODEL) on OpenRouter, same client as the apply
+Runs the judge model (POLL_JUDGE_MODEL) on DeepSeek, same client as the apply
 agent. Fails OPEN: if the model errors or is unsure, the listing PASSES — in
 this market a missed home costs more than a wasted look (owner's standing call).
 """
@@ -21,8 +21,8 @@ from openai import AsyncOpenAI
 from ..rent_policy import MAX_RENT
 from .models import RawListing
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-JUDGE_MODEL = os.environ.get("POLL_JUDGE_MODEL", "deepseek/deepseek-v4-pro")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+JUDGE_MODEL = os.environ.get("POLL_JUDGE_MODEL", "deepseek-v4-pro")
 MAX_CYCLING_MIN = int(os.environ.get("POLL_MAX_CYCLING_MIN", "15"))
 MIN_RENT = float(os.environ.get("POLL_MIN_PRICE", "800"))
 MIN_SURFACE = float(os.environ.get("POLL_MIN_SURFACE", "30"))
@@ -49,10 +49,10 @@ _SYSTEM = (
 
 
 def _client() -> AsyncOpenAI | None:
-    key = os.environ.get("OPENROUTER_API_KEY")
+    key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         return None
-    return AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
+    return AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=key)
 
 
 def _ok_value(value) -> bool:
@@ -67,7 +67,7 @@ async def judge(listing: RawListing, model: str = JUDGE_MODEL) -> tuple[bool, st
     """Return (ok, reason). Fails open (True) on any error/uncertainty."""
     client = _client()
     if client is None:
-        return True, "no OPENROUTER_API_KEY; fail-open"
+        return True, "no DEEPSEEK_API_KEY; fail-open"
 
     user = json.dumps({
         "url": listing.source_url,
@@ -84,7 +84,7 @@ async def judge(listing: RawListing, model: str = JUDGE_MODEL) -> tuple[bool, st
             model=model,
             messages=[{"role": "system", "content": _SYSTEM},
                       {"role": "user", "content": user}],
-            extra_body={"reasoning": {"enabled": False}},
+            extra_body={"thinking": {"type": "disabled"}},
             max_tokens=300,
             temperature=0,
         )

@@ -1,6 +1,6 @@
 """Regression tests for the two 'unknown'-outcome bugs in browser_agent._run.
 
-Stdlib-only (unittest + unittest.mock), no live OpenRouter/browser needed.
+Stdlib-only (unittest + unittest.mock), no live DeepSeek/browser needed.
 Run: uv run python -m unittest tests/test_browser_agent_loop.py -v
 """
 from __future__ import annotations
@@ -119,15 +119,14 @@ class TestExtractOutcome(unittest.TestCase):
 
 class TestRunLoop(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self._env_patch = patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"})
+        self._env_patch = patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"})
         self._env_patch.start()
         self.addAsyncCleanup(self._env_patch.stop)
 
     async def test_repeated_empty_stop_returns_incomplete(self):
-        """Bug A: glm-5.2 repeatedly returns finish_reason='stop' with empty
-        content and no tool_calls (witte-de-withstraat tail). Must exhaust
-        retry+nudge budgets and report (1, incomplete), not fake-succeed with
-        (0, unknown)."""
+        """Bug A: repeated finish_reason='stop' with empty content and no
+        tool_calls (witte-de-withstraat tail). Must exhaust retry+nudge budgets
+        and report (1, incomplete), not fake-succeed with (0, unknown)."""
         responses = [_FakeResponse(content=None, tool_calls=None, finish_reason="stop")]
         patches = _patch_agent(responses)
         log = _CollectingLogger()

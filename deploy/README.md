@@ -3,7 +3,7 @@
 Always-on responder: headful Chromium under **Xvfb**, **systemd**-managed, with
 **VNC** (over SSH tunnel) for the one-time interactive logins, plus a **Caddy**
 dashboard (HTTPS + Basic Auth). No Hermes — the agent is `src/browser_agent.py`
-(OpenRouter + Playwright MCP). Most steps below are wrapped as `just` commands.
+(DeepSeek + Playwright MCP). Most steps below are wrapped as `just` commands.
 
 Box: **Hetzner Cloud CX23** (2 vCPU / 4 GB, EU region — an EU IP reduces
 Google/rental-site bot-flagging and is low-latency to the NL sites).
@@ -41,8 +41,8 @@ scp state/gmail_client_secret.json state/gmail_token.json \
     state/sources_credentials.json deploy@SERVER:/home/deploy/browser-agent/state/
 # Application documents are NOT in git (personal data) — copy them out of band:
 scp documents/* deploy@SERVER:/home/deploy/browser-agent/documents/
-# OpenRouter key (the apply agent reads it):
-printf 'OPENROUTER_API_KEY=sk-or-...\n' | ssh deploy@SERVER \
+# DeepSeek key (the apply agent reads it):
+printf 'DEEPSEEK_API_KEY=sk-...\n' | ssh deploy@SERVER \
     'cat > /home/deploy/browser-agent/state/agent.env'
 ```
 `just push-creds` / `push-token` / `push-env` do these after the first time.
@@ -70,7 +70,7 @@ just status        # all services at a glance
 just logs / just dash-logs / just activity
 just deploy        # push -> pull on VPS -> uv sync -> restart agent + dashboard
 just pause / just resume          # stop/start the inbox watcher
-just credits       # remaining OpenRouter $ + Stekkies login (runs healthcheck)
+just credits       # remaining DeepSeek credit + Stekkies login (runs healthcheck)
 just restart browser-host         # reattach a clean browser if a session goes stale
 ```
 
@@ -92,5 +92,5 @@ just restart browser-host         # reattach a clean browser if a session goes s
 - `browser-host` keeps the CDP browser on `:9222`; the extractor and apply agent
   attach to it. If logins expire, re-run step 5.
 - Keep VNC stopped except during logins (localhost-only + SSH-tunneled).
-- Keep OpenRouter credit topped up (each apply ≈ $0.01–0.10); the health check
+- Keep DeepSeek credit topped up; the health check
   emails you below the threshold.

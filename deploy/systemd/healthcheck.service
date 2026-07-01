@@ -1,5 +1,5 @@
 [Unit]
-Description=Stekkies bot health check (OpenRouter credit + Stekkies login)
+Description=Stekkies bot health check (DeepSeek credit + Stekkies login)
 After=browser-host.service
 Requires=browser-host.service
 

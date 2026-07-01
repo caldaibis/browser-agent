@@ -34,7 +34,7 @@ doctor:
     echo "preflight:"
     chk "uv installed"                 "command -v uv"
     chk "node/npx present (MCP)"       "command -v npx"
-    chk "OPENROUTER_API_KEY set"       '[ -n "${OPENROUTER_API_KEY:-}" ]'
+    chk "DEEPSEEK_API_KEY set"         '[ -n "${DEEPSEEK_API_KEY:-}" ]'
     chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
     chk "CDP browser reachable :9222"  "curl -sf http://127.0.0.1:9222/json/version"
     [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (start the host with 'just host')"
@@ -158,7 +158,7 @@ poll-pause:
 poll-resume:
     {{ssh}} 'systemctl start poller' && echo resumed
 
-# remaining OpenRouter credit (+ Stekkies login) via the health check on the VPS
+# remaining DeepSeek credit (+ Stekkies login) via the health check on the VPS
 credits:
     {{ssh}} 'systemctl start healthcheck.service && sleep 4 && journalctl -u healthcheck.service -n 5 --no-pager | grep -iE "credit|stekkies"'
 
@@ -183,7 +183,7 @@ push-token:
     {{ssh}} 'chown deploy:deploy {{remote}}/state/gmail_token.json && systemctl restart orchestrator'
     @echo "gmail token updated on VPS"
 
-# push agent.env (OPENROUTER_API_KEY / model overrides), then restart agent
+# push agent.env (DEEPSEEK_API_KEY / model overrides), then restart agent
 push-env:
     scp -i {{key}} state/agent.env {{vps}}:{{remote}}/state/
     {{ssh}} 'chown deploy:deploy {{remote}}/state/agent.env && systemctl restart orchestrator dashboard'
