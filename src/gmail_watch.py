@@ -18,6 +18,7 @@ import base64
 import quopri
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -36,9 +37,11 @@ SCOPES = [
 CLIENT_SECRET = PROJECT_ROOT / "state" / "gmail_client_secret.json"
 TOKEN = PROJECT_ROOT / "state" / "gmail_token.json"
 
-# Match Stekkies "new match/listing" mails. Tune the query to your real subjects.
-# Listing mails come from help@stekkies.com with a stable subject.
-GMAIL_QUERY = 'is:unread from:help@stekkies.com subject:"new Stekkies for you"'
+# Match listing mails. Huurwoningen confirmation mails ("Je reactie ... is
+# verstuurd") are intentionally excluded; only new-listing alerts are actionable.
+STEKKIES_QUERY = 'is:unread from:help@stekkies.com subject:"new Stekkies for you"'
+HUURWONINGEN_QUERY = 'is:unread from:huurwoningen subject:"Net geplaatst"'
+GMAIL_QUERY = STEKKIES_QUERY
 POLL_SECONDS = 5
 
 # Direct listing link in the plain-text body, e.g.
@@ -47,6 +50,28 @@ POLL_SECONDS = 5
 # www.stekkies.com to skip the email.stekkies.com click-tracking wrappers.
 LINK_RE = re.compile(r"https?://www\.stekkies\.com/[^\s\"'>]*?redirect/[A-Za-z0-9]+[^\s\"'>]*")
 HUURWONINGEN_LINK_RE = re.compile(r"https?://(?:www\.)?huurwoningen\.nl/[^\s\"'<>]+")
+HUURWONINGEN_SUBJECT_RE = re.compile(
+    r"Net geplaatst:\s*(?P<price>€\s?[\d.,]+.*?)?,\s*(?P<address>.+)$",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
+class GmailListingEvent:
+    msg_id: str
+    provider: str
+    url: str | None
+    received_ts: str = ""
+    subject: str = ""
+    address: str = ""
+    price: str = ""
+
+    @property
+    def trigger(self) -> str:
+        return {
+            "stekkies": "stekkies_mail",
+            "huurwoningen": "huurwoningen_mail",
+        }.get(self.provider, f"{self.provider}_mail")
 
 
 def get_service():
@@ -157,6 +182,43 @@ def _message_event(svc, msg_id: str, provider: str) -> dict:
     }
 
 
+def _huurwoningen_metadata(subject: str) -> tuple[str, str]:
+    m = HUURWONINGEN_SUBJECT_RE.search(subject or "")
+    if not m:
+        return (subject or "").strip(), "?"
+    return (m.group("address") or "").strip(), (m.group("price") or "?").strip()
+
+
+def _event_from_message(svc, msg_id: str, provider: str) -> GmailListingEvent:
+    ev = _message_event(svc, msg_id, provider)
+    if provider == "stekkies":
+        return GmailListingEvent(
+            msg_id=msg_id,
+            provider=provider,
+            url=ev.get("stekkies_url") or None,
+            received_ts=ev.get("received_ts", ""),
+            subject=ev.get("subject", ""),
+        )
+    if provider == "huurwoningen":
+        address, price = _huurwoningen_metadata(ev.get("subject", ""))
+        return GmailListingEvent(
+            msg_id=msg_id,
+            provider=provider,
+            url=ev.get("source_url") or None,
+            received_ts=ev.get("received_ts", ""),
+            subject=ev.get("subject", ""),
+            address=address,
+            price=price,
+        )
+    return GmailListingEvent(
+        msg_id=msg_id,
+        provider=provider,
+        url=ev.get("source_url") or ev.get("stekkies_url") or None,
+        received_ts=ev.get("received_ts", ""),
+        subject=ev.get("subject", ""),
+    )
+
+
 def recent_mail_events(days: int = 30, max_results: int = 100) -> list[dict]:
     """Return recent Stekkies and Huurwoningen mail signals for dashboard timing.
 
@@ -198,28 +260,65 @@ def mark_read(msg_id: str) -> None:
     ).execute()
 
 
-def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str | None]]:
-    """Yield (message_id, listing_url) for each unread Stekkies mail."""
+def watch_events(poll_seconds: int = POLL_SECONDS) -> Iterator[GmailListingEvent]:
+    """Yield actionable unread listing mails from Stekkies and Huurwoningen."""
     svc = get_service()
-    print(f"[gmail] watching (query='{GMAIL_QUERY}', every {poll_seconds}s)...")
+    queries = [
+        ("stekkies", STEKKIES_QUERY),
+        ("huurwoningen", HUURWONINGEN_QUERY),
+    ]
+    print("[gmail] watching listing mail: " + " | ".join(q for _p, q in queries)
+          + f" every {poll_seconds}s...")
+    seen_this_process: set[str] = set()
     while True:
         try:
-            resp = svc.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=10).execute()
-            for m in resp.get("messages", []):
-                url = extract_listing_url(svc, m["id"])
-                if url:
-                    yield m["id"], url
+            for provider, query in queries:
+                resp = svc.users().messages().list(
+                    userId="me", q=query, maxResults=10,
+                ).execute()
+                for m in resp.get("messages", []) or []:
+                    msg_id = m.get("id", "")
+                    if not msg_id or msg_id in seen_this_process:
+                        continue
+                    seen_this_process.add(msg_id)
+                    ev = _event_from_message(svc, msg_id, provider)
+                    if ev.url:
+                        yield ev
+                    else:
+                        print(f"[gmail] {provider} mail {msg_id} had no listing link; skipped.")
+                        yield ev
+        except Exception as e:  # keep the watcher alive
+            print("[gmail] error:", e)
+        time.sleep(poll_seconds)
+
+
+def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str | None]]:
+    """Backward-compatible Stekkies-only iterator."""
+    svc = get_service()
+    print(f"[gmail] watching (query='{STEKKIES_QUERY}', every {poll_seconds}s)...")
+    while True:
+        try:
+            resp = svc.users().messages().list(
+                userId="me", q=STEKKIES_QUERY, maxResults=10,
+            ).execute()
+            for m in resp.get("messages", []) or []:
+                msg_id = m.get("id", "")
+                if not msg_id:
+                    continue
+                ev = _event_from_message(svc, msg_id, "stekkies")
+                if ev.url:
+                    yield ev.msg_id, ev.url
                 else:
-                    print(f"[gmail] mail {m['id']} had no listing link; skipped.")
-                    yield m["id"], None
+                    print(f"[gmail] mail {msg_id} had no listing link; skipped.")
+                    yield ev.msg_id, None
         except Exception as e:  # keep the watcher alive
             print("[gmail] error:", e)
         time.sleep(poll_seconds)
 
 
 def main() -> None:
-    for msg_id, url in watch():
-        print(f"[gmail] NEW LISTING {msg_id}: {url}")
+    for ev in watch_events():
+        print(f"[gmail] NEW {ev.provider} LISTING {ev.msg_id}: {ev.url}")
 
 
 if __name__ == "__main__":

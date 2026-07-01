@@ -62,6 +62,9 @@ class SeenStore:
                     self._seen.add(json.loads(line)["key"])
                 except (json.JSONDecodeError, KeyError):
                     continue
+        self._load_processed()
+
+    def _load_processed(self) -> None:
         # Anything the Stekkies pipeline already processed (dedup across paths).
         if PROCESSED_FILE.exists():
             for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
@@ -74,7 +77,9 @@ class SeenStore:
                     self._seen.add(canonical_url(url))
 
     def is_new(self, url: str) -> bool:
-        return canonical_url(url) not in self._seen
+        with self._lock:
+            self._load_processed()
+            return canonical_url(url) not in self._seen
 
     def mark(self, url: str, **meta) -> None:
         """Record a canonical URL as seen (idempotent, persisted)."""

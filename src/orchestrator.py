@@ -1,6 +1,6 @@
-"""End-to-end runner:  Gmail trigger -> Stekkies extract -> Hermes apply.
+"""End-to-end runner: Gmail listing trigger -> extract/direct listing -> apply.
 
-Run:  python -m src.orchestrator           # live watch loop
+Run:  python -m src.orchestrator            # live watch loop
       python -m src.orchestrator --once URL # process one Stekkies URL and exit
 """
 import json
@@ -13,7 +13,7 @@ from datetime import datetime
 from .config import LOG_DIR, PROJECT_ROOT
 from .stekkies import extract_listing
 from .apply import apply
-from .gmail_watch import message_received_ts, mark_read, watch
+from .gmail_watch import message_received_ts, mark_read, watch_events
 from .poller.dedup import canonical_url
 from .notify import send_status_email
 
@@ -87,13 +87,87 @@ def _finish(**kw) -> dict:
     return rec
 
 
+def _source_duplicate(source_url: str, keys: set[str]) -> bool:
+    return source_url in keys or canonical_url(source_url) in keys
+
+
+def process_source(listing: dict, msg_id: str | None = None,
+                   trigger: str = "manual", msg_received_ts: str = "") -> dict:
+    """Apply directly to an external source listing, used by Huurwoningen mail
+    and manual/direct integrations that do not need Stekkies extraction."""
+    t0 = time.time()
+    source_url = listing["source_url"]
+    source = listing.get("source_name") or listing.get("source") or "unknown source"
+    address = listing.get("address") or "unknown address"
+    _log("source_listing_received", msg_id=msg_id, trigger=trigger,
+         source=source, source_url=source_url, address=address)
+
+    if _source_duplicate(source_url, _processed_keys()):
+        _log("duplicate_source_skipped", msg_id=msg_id, source_url=source_url)
+        return _finish(
+            msg_id=msg_id,
+            trigger=trigger,
+            msg_received_ts=msg_received_ts,
+            source_url=source_url,
+            source=source,
+            address=address,
+            status="skipped_duplicate",
+            mark_read=True,
+            message="Skipped because this external listing was already handled.",
+        )
+
+    try:
+        (LOG_DIR / "last_listing.json").write_text(
+            json.dumps(listing, indent=2, ensure_ascii=False), encoding="utf-8")
+        result = apply(listing)
+        _log("applied", outcome=result.outcome, returncode=result.rc,
+             seconds=round(time.time() - t0, 1))
+        if result.terminal:
+            _remember_processed(
+                msg_id=msg_id,
+                trigger=trigger,
+                source_url=source_url,
+                source=source,
+                address=address,
+                outcome=result.outcome,
+            )
+        return _finish(
+            msg_id=msg_id,
+            trigger=trigger,
+            msg_received_ts=msg_received_ts,
+            source_url=source_url,
+            source=source,
+            address=address,
+            status=result.outcome,
+            mark_read=True,
+            returncode=result.rc,
+            seconds=round(time.time() - t0, 1),
+            message=result.summary or f"Agent finished with outcome={result.outcome} (rc={result.rc}).",
+        )
+    except Exception as e:
+        _log("error", error=str(e))
+        traceback.print_exc()
+        return _finish(
+            msg_id=msg_id,
+            trigger=trigger,
+            msg_received_ts=msg_received_ts,
+            source_url=source_url,
+            source=source,
+            address=address,
+            status="error",
+            mark_read=True,
+            seconds=round(time.time() - t0, 1),
+            message=f"{type(e).__name__}: {e}. Check runs.jsonl and the service journal for the traceback.",
+        )
+
+
 def process(stekkies_url: str, msg_id: str | None = None,
             trigger: str | None = None) -> dict:
     t0 = time.time()
     received_ts = message_received_ts(msg_id) if msg_id else None
     _log("listing_received", msg_id=msg_id, url=stekkies_url)
     keys = _processed_keys()
-    if stekkies_url in keys or canonical_url(stekkies_url) in keys:
+    if _source_duplicate(stekkies_url, keys):
         _log("duplicate_listing_skipped", msg_id=msg_id, url=stekkies_url)
         return _finish(
             msg_id=msg_id,
@@ -125,7 +199,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
                 mark_read=True,
                 message="Could not find an external source URL, so no application was submitted.",
             )
-        if listing.source_url in keys or canonical_url(listing.source_url) in keys:
+        if _source_duplicate(listing.source_url, keys):
             _log("duplicate_source_skipped", msg_id=msg_id, source_url=listing.source_url)
             return _finish(
                 msg_id=msg_id,
@@ -188,18 +262,41 @@ def main() -> int:
         process(sys.argv[2])
         return 0
     _log("watcher_started")
-    for msg_id, url in watch():
-        if not url:
+    for ev in watch_events():
+        msg_id = ev.msg_id
+        if not ev.url:
             result = _finish(
                 msg_id=msg_id,
-                trigger="stekkies_mail",
-                msg_received_ts=message_received_ts(msg_id),
+                trigger=ev.trigger,
+                msg_received_ts=ev.received_ts or message_received_ts(msg_id),
                 status="no_listing_link",
                 mark_read=True,
-                message="Stekkies email matched the Gmail query but no listing link was found.",
+                message=f"{ev.provider} email matched the Gmail query but no listing link was found.",
+            )
+        elif ev.provider == "stekkies":
+            result = process(ev.url, msg_id=msg_id, trigger=ev.trigger)
+        elif ev.provider == "huurwoningen":
+            listing = {
+                "source_url": ev.url,
+                "source_name": "huurwoningen.nl",
+                "address": ev.address or ev.subject or "?",
+                "price": ev.price or "?",
+            }
+            result = process_source(
+                listing,
+                msg_id=msg_id,
+                trigger=ev.trigger,
+                msg_received_ts=ev.received_ts or message_received_ts(msg_id),
             )
         else:
-            result = process(url, msg_id=msg_id, trigger="stekkies_mail")
+            result = _finish(
+                msg_id=msg_id,
+                trigger=ev.trigger,
+                msg_received_ts=ev.received_ts or message_received_ts(msg_id),
+                status="no_listing_link",
+                mark_read=True,
+                message=f"Unsupported Gmail provider: {ev.provider}",
+            )
         if result.get("mark_read"):
             try:
                 mark_read(msg_id)
