@@ -27,7 +27,7 @@ from ..config import LOG_DIR
 from ..notify import send_alert, send_status_email
 from . import filters, judge
 from .browser_lock import browser_lock
-from .dedup import PROCESSED_FILE, SeenStore
+from .dedup import PROCESSED_FILE, SeenStore, release_count
 from .fetch import Blocked, fetch
 from .models import RawListing, SiteConfig
 from .parsers import parse_jsonld
@@ -42,6 +42,14 @@ SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
 
 # Backoff schedule (seconds) applied on consecutive blocks, capped.
 _BACKOFF = [60, 300, 900, 1800, 3600]
+
+# A non-terminal outcome (incomplete/timeout/error/unknown) is normally kept
+# retryable, since it might be a transient hiccup. But some listings fail the
+# same non-terminal way on every single poll (e.g. a page that reliably burns
+# the agent's whole turn budget) and would otherwise be re-applied forever.
+# Give up automatically after this many non-terminal attempts for the same
+# canonical URL.
+MAX_POLLER_ATTEMPTS = int(os.environ.get("POLLER_MAX_ATTEMPTS", "2"))
 
 
 def _log(event: str, **kw) -> None:
@@ -193,6 +201,14 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 trigger="poller",
                 extra={"detected_by": listing.detected_by or listing.source_name},
             )
+            attempts = release_count(listing.source_url) + 1
+            give_up = not result.terminal and attempts >= MAX_POLLER_ATTEMPTS
+            message = result.summary or f"Poller agent finished with outcome={result.outcome} (rc={result.rc})."
+            if give_up:
+                message += (
+                    f" Giving up after {attempts} non-terminal attempts for this listing "
+                    "— no further automatic retries."
+                )
             rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
@@ -202,16 +218,17 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 returncode=result.rc,
                 seconds=seconds,
                 detected_ts=listing.detected_ts,
-                message=result.summary or f"Poller agent finished with outcome={result.outcome} (rc={result.rc}).",
+                message=message,
             )
             _activity(
                 f"trigger=poller status={rec.get('status')} source={rec.get('source') or 'unknown source'} "
                 f"address={rec.get('address') or 'unknown address'} - {rec.get('message')}"
             )
             send_status_email(rec)
-            # Mark seen only on a terminal outcome, mirroring the orchestrator:
-            # transient failures stay retryable on the next poll.
-            if getattr(result, "terminal", True):
+            # Mark seen on a terminal outcome, or once we give up retrying a
+            # listing that fails the same non-terminal way every time —
+            # otherwise transient failures stay retryable on the next poll.
+            if result.terminal or give_up:
                 seen.mark(listing.source_url, outcome=result.outcome,
                           source=listing.source_name, address=listing.address)
                 _remember_processed(listing, result.outcome)
@@ -227,6 +244,14 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 trigger="poller",
                 extra={"detected_by": listing.detected_by or listing.source_name},
             )
+            attempts = release_count(listing.source_url) + 1
+            give_up = attempts >= MAX_POLLER_ATTEMPTS
+            message = f"{type(e).__name__}: {e}"
+            if give_up:
+                message += (
+                    f" Giving up after {attempts} failed attempts for this listing "
+                    "— no further automatic retries."
+                )
             rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
@@ -234,10 +259,15 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 address=listing.address or listing.title,
                 status="error",
                 detected_ts=listing.detected_ts,
-                message=f"{type(e).__name__}: {e}",
+                message=message,
             )
             send_status_email(rec)
-            seen.release(listing.source_url)
+            if give_up:
+                seen.mark(listing.source_url, outcome="error",
+                          source=listing.source_name, address=listing.address)
+                _remember_processed(listing, "error")
+            else:
+                seen.release(listing.source_url)
         finally:
             queue.task_done()
 

@@ -114,6 +114,29 @@ def active_claim_keys(now: float | None = None) -> set[str]:
     return set(active)
 
 
+def release_count(url: str) -> int:
+    """How many times this canonical URL has already ended in a non-terminal
+    (retryable) apply outcome — i.e. how many "released" claims it has.
+
+    Used to cap automatic retries: a listing that fails the same
+    non-terminal way every poll (e.g. it consistently hits the agent's turn
+    budget) would otherwise be re-applied forever, burning LLM cost for a
+    result that will never change.
+    """
+    key = canonical_url(url)
+    if not CLAIMS_FILE.exists():
+        return 0
+    count = 0
+    for line in CLAIMS_FILE.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("status") == "released" and rec.get("key") == key:
+            count += 1
+    return count
+
+
 class SeenStore:
     """Thread-safe set of canonical URLs already seen/handled."""
 

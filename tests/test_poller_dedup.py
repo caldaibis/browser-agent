@@ -60,6 +60,34 @@ class TestSeenStore(unittest.TestCase):
         b = "https://pararius.nl/huis-te-huur/utrecht/abc/"
         self.assertEqual(dedup.canonical_url(a), dedup.canonical_url(b))
 
+    def test_release_count_tracks_repeated_non_terminal_failures(self):
+        with tempfile.TemporaryDirectory() as td:
+            seen = Path(td) / "seen.jsonl"
+            processed = Path(td) / "processed.jsonl"
+            claims = Path(td) / "claims.jsonl"
+            lock = Path(td) / "dedup.lock"
+            with (
+                patch.object(dedup, "SEEN_FILE", seen),
+                patch.object(dedup, "PROCESSED_FILE", processed),
+                patch.object(dedup, "CLAIMS_FILE", claims),
+                patch.object(dedup, "LOCK_FILE", lock),
+            ):
+                store = dedup.SeenStore()
+                url = "https://www.huurwoningen.nl/huren/utrecht/0555f33c/hof-van-oslo/"
+
+                self.assertEqual(dedup.release_count(url), 0)
+                store.reserve(url)
+                store.release(url)
+                self.assertEqual(dedup.release_count(url), 1)
+                store.reserve(url)
+                store.release(url)
+                self.assertEqual(dedup.release_count(url), 2)
+                # A different listing's releases don't bleed into this count.
+                other = "https://www.huurwoningen.nl/huren/utrecht/abc/other/"
+                store.reserve(other)
+                store.release(other)
+                self.assertEqual(dedup.release_count(url), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
