@@ -48,7 +48,7 @@ Parser = Callable[[object, "SiteConfig"], "list[RawListing]"]
 class SiteConfig:
     """How to watch one source site. Discovery (docs/poller-plan.md) fills this."""
     name: str                              # canonical host, e.g. "huurwoningen.nl"
-    tier: int = 2                          # 1=JSON API, 2=filtered HTML, 3=rendered tab+LLM
+    tier: int = 2                          # 1=JSON API, 2=filtered HTML, 3=rendered browser
     endpoint: str = ""                     # tier 1: JSON API URL
     list_url: str = ""                     # tier 2/3: filtered listing page URL
     method: str = "GET"
@@ -56,6 +56,12 @@ class SiteConfig:
     headers: dict = field(default_factory=dict)
     parse: Optional[Parser] = None         # payload -> list[RawListing]; None = generic
     needs_login: bool = False              # list requires an authed profile (tier 3)
+    own_browser: bool = False              # tier 3: LAUNCH a dedicated browser
+    #   instead of attaching to the shared host over CDP. Needed for sites whose
+    #   anti-bot (Cloudflare "Just a moment") detects the CDP attachment — a
+    #   freshly launched Chromium clears the JS challenge, a CDP-attached one
+    #   never does. Uses its own throwaway profile (no shared logins), so it is
+    #   for public listing pages that don't need our stored session.
     cadence_s: int = 60                    # base poll interval
     jitter_s: tuple[int, int] = (0, 30)    # random extra delay added per poll
     enabled: bool = True                   # discovery-incomplete sites start disabled

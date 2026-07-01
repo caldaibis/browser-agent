@@ -8,13 +8,13 @@ probing on 2026-07-01):
   - **tier 2, anchor** (`make_anchor_parser`): site server-renders listing
     HTML with detail-page links but no JSON-LD; we scrape the links (URL only,
     price/size come later from the apply/judge stage).
-  - **tier 3** (rendered tab): site is Cloudflare/DataDome/TLS-fingerprint
+  - **tier 3** (rendered browser): site is Cloudflare/DataDome/TLS-fingerprint
     protected, login-walled, or a JS-SPA that blocks both httpx and throwaway
-    headless Chromium. The watcher opens the page in the real shared Chromium
-    (over CDP, under the browser lock, with the host's anti-automation flags)
-    and parses the rendered HTML. These need the browser host running and are
-    OFF by default (POLL_ENABLE_TIER3=1). Each tier-3 SPA still needs its
-    rendered-DOM parser tuned once against the live host.
+    headless Chromium. Most tier-3 sites open the page in the real shared
+    Chromium (over CDP, under the browser lock, with the host's anti-automation
+    flags) and parse the rendered HTML. A few public pages can instead use
+    own_browser=True to launch a dedicated throwaway Chromium when CDP itself
+    triggers anti-bot detection. These are OFF by default (POLL_ENABLE_TIER3=1).
 
 Re-run `python -m src.poller.discover` any time to re-check, and use
 `python -m src.poller.sniff <site>` (network sniffer) to hunt a JSON API.
@@ -34,9 +34,8 @@ def _anchor(name: str, list_url: str, pattern: str, **kw) -> SiteConfig:
                       parse=make_anchor_parser(pattern), **kw)
 
 
-# Tier-3 opens a real tab under the browser lock, so it competes with live
-# submissions. Kept OFF by default (validate with the browser host up first, and
-# give each a real rendered-page parser), and on a slow cadence to limit
+# Tier-3 usually opens a real tab under the browser lock, so it can compete with
+# live submissions. Kept OFF by default and on a slow cadence to limit
 # contention. Flip on with POLL_ENABLE_TIER3=1 once verified.
 import os as _os
 _TIER3_ON = _os.environ.get("POLL_ENABLE_TIER3", "0") == "1"
@@ -74,6 +73,11 @@ REGISTRY: list[SiteConfig] = [
     _anchor("deruitermakelaarshuis.nl",
             "https://www.deruitermakelaarshuis.nl/aanbod/?_status=te-huur",
             r"/aanbod/[a-z0-9-]+-[a-z0-9-]+/"),
+    # stienstra: owner-supplied fine filter (Utrecht + 20 km radius, min 30 m²);
+    # server-rendered /woning/<slug> anchors, city in the slug.
+    _anchor("stienstra.nl",
+            "https://www.stienstra.nl/uitgebreid-zoeken?use_radius=on&search_location=Utrecht%2C+Nederland&radius=20&min-area=30&min-price=0&max-price=400000",
+            r"/woning/[a-z0-9-]+"),
 
     # ---- tier-1: real JSON API, plain httpx, no browser --------------------
     # hurenindemix serves its whole aanbod as a JSON feed. Single new-build
@@ -88,10 +92,16 @@ REGISTRY: list[SiteConfig] = [
     # VALIDATED against the live host = renders + parses listings today.
     _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/utrecht/"),   # VALIDATED: 30 JSON-LD
     _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/amsterdam/"),
-    # pararius/mijndak serve a challenge/empty page even to the real browser
-    # (deepest protection) — kept for reference; need a challenge-solve/login.
-    _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht"),
-    _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/amsterdam"),
+    # pararius: Cloudflare "Just a moment" JS challenge that a CDP-attached
+    # browser NEVER clears (CF detects the CDP attachment) but a freshly LAUNCHED
+    # browser sails through — so own_browser=True. VALIDATED: 30 listings.
+    _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht",
+           own_browser=True,
+           parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
+    _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/amsterdam",
+           own_browser=True,
+           parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
+    # mijndak serves a challenge/empty page; its Utrecht stock == woningnetregioutrecht.
     _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", needs_login=True),
     _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/WoningOverzicht",
            needs_login=True,
@@ -133,7 +143,6 @@ REGISTRY: list[SiteConfig] = [
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
     _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",
            parse=make_anchor_parser(r"/woning/[0-9a-f]{16,}")),   # VALIDATED: 94, no login
-    _tier3("stienstra.nl", "https://www.stienstra.nl/ik-zoek-een-woning"),
     # eye-move.nl is NOT a rental site — it's a shared third-party auth provider
     #   used by nmgwonen.mijnklantdossier.nl and vbtverhuurmakelaars.nl under
     #   SEPARATE accounts. Dropped from the registry.

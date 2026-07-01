@@ -84,9 +84,43 @@ async def _render_tier3(site: SiteConfig) -> str:
     return await asyncio.to_thread(_locked)
 
 
+_OWN_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+async def _render_own_browser(site: SiteConfig) -> str:
+    """Tier 3, own_browser: LAUNCH a dedicated Chromium (not CDP) and return the
+    rendered HTML. A launched browser clears Cloudflare's "Just a moment" JS
+    challenge that a CDP-attached one never does. Its own throwaway profile, no
+    shared browser lock (it doesn't touch the shared host)."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        b = await p.chromium.launch(
+            headless=False,
+            ignore_default_args=["--enable-automation"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        try:
+            ctx = await b.new_context(user_agent=_OWN_UA, locale="nl-NL")
+            pg = await ctx.new_page()
+            await pg.goto(site.list_url, wait_until="domcontentloaded", timeout=45000)
+            await pg.wait_for_timeout(SETTLE_MS)
+            return await pg.content()
+        finally:
+            await b.close()
+
+
 async def poll_once(client: httpx.AsyncClient, site: SiteConfig) -> list[RawListing]:
     """One raw poll of a site: fetch + parse. Raises Blocked on a block signal."""
     parse = site.parse or parse_jsonld
+    if site.tier == 3 and site.own_browser:
+        html = await _render_own_browser(site)
+        return parse(html, site)
     if site.tier == 3:
         html = await _render_tier3(site)
         return parse(html, site)
