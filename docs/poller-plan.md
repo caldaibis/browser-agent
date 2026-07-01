@@ -1,11 +1,51 @@
 # Implementation Plan — Active Listing Poller
 
-Status: **implemented** (site-agnostic plumbing + registry + generic tier-2
-parser + discovery probe), 2026-07-01. Remaining: per-site tier-1 API discovery
-(run `just discover` and fill `src/poller/registry.py`). Code lives in
-`src/poller/`.
+Status: **plumbing complete; 12 of 26 sites live**, 2026-07-01. Code in
+`src/poller/`. See "Outcome" below for exactly what works and what is left.
 
 Author: derived from a grilling session, 2026-07-01.
+
+## Outcome (what actually shipped)
+
+All site-agnostic plumbing is built and the registry classifies all 26 sites.
+Build-order items 1–4 are done; item 5 is done except the VPS deploy has not
+been run. Tools: `just discover` (tier triage), `just sniff <site>` (network
+sniffer — DevTools Network tab in code), `just poll` / `poll-once`.
+
+**Working & validated (12):**
+- *tier-2, plain httpx, always-on (7):* huurportaal, huurexpert, livresidential,
+  ikwilhuren, vgwgroup, nmgwonen, deruitermakelaarshuis.
+- *tier-3, real browser host, validated live (5):* huurwoningen (30), funda (14),
+  vesteda (127), plaza (32), your-house (12). Gated off by default; enable with
+  `POLL_ENABLE_TIER3=1`.
+
+**Not live yet (14 entries / ~11 sites), with reason:**
+- *Need a one-time profile login* (redirect to login wall; will render once the
+  single profile is signed in): rebowonenhuur, eye-move, hurenindemix, mijndak,
+  woningnetregioutrecht, woonruimte-utrecht, verhuurtbeter, stienstra.
+- *Deep anti-bot — challenge even to the real browser:* pararius, mijndak.
+- *JS-onclick cards, no anchors (need a DOM click-through or their API):*
+  kamernet, househunting.
+- *Dropped:* hurenviafrits.nl (DNS dead); nmgwonen.mijnklantdossier.nl (redirects
+  to nmgwonen.nl, already covered).
+
+**Deviations from the original design, and why:**
+- *Tier 1 (JSON API interception) was never needed.* No target site exposed a
+  clean public JSON list endpoint; sites are either server-rendered (tier 2) or
+  JS/anti-bot (tier 3). The "API-first" premise did not hold, so tier 1 exists in
+  `SiteConfig` but is unused.
+- *Tier 3 parses the rendered DOM deterministically, not "a cheap LLM reads the
+  list".* Cheaper and more reliable; the LLM is used only for the
+  distance/roommate judgment, as for every tier.
+- *No `id_field` in SiteConfig* — the canonical listing URL is the id directly.
+
+**Remaining to be "complete":**
+- One-time logins for the login-walled sites, then re-validate + enable them.
+- A DOM click-through (or API) for kamernet/househunting; a challenge strategy
+  for pararius.
+- Run the VPS deploy (`just deploy`; enable `poller.service`).
+- Open items below (cheap-model choice is set to `google/gemini-2.5-flash-lite`;
+  LLM-judgment batching and long-term login upkeep still open).
 
 ## Goal
 
