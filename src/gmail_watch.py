@@ -188,7 +188,6 @@ def _message_event(svc, msg_id: str, provider: str) -> dict:
         "source_url": source_url,
     }
 
-
 def _links_from_text(text: str) -> list[str]:
     """Extract href and plain-text URLs from an email body, preserving SendGrid
     click links that may be the only actionable Huurwoningen listing URL."""
