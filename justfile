@@ -37,11 +37,15 @@ doctor:
     chk "node/npx present (MCP)"       "command -v npx"
     chk "DEEPSEEK_API_KEY set"         '[ -n "${DEEPSEEK_API_KEY:-}" ]'
     chk "claude CLI present (self-improvement)" "command -v claude"
-    chk "ANTHROPIC_API_KEY set"        '[ -n "${ANTHROPIC_API_KEY:-}" ]'
     chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
     chk "CDP browser reachable :9222"  "curl -sf http://127.0.0.1:9222/json/version"
-    [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (start the host with 'just host')"
+    chk "LiteLLM proxy reachable :4000 (self-improvement)" "curl -sf http://127.0.0.1:4000/health/liveliness"
+    [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (start the host with 'just host', the claude CLI with 'just ensure-claude-cli', the proxy with 'just litellm-proxy')"
     exit $rc
+
+# install the claude CLI locally if missing (self-improvement agent; no sudo attempted -- if your npm needs it, run this yourself)
+ensure-claude-cli:
+    command -v claude >/dev/null 2>&1 && echo "claude CLI already present: $(command -v claude)" || npm install -g @anthropic-ai/claude-code
 
 # print the exact apply prompt for a saved listing JSON, without running anything.
 dry-prompt path="logs/last_listing.json":
@@ -114,6 +118,7 @@ deploy:
     git push
     {{ssh}} 'sudo -u deploy git -C {{remote}} pull --ff-only'
     {{ssh}} 'sudo -u deploy bash -lc "cd {{remote}} && uv sync"'
+    {{ssh}} 'bash {{remote}}/deploy/ensure-self-improvement.sh'
     {{ssh}} 'systemctl restart orchestrator dashboard; systemctl is-enabled poller >/dev/null 2>&1 && systemctl restart poller || true'
     @echo "deployed + restarted"
 

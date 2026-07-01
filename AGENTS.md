@@ -42,7 +42,16 @@ form, uploads docs, submits).
   poller's applier and the Stekkies orchestrator never drive the shared browser
   at once (also wired into `apply.apply()`). `registry.py` lists all 26 sites;
   `discover.py` probes which tier each site currently yields. Run: `just poll`,
-  `just poll-once <site>`, `just discover`.
+  `just poll-once <site>`, `just discover`. A non-terminal outcome
+  (incomplete/timeout/error/unknown) releases the listing so the next poll
+  retries it — but a listing that fails the same non-terminal way every time
+  (e.g. a page that reliably burns the whole turn budget) is capped at
+  `MAX_POLLER_ATTEMPTS` (default 2, env `POLLER_MAX_ATTEMPTS`) via
+  `dedup.release_count()`; past the cap it's marked seen/processed like a
+  terminal outcome so it stops being retried. Without this a stuck listing
+  gets re-applied every cadence forever, burning real LLM cost for a result
+  that will never change (seen: `Hof van Oslo` retried 15+ times over several
+  hours on 2026-07-01, several million tokens each).
 - `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
   (blocked/error/incomplete/timeout/not_available/…, see
   `SELF_IMPROVEMENT_OUTCOMES`). Drives the **Claude Agent SDK**
@@ -93,9 +102,14 @@ form, uploads docs, submits).
 - Run modules as packages: `uv run python -m src.<module>`.
 - **Use the `justfile` recipes for common workflows** instead of reinventing
   commands — run `just` (or read the `justfile`) to list them. Covers local dev
-  (`sync`, `host`, `login`, `watch`, `dashboard`, `healthcheck`, `reauth`), VPS
-  ops (`deploy`, `pull`, `shell`, `logs`, `status`, `pause`/`resume`, `credits`,
-  `vnc`), and secret push (`push-creds`, `push-token`, `push-env`).
+  (`sync`, `host`, `login`, `watch`, `dashboard`, `healthcheck`, `reauth`,
+  `ensure-claude-cli`, `litellm-proxy`), VPS ops (`deploy`, `pull`, `shell`,
+  `logs`, `status`, `pause`/`resume`, `credits`, `vnc`), and secret push
+  (`push-creds`, `push-token`, `push-env`). `deploy` (and CI's `deploy.yml`)
+  both call `deploy/ensure-self-improvement.sh` on every deploy — an
+  already-provisioned VPS self-heals to whatever `claude`
+  CLI/`litellm-proxy.service` state the repo now expects, not just a fresh
+  `deploy/setup.sh` install.
 - Local dev: WSL2 + WSLg (DISPLAY=:0) for headed Chromium. VPS: Xvfb (DISPLAY
   =:99). No system Chrome — use bundled Chromium. Docs live in `documents/`.
 - `state/` (profile, creds, tokens) and `logs/` are gitignored — never commit.

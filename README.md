@@ -56,6 +56,19 @@ uv run python -m src.import_passwords passwords.csv   # then delete the CSV
 #    First run authorizes in the browser and caches state/gmail_token.json.
 ```
 
+### Self-improvement agent (optional)
+After an apply attempt fails in a non-terminal way, `src/self_improvement_agent.py`
+diagnoses and can patch the repo itself. It needs two things beyond the core
+setup above — both one-off, both idempotent:
+```bash
+just ensure-claude-cli   # installs the `claude` CLI if missing (npm install -g)
+just litellm-proxy       # own terminal/service, like `just host` — routes the
+                          # agent through DeepSeek instead of spending real
+                          # Anthropic credit; no extra API key needed
+```
+`just doctor` checks both. See `AGENTS.md` for the full architecture (isolated
+git worktrees, push-to-main-triggers-CI/CD deploy, cost caveats).
+
 ## Run
 ```bash
 # Process a single Stekkies listing (applies + submits autonomously):

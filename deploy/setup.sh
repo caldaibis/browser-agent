@@ -12,7 +12,7 @@ APP_DIR="${APP_HOME}/browser-agent"
 REPO_URL="${REPO_URL:-git@github.com:caldaibis/browser-agent.git}"
 DISPLAY_NUM="${DISPLAY_NUM:-:99}"
 
-echo "==> [1/7] base packages"
+echo "==> [1/8] base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
@@ -21,21 +21,19 @@ apt-get install -y -qq \
   >/dev/null
 # Node/npx is required for the Playwright MCP (browser automation + file upload)
 # that Hermes drives. The MCP server config travels in the copied ~/.hermes.
+# Also needed for the claude CLI (self-improvement agent) -- see step 5.
 
-echo "==> [1b/7] claude CLI (self-improvement agent, via claude-agent-sdk)"
-command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code >/dev/null
-
-echo "==> [2/7] app user '${APP_USER}'"
+echo "==> [2/8] app user '${APP_USER}'"
 if ! id "${APP_USER}" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "${APP_USER}"
 fi
 
-echo "==> [3/7] uv (as ${APP_USER})"
+echo "==> [3/8] uv (as ${APP_USER})"
 sudo -u "${APP_USER}" bash -lc '
   command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 '
 
-echo "==> [4/7] clone/update repo"
+echo "==> [4/8] clone/update repo"
 if [ ! -d "${APP_DIR}/.git" ]; then
   echo "    cloning ${REPO_URL} (server SSH key must be a GitHub deploy key)"
   sudo -u "${APP_USER}" git clone "${REPO_URL}" "${APP_DIR}"
@@ -43,17 +41,21 @@ else
   sudo -u "${APP_USER}" git -C "${APP_DIR}" pull --ff-only
 fi
 
-echo "==> [5/7] chromium OS deps (root) + browser (as ${APP_USER})"
+echo "==> [5/8] self-improvement runtime (claude CLI + litellm-proxy.service)"
+# Shared with the ongoing deploy path (`just deploy` / deploy.yml) so an
+# already-provisioned VPS self-heals here too, not just a fresh one.
+APP_USER="${APP_USER}" bash "${APP_DIR}/deploy/ensure-self-improvement.sh"
+
+echo "==> [6/8] chromium OS deps (root) + browser (as ${APP_USER})"
 # install-deps needs root (apt); the browser download lives in the user's cache.
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
 # Run install-deps as root via the venv's playwright (uvx isn't on root's PATH).
 "${APP_DIR}/.venv/bin/python" -m playwright install-deps chromium
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
 
-echo "==> [6/8] systemd units"
+echo "==> [7/8] systemd units"
 for unit in xvfb.service browser-host.service orchestrator.service poller.service \
-            vnc.service healthcheck.service healthcheck.timer dashboard.service \
-            litellm-proxy.service; do
+            vnc.service healthcheck.service healthcheck.timer dashboard.service; do
   sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
     "${APP_DIR}/deploy/systemd/${unit}" > "/etc/systemd/system/${unit}"
 done
@@ -63,7 +65,7 @@ sed "s|__APP_USER__|${APP_USER}|g" "${APP_DIR}/deploy/stekkies-dashboard.sudoers
 chmod 0440 /etc/sudoers.d/stekkies-dashboard
 systemctl daemon-reload
 
-echo "==> [7/8] Caddy (reverse proxy: HTTPS + Basic Auth for the dashboard)"
+echo "==> [8/8] Caddy (reverse proxy: HTTPS + Basic Auth for the dashboard)"
 if ! command -v caddy >/dev/null 2>&1; then
   apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -79,11 +81,10 @@ else
   echo "    (set DASHBOARD_DOMAIN/USER/HASH and render deploy/Caddyfile.template -> /etc/caddy/Caddyfile)"
 fi
 
-echo "==> [8/8] enable Xvfb + browser host + health-check timer + dashboard + litellm proxy (NOT orchestrator yet)"
+echo "==> enable Xvfb + browser host + health-check timer + dashboard (NOT orchestrator yet; litellm-proxy already enabled in step 5)"
 systemctl enable --now xvfb.service
 systemctl enable --now browser-host.service
 systemctl enable --now healthcheck.timer
-systemctl enable --now litellm-proxy.service
 systemctl enable --now dashboard.service
 
 cat <<EOF

@@ -1,7 +1,8 @@
 name: deploy
 
 # Auto-deploy to the VPS after CI passes on main. Runs the same steps as
-# `just deploy`: fast-forward pull, uv sync, restart orchestrator + dashboard.
+# `just deploy`: fast-forward pull, uv sync, ensure self-improvement runtime
+# (claude CLI + litellm-proxy.service), restart orchestrator + dashboard.
 on:
   workflow_run:
     workflows: ["ci"]
@@ -39,5 +40,6 @@ jobs:
           ssh -i ~/.ssh/deploy_key "root@${VPS_HOST}" "\
             sudo -u deploy git -C ${REMOTE} pull --ff-only && \
             sudo -u deploy bash -lc 'cd ${REMOTE} && uv sync' && \
+            bash ${REMOTE}/deploy/ensure-self-improvement.sh && \
             systemctl restart orchestrator dashboard && \
             echo deployed"
