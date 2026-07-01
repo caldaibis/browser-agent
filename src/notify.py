@@ -1,6 +1,6 @@
 """Email status notifications via the Gmail API (reuses the watcher's creds).
 
-Sends a per-listing status update to NOTIFY_TO after each application attempt.
+Sends a per-listing status update to NOTIFY_TO after successful submissions.
 Requires the gmail.send scope (see gmail_watch.SCOPES) — re-authorize once if
 your cached token predates it.
 
@@ -14,6 +14,7 @@ from .gmail_watch import get_service
 
 NOTIFY_TO = os.environ.get("NOTIFY_TO", "you@example.com")
 NOTIFY_ENABLED = os.environ.get("NOTIFY_ENABLED", "1") != "0"
+STATUS_EMAIL_OUTCOMES = {"submitted"}
 
 # outcome -> (emoji, human label)
 _OUTCOME = {
@@ -69,9 +70,13 @@ def send_alert(subject: str, body: str) -> None:
 
 
 def send_status_email(rec: dict) -> None:
-    """Best-effort: email a status update. Never raises (logging must not break
-    on a mail failure)."""
+    """Best-effort: email successful submissions only.
+
+    Never raises: logging/apply flow must not break on a mail failure.
+    """
     if not NOTIFY_ENABLED:
+        return
+    if rec.get("status") not in STATUS_EMAIL_OUTCOMES:
         return
     try:
         msg = EmailMessage()
