@@ -14,6 +14,7 @@ import os
 from ..rent_policy import MAX_RENT
 from .models import RawListing
 
+MIN_RENT = float(os.environ.get("POLL_MIN_PRICE", "800"))
 MIN_SURFACE = float(os.environ.get("POLL_MIN_SURFACE", "30"))
 REQUIRE_KNOWN_PRICE = os.environ.get("POLL_REQUIRE_KNOWN_PRICE", "1") != "0"
 # Cities we apply in. Matched case-insensitively as a substring of city/address.
@@ -31,7 +32,9 @@ _ROOM_MARKERS = ("kamer", "room", "studentenkamer", "shared", "gedeeld")
 def passes(listing: RawListing) -> tuple[bool, str]:
     """Return (ok, reason). ok=False means a hard, published fact vetoes it."""
     if listing.price is None and REQUIRE_KNOWN_PRICE:
-        return False, f"price unknown; max rent is €{MAX_RENT:.0f}"
+        return False, f"price unknown; rent range is €{MIN_RENT:.0f}-€{MAX_RENT:.0f}"
+    if listing.price is not None and listing.price < MIN_RENT:
+        return False, f"price €{listing.price:.0f} < €{MIN_RENT:.0f}"
     if listing.price is not None and listing.price > MAX_RENT:
         return False, f"price €{listing.price:.0f} > €{MAX_RENT:.0f}"
 
