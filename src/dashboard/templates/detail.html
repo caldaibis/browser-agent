@@ -16,6 +16,9 @@
         <tr><th>Detected</th><td>{{ (sub.detected_ts or sub.msg_received_ts or '—').replace('T',' ') }}</td></tr>
         <tr><th>Origin</th><td>{{ sub.origin_label }}</td></tr>
         <tr><th>Source</th><td>{{ sub.source or '—' }}</td></tr>
+        {% if sub.origin == 'poller' %}
+        <tr><th>Poller detected by</th><td>{{ sub.detected_by_label or '—' }}</td></tr>
+        {% endif %}
         <tr><th>Duration</th><td>{{ (sub.seconds|round(1))|string + 's' if sub.seconds else '—' }}</td></tr>
         <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
       </tbody>
@@ -27,6 +30,7 @@
     {% if race %}
     <table>
       <tbody>
+        <tr><th>Detected by</th><td>{{ race.detected_by or '—' }}</td></tr>
         <tr><th>Poller detected</th><td>{{ race.poller_ts.replace('T',' ') }}</td></tr>
         <tr>
           <th>Stekkies mail</th>

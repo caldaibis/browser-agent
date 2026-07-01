@@ -297,6 +297,7 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
     except Exception:
         pass
     print(f"[apply] ----- agent finished: outcome={result.outcome} (rc={result.rc}) -----")
+    result.transcript_path = str(transcript)
     return result
 
 

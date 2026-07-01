@@ -20,7 +20,7 @@ REQUIRE_KNOWN_PRICE = os.environ.get("POLL_REQUIRE_KNOWN_PRICE", "1") != "0"
 # Cities we apply in. Matched case-insensitively as a substring of city/address.
 CITIES = tuple(
     c.strip().lower()
-    for c in os.environ.get("POLL_CITIES", "utrecht,amsterdam").split(",")
+    for c in os.environ.get("POLL_CITIES", "utrecht").split(",")
     if c.strip()
 )
 

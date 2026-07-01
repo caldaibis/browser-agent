@@ -100,6 +100,7 @@ class AgentResult:
     rc: int            # 0 ok, 1 incomplete/loop, 2 setup error, 124 timeout
     outcome: str       # one of VALID_OUTCOMES, or incomplete/timeout/error/unknown
     summary: str       # the model's final one-paragraph status
+    transcript_path: str = ""
 
     @property
     def applied(self) -> bool:

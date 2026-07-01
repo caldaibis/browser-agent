@@ -74,6 +74,7 @@ def _remember_processed(listing: RawListing, outcome: str) -> None:
         "trigger": "poller",
         "source_url": listing.source_url,
         "source": listing.source_name,
+        "detected_by": listing.detected_by or listing.source_name,
         "address": listing.address,
         "outcome": outcome,
     }
@@ -151,13 +152,23 @@ async def poll_once(client: httpx.AsyncClient, site: SiteConfig) -> list[RawList
     parse = site.parse or parse_jsonld
     if site.tier == 3 and site.own_browser:
         html = await _render_own_browser(site)
-        return parse(html, site)
+        listings = parse(html, site)
+        return _annotate_detected(site, listings)
     if site.tier == 3:
         html = await _render_tier3(site)
-        return parse(html, site)
+        listings = parse(html, site)
+        return _annotate_detected(site, listings)
     result = await fetch(client, site)
     payload = result.json if site.tier == 1 else result.text
-    return parse(payload, site)
+    listings = parse(payload, site)
+    return _annotate_detected(site, listings)
+
+
+def _annotate_detected(site: SiteConfig, listings: list[RawListing]) -> list[RawListing]:
+    for listing in listings:
+        listing.source_name = listing.source_name or site.name
+        listing.detected_by = listing.detected_by or site.name
+    return listings
 
 
 async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> None:
@@ -174,9 +185,18 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
             seconds = round((datetime.now() - t0).total_seconds(), 1)
             _log("apply_done", url=listing.source_url,
                  outcome=result.outcome, rc=result.rc, seconds=seconds)
+            from ..recovery_agent import recover_after_apply
+            await asyncio.to_thread(
+                recover_after_apply,
+                listing=listing.to_listing(),
+                result=result,
+                trigger="poller",
+                extra={"detected_by": listing.detected_by or listing.source_name},
+            )
             rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
+                detected_by=listing.detected_by or listing.source_name,
                 address=listing.address or listing.title,
                 status=result.outcome,
                 returncode=result.rc,
@@ -199,9 +219,18 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 seen.release(listing.source_url)
         except Exception as e:  # noqa: BLE001 - one bad apply must not kill the worker
             _log("apply_error", url=listing.source_url, error=f"{type(e).__name__}: {e}")
+            from ..recovery_agent import recover_exception
+            await asyncio.to_thread(
+                recover_exception,
+                listing=listing.to_listing(),
+                error=e,
+                trigger="poller",
+                extra={"detected_by": listing.detected_by or listing.source_name},
+            )
             rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
+                detected_by=listing.detected_by or listing.source_name,
                 address=listing.address or listing.title,
                 status="error",
                 detected_ts=listing.detected_ts,

@@ -57,6 +57,7 @@ class Submission:
     seconds: float | None
     message: str
     trigger: str = ""
+    detected_by: str = ""
     msg_id: str = ""
     msg_received_ts: str = ""
     detected_ts: str = ""
@@ -81,6 +82,14 @@ class Submission:
             "huurwoningen_mail": "Huurwoningen mail",
             "manual": "Manual",
         }.get(self.origin, self.origin.replace("_", " ").title() or "Unknown")
+
+    @property
+    def detected_by_label(self) -> str:
+        if self.detected_by:
+            return self.detected_by
+        if self.origin == "poller":
+            return self.source
+        return ""
 
     @property
     def event_time(self) -> datetime | None:
@@ -113,6 +122,7 @@ class MailEvent:
 class RaceInfo:
     source_url: str
     source: str
+    detected_by: str
     address: str
     status: str
     poller_ts: str = ""
@@ -178,6 +188,7 @@ def load_submissions() -> list[Submission]:
             seconds=r.get("seconds"),
             message=r.get("message") or "",
             trigger=r.get("trigger") or "",
+            detected_by=r.get("detected_by") or "",
             msg_id=r.get("msg_id") or "",
             msg_received_ts=r.get("msg_received_ts") or "",
             detected_ts=r.get("detected_ts") or "",
@@ -308,6 +319,7 @@ def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
         rows.append(RaceInfo(
             source_url=p.source_url,
             source=p.source,
+            detected_by=p.detected_by_label,
             address=p.address,
             status=p.status,
             poller_ts=p.event_time.isoformat(timespec="seconds") if p.event_time else "",

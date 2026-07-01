@@ -51,20 +51,13 @@ def _tier3(name: str, list_url: str, *, parse=None, cadence_s: int = 180,
 REGISTRY: list[SiteConfig] = [
     # ---- working now: tier-2 JSON-LD --------------------------------------
     _jsonld("huurportaal.nl", "https://huurportaal.nl/huurwoningen/utrecht"),
-    _jsonld("huurportaal.nl", "https://huurportaal.nl/huurwoningen/amsterdam"),
 
     # ---- working now: tier-2 anchor (detail links in server HTML) ----------
     _anchor("huurexpert.nl", "https://www.huurexpert.nl/huurwoningen/Utrecht",
             r"/huurwoning/[^\"']+/\d+/"),
-    _anchor("huurexpert.nl", "https://www.huurexpert.nl/huurwoningen/Amsterdam",
-            r"/huurwoning/[^\"']+/\d+/"),
     _anchor("livresidential.nl", "https://livresidential.nl/huurwoningen/utrecht",
             r"/huurwoningen/[a-z-]+/[a-z-]+/[a-z0-9-]+"),
-    _anchor("livresidential.nl", "https://livresidential.nl/huurwoningen/amsterdam",
-            r"/huurwoningen/[a-z-]+/[a-z-]+/[a-z0-9-]+"),
     _anchor("ikwilhuren.nu", "https://ikwilhuren.nu/aanbod/utrecht",
-            r"/object/[a-z0-9-]+/"),
-    _anchor("ikwilhuren.nu", "https://ikwilhuren.nu/aanbod/amsterdam",
             r"/object/[a-z0-9-]+/"),
     _anchor("vgwgroup.nl", "https://vgwgroup.nl/aanbod-lange-termijnverhuur/",
             r"/woningen/[a-z0-9-]+[0-9a-f]{16}"),
@@ -83,14 +76,10 @@ REGISTRY: list[SiteConfig] = [
     # (need the shared Chromium host running; httpx alone gets 403/challenge.)
     # VALIDATED against the live host = renders + parses listings today.
     _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/utrecht/"),   # VALIDATED: 30 JSON-LD
-    _tier3("huurwoningen.nl", "https://www.huurwoningen.nl/in/amsterdam/"),
     # pararius: Cloudflare "Just a moment" JS challenge that a CDP-attached
     # browser NEVER clears (CF detects the CDP attachment) but a freshly LAUNCHED
     # browser sails through — so own_browser=True. VALIDATED: 30 listings.
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht",
-           own_browser=True,
-           parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
-    _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/amsterdam",
            own_browser=True,
            parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
     # mijndak serves a challenge/empty page; its Utrecht stock == woningnetregioutrecht.
@@ -105,7 +94,7 @@ REGISTRY: list[SiteConfig] = [
     # pages. Each still needs its rendered-DOM parser tuned once against the
     # running host (parse defaults to JSON-LD; most will need an anchor/DOM
     # parser) — do that with `just host` up, then flip POLL_ENABLE_TIER3=1.
-    _tier3("funda.nl", "https://www.funda.nl/zoeken/huur?selected_area=%5B%22utrecht%22,%22amsterdam%22%5D",
+    _tier3("funda.nl", "https://www.funda.nl/zoeken/huur?selected_area=%5B%22utrecht%22%5D",
            parse=make_anchor_parser(r"/detail/huur/[a-z-]+/[^/]+/\d+/")),          # VALIDATED: 14
     _tier3("plaza.newnewnew.space", "https://plaza.newnewnew.space/aanbod",
            needs_login=True,
@@ -114,21 +103,17 @@ REGISTRY: list[SiteConfig] = [
            parse=make_anchor_parser(r"/woningaanbod/huur/[a-z-]+/[^/?]+/\d")),      # VALIDATED: 12
     _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken",
            parse=make_anchor_parser(
-               r"/nl/huurwoning(?:en)?-(?:utrecht|amsterdam)/[a-z0-9-]+/[a-z0-9-]+")),
+               r"/nl/huurwoning(?:en)?-utrecht/[a-z0-9-]+/[a-z0-9-]+")),
     _tier3("vbtverhuurmakelaars.nl", "https://vbtverhuurmakelaars.nl/woningen",
            parse=make_anchor_parser(r"/woning/[a-z]+-[a-z0-9-]+")),   # VALIDATED: /woning/<city>-<street>
 
     # kamernet: exclude rooms (we don't do shared/room listings) — apartments &
     # studios only. City is in the URL slug, so the deterministic filter handles
-    # the non-Utrecht/Amsterdam ones that the (loose) city list still returns.
+    # other-city listings that the (loose) city list still returns.
     _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-utrecht",
            needs_login=True, cadence_s=120,
            parse=make_anchor_parser(
                r"/en/for-rent/(?:apartment|studio)-[a-z-]+/[^/]+/(?:apartment|studio)-\d+")),  # VALIDATED
-    _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-amsterdam",
-           needs_login=True, cadence_s=120,
-           parse=make_anchor_parser(
-               r"/en/for-rent/(?:apartment|studio)-[a-z-]+/[^/]+/(?:apartment|studio)-\d+")),
     # househunting.nl outsources its listing display to huurwoningen.nl (its
     # /woningaanbod links out to huurwoningen.nl), which is already covered above.
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),

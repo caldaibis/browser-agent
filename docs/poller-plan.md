@@ -80,7 +80,7 @@ aggregator can. Beat everyone else to the application.
 | Filter | Rule | Where enforced |
 |--------|------|----------------|
 | Price | ≤ €1750 | Deterministic, on structured field |
-| City | Utrecht or Amsterdam | Deterministic, on structured field |
+| City | Utrecht | Deterministic, on structured field |
 | Distance to center | ≤ ~15 min cycling from city center | LLM judgment on address/neighbourhood |
 | Roommates | Not a shared/room (`kamer`) listing — judged from content, not just the word | LLM judgment |
 | Surface | ≥ ~30 m² **if published**; if absent, apply anyway | Deterministic when present |
@@ -184,7 +184,7 @@ pipeline runs unchanged.
 watcher loop (per site, on its own cadence+jitter):
   poll (tier 1/2/3) -> RawListings
   block-detect -> back off + notify on block
-  deterministic filter (price<=1750, city in {Utrecht,Amsterdam}, surface if present)
+  deterministic filter (price<=1750, city in {Utrecht}, surface if present)
   dedup by canonical URL -> new candidates only
   LLM judgment (distance-to-center, roommates) on each new candidate
   qualifying -> enqueue {source_url, ...} for applier

@@ -1,7 +1,7 @@
 """LLM judgment for filters that need semantic reading, not just raw fields:
 
   - distance-to-center: is the address within ~15 min cycling of the city
-    centre (Utrecht or Amsterdam)?
+    centre of Utrecht?
   - roommates: is this a self-contained home, or a shared/room listing dressed
     up without the word "kamer"?
   - price/surface: does the listing clearly fit the configured rent band and
@@ -33,8 +33,8 @@ _SYSTEM = (
     "listing is worth applying to. Reject (ok=false) when you are CONFIDENT of "
     "one of these:\n"
     f"1. The address is clearly MORE than {MAX_CYCLING_MIN} minutes cycling from "
-    "the city centre of Utrecht or Amsterdam (judge from the "
-    "neighbourhood/postcode you recognise).\n"
+    "the city centre of Utrecht (judge from the neighbourhood/postcode you "
+    "recognise).\n"
     "2. It is a SHARED home or single ROOM (roommates, huisgenoten, kamer, "
     "student room), judged from the whole description, not just the word 'kamer'.\n"
     f"3. The rent is clearly outside EUR {MIN_RENT:.0f}-{MAX_RENT:.0f} per month. "

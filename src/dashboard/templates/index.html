@@ -96,6 +96,7 @@
         <td>
           <div class="truncate"><a href="{{ r.source_url }}" target="_blank" rel="noopener">{{ r.address or r.source_url }}</a></div>
           <div class="muted-txt">{{ r.source or 'unknown source' }}</div>
+          <div class="muted-txt">Detected by {{ r.detected_by or 'unknown site' }}</div>
         </td>
         <td><span class="badge {{ status_class(r.status) }}">{{ r.status }}</span></td>
         <td class="{{ 'delta-win' if r.poller_won_stekkies else 'delta-loss' if r.stekkies_lead_s is not none else 'delta-none' }}">
@@ -124,6 +125,9 @@
           <td>
             <a href="/submission/{{ s.id }}">{{ s.address or s.source_url or 'Listing' }}</a>
             <div class="muted-txt">{{ s.source or 'unknown source' }}</div>
+            {% if s.origin == 'poller' %}
+            <div class="muted-txt">Detected by {{ s.detected_by_label or 'unknown site' }}</div>
+            {% endif %}
           </td>
           <td><span class="badge origin">{{ s.origin_label }}</span></td>
           <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
