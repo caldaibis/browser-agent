@@ -78,6 +78,7 @@ class Submission:
         return {
             "poller": "Poller",
             "stekkies_mail": "Stekkies mail",
+            "huurwoningen_mail": "Huurwoningen mail",
             "manual": "Manual",
         }.get(self.origin, self.origin.replace("_", " ").title() or "Unknown")
 
