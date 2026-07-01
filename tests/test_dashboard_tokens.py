@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from src.dashboard import data
+from src.dashboard.data import Submission, race_report
 
 
 class TestDashboardTokenUsage(unittest.TestCase):
@@ -46,6 +47,46 @@ class TestDashboardTokenUsage(unittest.TestCase):
         self.assertEqual(usage.output_tokens, 250)
         self.assertTrue(usage.cost_is_partial)
         self.assertAlmostEqual(usage.estimated_cost_usd, 250 * 0.87 / 1_000_000)
+
+
+class TestRaceReport(unittest.TestCase):
+    def test_matches_huurwoningen_mail_submission_without_mail_event_cache(self):
+        # Same listing, seen first by the poller, then by a Huurwoningen mail
+        # trigger. Both now carry the same *resolved* source_url (the mail
+        # side used to keep an unresolved track.huurwoningen.nl link, which
+        # meant this pairing could never match).
+        same_url = "https://www.huurwoningen.nl/huren/utrecht/f4d60b2f/tussenbusstraat/"
+        poller_sub = Submission(
+            id=1, ts="2026-07-01T14:10:00", status="blocked", source="huurwoningen.nl",
+            address="Tussenbusstraat", source_url=same_url, stekkies_url="",
+            seconds=200.0, message="", trigger="poller", detected_by="huurwoningen.nl",
+            detected_ts="2026-07-01T14:06:36",
+        )
+        mail_sub = Submission(
+            id=2, ts="2026-07-01T15:34:44", status="blocked", source="Huurwoningen",
+            address="Huis Tussenbusstraat", source_url=same_url, stekkies_url="",
+            seconds=158.5, message="", trigger="huurwoningen_mail",
+            msg_id="19f1e4bfe4038a5b", msg_received_ts="2026-07-01T15:28:42",
+        )
+
+        race = race_report([poller_sub, mail_sub], mail_events=[])
+
+        self.assertEqual(race["huurwoningen"]["matched"], 1)
+        self.assertEqual(race["huurwoningen"]["poller_wins"], 1)
+        self.assertTrue(race["rows"][0].poller_won_huurwoningen)
+
+    def test_no_match_when_only_a_poller_submission_exists(self):
+        poller_sub = Submission(
+            id=1, ts="2026-07-01T14:10:00", status="blocked", source="huurwoningen.nl",
+            address="Tussenbusstraat", source_url="https://www.huurwoningen.nl/huren/utrecht/abc/",
+            stekkies_url="", seconds=200.0, message="", trigger="poller",
+            detected_by="huurwoningen.nl", detected_ts="2026-07-01T14:06:36",
+        )
+
+        race = race_report([poller_sub], mail_events=[])
+
+        self.assertEqual(race["huurwoningen"]["matched"], 0)
+        self.assertEqual(race["huurwoningen"]["no_mail"], 1)
 
 
 if __name__ == "__main__":

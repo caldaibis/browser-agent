@@ -91,10 +91,13 @@
     </thead>
     <tbody>
       {% for r in race.rows[:12] %}
-      <tr>
+      <tr data-href="/submission/{{ r.id }}">
         <td class="muted-txt nowrap">{{ r.poller_ts[:16].replace('T',' ') }}</td>
         <td>
-          <div class="truncate"><a href="{{ r.source_url }}" target="_blank" rel="noopener">{{ r.address or r.source_url }}</a></div>
+          <div class="truncate">
+            {{ r.address or r.source_url }}
+            <a href="{{ r.source_url }}" target="_blank" rel="noopener" class="muted-txt">↗</a>
+          </div>
           <div class="muted-txt">{{ r.source or 'unknown source' }}</div>
           <div class="muted-txt">Detected by {{ r.detected_by or 'unknown site' }}</div>
         </td>
@@ -120,7 +123,7 @@
       <thead><tr><th>When</th><th>Listing</th><th>Origin</th><th>Status</th><th>LLM</th></tr></thead>
       <tbody>
         {% for s in recent %}
-        <tr>
+        <tr data-href="/submission/{{ s.id }}">
           <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
           <td>
             <a href="/submission/{{ s.id }}">{{ s.address or s.source_url or 'Listing' }}</a>

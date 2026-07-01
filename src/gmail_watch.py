@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterator
 
+import httpx
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -154,6 +155,23 @@ def message_received_ts(msg_id: str | None) -> str:
         return ""
 
 
+def _resolve_redirect(url: str, timeout: float = 8.0) -> str:
+    """Follow a click-tracking link to its final listing URL.
+
+    Without this, Huurwoningen mail events keep the track.huurwoningen.nl
+    wrapper as their source_url, which never canonically matches the direct
+    URL the poller sees for the same listing -- silently breaking dedup and
+    the dashboard's mail-race stats. Fail open (keep the tracking URL) so a
+    network hiccup never blocks the mail trigger.
+    """
+    try:
+        with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+            resp = client.get(url)
+            return str(resp.url)
+    except Exception:
+        return url
+
+
 def _message_event(svc, msg_id: str, provider: str) -> dict:
     msg = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
     payload = msg.get("payload", {})
@@ -185,6 +203,8 @@ def _message_event(svc, msg_id: str, provider: str) -> dict:
             if "track.huurwoningen.nl/ls/click" in u and u not in click_links
         ])
         source_url = listing_links[0] if listing_links else (click_links[0] if click_links else "")
+        if source_url and "track.huurwoningen.nl" in source_url:
+            source_url = _resolve_redirect(source_url)
     return {
         "provider": provider,
         "msg_id": msg_id,

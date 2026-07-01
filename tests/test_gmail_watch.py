@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import unittest
+from unittest.mock import patch
 
 from src.gmail_watch import _event_from_message, _huurwoningen_metadata
 
@@ -66,15 +67,26 @@ class TestHuurwoningenMail(unittest.TestCase):
         self.assertEqual(ev.url, "https://www.huurwoningen.nl/huren/utrecht/abc123/hof-van-oslo/")
         self.assertEqual(ev.address, "Hof van Oslo in Utrecht")
 
-    def test_event_accepts_tracking_link_when_direct_url_is_hidden(self):
+    def test_event_resolves_tracking_link_when_direct_url_is_hidden(self):
         msg = _msg(
             "Net geplaatst: € 1.304 per maand, Van Sijpesteijnkade in Utrecht",
             '<a href="http://track.huurwoningen.nl/ls/click?upn=u001.image"> </a>'
             '<a href="http://track.huurwoningen.nl/ls/click?upn=u001.cta">Bekijk woning</a>',
         )
-        ev = _event_from_message(_FakeService(msg), "msg-2", "huurwoningen")
-        self.assertEqual(ev.url, "http://track.huurwoningen.nl/ls/click?upn=u001.cta")
+        resolved = "https://www.huurwoningen.nl/huren/utrecht/def456/van-sijpesteijnkade/"
+        with patch("src.gmail_watch._resolve_redirect", return_value=resolved) as mock_resolve:
+            ev = _event_from_message(_FakeService(msg), "msg-2", "huurwoningen")
+        mock_resolve.assert_called_once_with("http://track.huurwoningen.nl/ls/click?upn=u001.cta")
+        self.assertEqual(ev.url, resolved)
         self.assertEqual(ev.price, "€ 1.304 per maand")
+
+    def test_resolve_redirect_falls_back_to_original_url_on_failure(self):
+        from src.gmail_watch import _resolve_redirect
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.side_effect = Exception("boom")
+            url = "http://track.huurwoningen.nl/ls/click?upn=u001.cta"
+            self.assertEqual(_resolve_redirect(url), url)
 
 
 if __name__ == "__main__":

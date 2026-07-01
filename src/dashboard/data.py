@@ -167,6 +167,7 @@ class MailEvent:
 
 @dataclass
 class RaceInfo:
+    id: int
     source_url: str
     source: str
     detected_by: str
@@ -541,10 +542,17 @@ def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
             if s.origin == "stekkies_mail" and s.event_time
         ]
         huur_times = [e.when for e in mail_by_key[key].get("huurwoningen", []) if e.when]
+        # Also use Huurwoningen-mail-triggered submissions directly, in case the
+        # mail-index cache missed the event (stale refresh, API hiccup, etc.).
+        huur_times += [
+            s.event_time for s in records
+            if s.origin == "huurwoningen_mail" and s.event_time
+        ]
 
         st = min(stekkies_times) if stekkies_times else None
         hw = min(huur_times) if huur_times else None
         rows.append(RaceInfo(
+            id=p.id,
             source_url=p.source_url,
             source=p.source,
             detected_by=p.detected_by_label,

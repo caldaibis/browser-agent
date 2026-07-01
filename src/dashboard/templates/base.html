@@ -83,6 +83,8 @@
     .delta-win { color: var(--good); font-weight: 700; }
     .delta-loss { color: var(--bad); font-weight: 700; }
     .delta-none { color: var(--pico-muted-color); }
+    tr[data-href] { cursor: pointer; }
+    tr[data-href]:hover { background: var(--soft); }
     pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.35; }
     .dot { height:.65rem; width:.65rem; border-radius:50%; display:inline-block; margin-right:.4rem; }
     .dot.up{background:var(--good);} .dot.down{background:var(--bad);} .dot.unk{background:#8a96a3;}
@@ -109,5 +111,15 @@
       Autonomous responder · read-only data from logs · secrets redacted
     </footer>
   </main>
+  <script>
+    // Rows tagged data-href navigate on click, unless the click landed on a
+    // nested link/button (e.g. the external listing link), which keeps its
+    // own behavior.
+    document.addEventListener('click', (e) => {
+      const row = e.target.closest('tr[data-href]');
+      if (!row || e.target.closest('a, button')) return;
+      window.location.href = row.dataset.href;
+    });
+  </script>
 </body>
 </html>

@@ -44,7 +44,7 @@
     <tbody>
       {% for s in subs %}
       {% set r = race_by_url.get(s.source_url) %}
-      <tr>
+      <tr data-href="/submission/{{ s.id }}">
         <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
         <td>
           <a href="/submission/{{ s.id }}">{{ s.address or s.source_url or 'Listing' }}</a>
