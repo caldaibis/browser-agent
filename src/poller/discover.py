@@ -45,9 +45,12 @@ async def _probe(client: httpx.AsyncClient, site) -> str:
         return f"PARSEFAIL {site.name:32} {type(e).__name__}: {e}"
 
     passing = sum(1 for l in listings if filters.passes(l)[0])
+    tier = f"tier{site.tier}"
     if listings:
-        return (f"OK        {site.name:32}{off} tier2 works: "
+        return (f"OK        {site.name:32}{off} {tier} works: "
                 f"{len(listings)} listings ({passing} pass filter)")
+    if site.tier == 1:
+        return f"OK        {site.name:32}{off} tier1 API up: 0 available right now"
     return (f"EMPTY     {site.name:32}{off} no listings in HTML — "
             f"needs tier-1 API cURL (SPA)")
 

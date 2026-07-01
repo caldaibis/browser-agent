@@ -22,7 +22,7 @@ Re-run `python -m src.poller.discover` any time to re-check, and use
 from __future__ import annotations
 
 from .models import SiteConfig
-from .parsers import make_anchor_parser, parse_jsonld
+from .parsers import make_anchor_parser, parse_hurenindemix, parse_jsonld
 
 
 def _jsonld(name: str, list_url: str, **kw) -> SiteConfig:
@@ -75,6 +75,14 @@ REGISTRY: list[SiteConfig] = [
             "https://www.deruitermakelaarshuis.nl/aanbod/?_status=te-huur",
             r"/aanbod/[a-z0-9-]+-[a-z0-9-]+/"),
 
+    # ---- tier-1: real JSON API, plain httpx, no browser --------------------
+    # hurenindemix serves its whole aanbod as a JSON feed. Single new-build
+    # project ("De Mix", Utrecht); parser emits only AVAILABLE Huur units, so it
+    # yields 0 while fully rented and lights up when a unit frees.
+    SiteConfig(name="hurenindemix.nl", tier=1,
+               endpoint="https://www.hurenindemix.nl/feed/woningen.js?woningmedia=true&woningtypemedia=true",
+               parse=parse_hurenindemix),
+
     # ---- tier-3: Cloudflare / DataDome / TLS-fingerprint / login-walled ----
     # (need the shared Chromium host running; httpx alone gets 403/challenge.)
     # VALIDATED against the live host = renders + parses listings today.
@@ -88,8 +96,6 @@ REGISTRY: list[SiteConfig] = [
     _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/WoningOverzicht",
            needs_login=True,
            parse=make_anchor_parser(r"HuisDetails\?PublicatieId=\d+")),  # VALIDATED (logged in)
-    _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-utrecht",
-           needs_login=True, cadence_s=120),
     # JS-SPAs whose listing list is drawn client-side from an API and which
     # block plain httpx AND throwaway headless Chromium (bot-detected / served a
     # 404/challenge). They render fine in the project's real anti-automation
@@ -110,11 +116,19 @@ REGISTRY: list[SiteConfig] = [
     _tier3("vbtverhuurmakelaars.nl", "https://vbtverhuurmakelaars.nl/woningen",
            parse=make_anchor_parser(r"/woning/[a-z]+-[a-z0-9-]+")),   # VALIDATED: /woning/<city>-<street>
 
-    # Not cracked: househunting shows only office pages (listings are JS cards
-    # with no anchors); kamernet renders past DataDome but its room detail links
-    # are JS onclick, not <a> — both need a DOM click-through or their API.
-    _tier3("househunting.nl", "https://www.househunting.nl/aanbod/"),
-    _tier3("hurenindemix.nl", "https://www.hurenindemix.nl/aanbod/"),
+    # kamernet: exclude rooms (we don't do shared/room listings) — apartments &
+    # studios only. City is in the URL slug, so the deterministic filter handles
+    # the non-Utrecht/Amsterdam ones that the (loose) city list still returns.
+    _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-utrecht",
+           needs_login=True, cadence_s=120,
+           parse=make_anchor_parser(
+               r"/en/for-rent/(?:apartment|studio)-[a-z-]+/[^/]+/(?:apartment|studio)-\d+")),  # VALIDATED
+    _tier3("kamernet.nl", "https://kamernet.nl/en/for-rent/properties-amsterdam",
+           needs_login=True, cadence_s=120,
+           parse=make_anchor_parser(
+               r"/en/for-rent/(?:apartment|studio)-[a-z-]+/[^/]+/(?:apartment|studio)-\d+")),
+    # househunting.nl outsources its listing display to huurwoningen.nl (its
+    # /woningaanbod links out to huurwoningen.nl), which is already covered above.
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
     _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",

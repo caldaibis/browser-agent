@@ -1,6 +1,6 @@
 # Implementation Plan — Active Listing Poller
 
-Status: **plumbing complete; 15 sites live and verified**, 2026-07-01. Code
+Status: **plumbing complete; 17 sites live and verified**, 2026-07-01. Code
 in `src/poller/`. See "Outcome" below for exactly what works and what is left.
 
 Author: derived from a grilling session, 2026-07-01.
@@ -12,37 +12,37 @@ Build-order items 1–4 are done; item 5 is done except the VPS deploy has not
 been run. Tools: `just discover` (tier triage), `just sniff <site>` (network
 sniffer — DevTools Network tab in code), `just poll` / `poll-once`.
 
-**Working & validated (15):**
-- *tier-2, plain httpx, always-on (7):* huurportaal, huurexpert, livresidential,
-  ikwilhuren, vgwgroup, nmgwonen, deruitermakelaarshuis.
-- *tier-3, real browser host, validated live (8):* huurwoningen (30), funda (14),
+**Working & validated (17):**
+- *tier-1, real JSON API, plain httpx (1):* hurenindemix (`/feed/woningen.js`;
+  parser emits only AVAILABLE Huur units — currently 0, whole project is rented).
+- *tier-2, server-rendered HTML, plain httpx (7):* huurportaal, huurexpert,
+  livresidential, ikwilhuren, vgwgroup, nmgwonen, deruitermakelaarshuis.
+- *tier-3, real browser host, validated live (9):* huurwoningen (30), funda (14),
   vesteda (127), plaza (32), your-house (12), woonruimte-utrecht (94, no login),
-  woningnetregioutrecht (logged in; `/HuisDetails?PublicatieId=` anchors, thin
-  social-housing stock), vbtverhuurmakelaars (`/woningen` → `/woning/<city>-<street>`
-  anchors; national list, city-filtered downstream). Gated off by default; enable
-  with `POLL_ENABLE_TIER3=1`.
+  woningnetregioutrecht (logged in; `/HuisDetails?PublicatieId=` anchors),
+  vbtverhuurmakelaars (`/woningen` → `/woning/<city>-<street>`), kamernet
+  (`/en/for-rent/(apartment|studio)-…`; rooms excluded). Gated off by default;
+  enable with `POLL_ENABLE_TIER3=1`.
 
-**Not live (verified individually, 2026-07-01 — logged in where creds existed):**
-- *rebowonenhuur.nl* — credentials now valid (login succeeds), but the aanbod is
-  a JS card list with no `<a>` detail links even when logged in. Needs a DOM
-  click-through or its API.
-- *hurenindemix.nl* — logged in fine, but the aanbod is a hash-route (`/aanbod/#/`)
-  JS card list with no `<a>` detail links. Needs a DOM click-through or its API.
-- *mijndak.nl* — national WoningNet-DAK portal; its Utrecht stock is served by
-  `utrecht.mijndak.nl` (= woningnetregioutrecht, already live), so redundant.
-- *pararius.nl* — `/inloggen` has no standard form (JS/modal) and listing pages
-  serve a challenge even to the real browser. Deepest anti-bot; hardest.
-- *verhuurtbeter.nl* — renders almost no listings (embedded widget / negligible
-  stock); no detail anchors found.
-- *kamernet.nl* — no stored creds; renders past DataDome but rooms are JS-onclick
-  cards, not anchors.
-- *househunting.nl* — no stored creds; DOM shows only office pages (listings are
-  JS cards).
-- *stienstra.nl* — no stored creds; listing search lives off the main structure.
-- *Not rental sites / redundant:* eye-move.nl (shared third-party AUTH provider,
-  not a listing site — dropped); nmgwonen.mijnklantdossier.nl (the eye-move-auth
-  application backend; its public listings are on nmgwonen.nl, already tier-2).
-- *Dropped:* hurenviafrits.nl (DNS dead).
+**Not live — verified individually, and NOT fixable by code alone:**
+- *rebowonenhuur.nl* — login works (creds valid), but currently has ZERO stock:
+  the aanbod is a 7 KB empty shell with no listings and no data feed. Nothing to
+  scrape or to build/verify a parser against until it has stock.
+- *verhuurtbeter.nl* — likewise negligible/zero current stock; only widget
+  scripts load, no listing data source discoverable.
+- *pararius.nl* — Cloudflare/DataDome challenge that does NOT clear even for the
+  real host browser after 16 s+. Needs an interactive solve or residential IP.
+- *stienstra.nl* — no stored credentials; listing search lives off the main
+  structure. Blocked on creds.
+
+**Resolved as covered / not a site (no separate watcher needed):**
+- *househunting.nl* — outsources its listing display to huurwoningen.nl (already
+  live); its `/woningaanbod` links out to huurwoningen.
+- *mijndak.nl* — national WoningNet-DAK portal; Utrecht stock == woningnetregioutrecht.
+- *nmgwonen.mijnklantdossier.nl* — eye-move-auth application backend; its public
+  listings are on nmgwonen.nl (tier-2).
+- *eye-move.nl* — shared third-party AUTH provider, not a rental site — dropped.
+- *hurenviafrits.nl* — DNS dead — dropped.
 
 The generic login+verify pass (over the shared browser host, using
 `sources_credentials.json`) is what produced these per-site verdicts — the

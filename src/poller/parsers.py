@@ -22,7 +22,7 @@ from urllib.parse import urljoin
 
 from .models import RawListing, SiteConfig
 
-_PRICE_RE = re.compile(r"(\d[\d.\s]*)")
+_PRICE_RE = re.compile(r"(\d[\d.,\s]*)")
 _SURFACE_RE = re.compile(r"(\d+)\s*m")
 
 
@@ -145,6 +145,53 @@ def parse_jsonld(payload: object, site: SiteConfig) -> list[RawListing]:
         _walk_ld(data, base, out)
     for l in out:
         l.source_name = l.source_name or site.name
+    return out
+
+
+# Postcode → target-city hint (only the two cities we care about) so listings
+# whose JSON gives a postcode but no city still pass/fail the city filter right.
+def city_from_postcode(pc: str) -> str:
+    m = re.match(r"\s*(\d{4})", pc or "")
+    if not m:
+        return ""
+    n = int(m.group(1))
+    if 1000 <= n <= 1109:
+        return "Amsterdam"
+    if 3450 <= n <= 3585:
+        return "Utrecht"
+    return ""
+
+
+def parse_hurenindemix(payload: object, site: SiteConfig) -> list[RawListing]:
+    """Tier-1 parser for hurenindemix's /feed/woningen.js JSON feed.
+
+    Emits only AVAILABLE rental units (skips 'Verhuurd'/'Verkocht' and buy-only),
+    mapping the feed's Dutch fields to RawListing. The site is a hash-route SPA
+    with no per-unit URL in the feed, so source_url is the best-effort detail
+    hash; the apply agent can still locate the unit by address if the hash drifts.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    out: list[RawListing] = []
+    for uid, w in (data.get("aWoningen") or {}).items():
+        if not isinstance(w, dict):
+            continue
+        if str(w.get("Woning_Huurkoop", "")).lower() != "huur":
+            continue
+        status = str(w.get("Woning_Status", "")).lower()
+        if status in ("verhuurd", "verkocht", "onder optie", "ingetrokken"):
+            continue
+        street = " ".join(str(w.get(k, "") or "") for k in ("Straatnaam", "Huisnummer", "Huisletter", "Huisnummertoevoeging")).split()
+        pc = str(w.get("Postcode", "") or "")
+        city = str(w.get("Plaats") or "") or city_from_postcode(pc)
+        out.append(RawListing(
+            source_url=f"https://www.hurenindemix.nl/aanbod/#/woning/{uid}",
+            source_name=site.name,
+            address=f"{' '.join(street)} {pc} {city}".strip(),
+            city=city,
+            price=_num(w.get("Woning_Prijs")),
+            surface=_num(w.get("Woning_WoonOpp")),
+            listing_type=str(w.get("Woning_Type", "")),
+        ))
     return out
 
 
