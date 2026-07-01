@@ -22,7 +22,7 @@ Re-run `python -m src.poller.discover` any time to re-check, and use
 from __future__ import annotations
 
 from .models import SiteConfig
-from .parsers import make_anchor_parser, parse_hurenindemix, parse_jsonld
+from .parsers import make_anchor_parser, parse_jsonld
 
 
 def _jsonld(name: str, list_url: str, **kw) -> SiteConfig:
@@ -78,14 +78,6 @@ REGISTRY: list[SiteConfig] = [
     _anchor("stienstra.nl",
             "https://www.stienstra.nl/uitgebreid-zoeken?use_radius=on&search_location=Utrecht%2C+Nederland&radius=20&min-area=30&min-price=0&max-price=400000",
             r"/woning/[a-z0-9-]+"),
-
-    # ---- tier-1: real JSON API, plain httpx, no browser --------------------
-    # hurenindemix serves its whole aanbod as a JSON feed. Single new-build
-    # project ("De Mix", Utrecht); parser emits only AVAILABLE Huur units, so it
-    # yields 0 while fully rented and lights up when a unit frees.
-    SiteConfig(name="hurenindemix.nl", tier=1,
-               endpoint="https://www.hurenindemix.nl/feed/woningen.js?woningmedia=true&woningtypemedia=true",
-               parse=parse_hurenindemix),
 
     # ---- tier-3: Cloudflare / DataDome / TLS-fingerprint / login-walled ----
     # (need the shared Chromium host running; httpx alone gets 403/challenge.)

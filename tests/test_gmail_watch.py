@@ -69,10 +69,11 @@ class TestHuurwoningenMail(unittest.TestCase):
     def test_event_accepts_tracking_link_when_direct_url_is_hidden(self):
         msg = _msg(
             "Net geplaatst: € 1.304 per maand, Van Sijpesteijnkade in Utrecht",
-            '<a href="http://track.huurwoningen.nl/ls/click?upn=u001.abc-3D">Bekijk woning</a>',
+            '<a href="http://track.huurwoningen.nl/ls/click?upn=u001.image"> </a>'
+            '<a href="http://track.huurwoningen.nl/ls/click?upn=u001.cta">Bekijk woning</a>',
         )
         ev = _event_from_message(_FakeService(msg), "msg-2", "huurwoningen")
-        self.assertEqual(ev.url, "http://track.huurwoningen.nl/ls/click?upn=u001.abc-3D")
+        self.assertEqual(ev.url, "http://track.huurwoningen.nl/ls/click?upn=u001.cta")
         self.assertEqual(ev.price, "€ 1.304 per maand")
 
 

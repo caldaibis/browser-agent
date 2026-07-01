@@ -166,17 +166,25 @@ def _message_event(svc, msg_id: str, provider: str) -> dict:
         m = LINK_RE.search(text)
         stekkies_url = m.group(0) if m else ""
     elif provider == "huurwoningen":
+        anchors = _anchor_links(text)
         links = _links_from_text(text)
         listing_links = [
-            u for u in links
+            u for u, _label in anchors
             if "huurwoningen.nl" in u and (
                 "/huren/" in u or "/huurwoning" in u or "/woning/" in u
             )
         ]
-        click_links = [
+        listing_links.extend([
             u for u in links
-            if "track.huurwoningen.nl/ls/click" in u
-        ]
+            if u not in listing_links and "huurwoningen.nl" in u and (
+                "/huren/" in u or "/huurwoning" in u or "/woning/" in u
+            )
+        ])
+        click_links = _prioritized_huurwoningen_clicks(anchors)
+        click_links.extend([
+            u for u in links
+            if "track.huurwoningen.nl/ls/click" in u and u not in click_links
+        ])
         source_url = listing_links[0] if listing_links else (click_links[0] if click_links else "")
     return {
         "provider": provider,
@@ -187,6 +195,20 @@ def _message_event(svc, msg_id: str, provider: str) -> dict:
         "stekkies_url": stekkies_url,
         "source_url": source_url,
     }
+
+
+def _anchor_links(text: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for href, label in re.findall(
+        r"<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        text or "",
+        re.I | re.S,
+    ):
+        url = html.unescape(href).rstrip("\").,;")
+        clean_label = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", label)).strip()
+        out.append((url, clean_label))
+    return out
+
 
 def _links_from_text(text: str) -> list[str]:
     """Extract href and plain-text URLs from an email body, preserving SendGrid
@@ -201,6 +223,18 @@ def _links_from_text(text: str) -> list[str]:
             seen.add(clean)
             out.append(clean)
     return out
+
+
+def _prioritized_huurwoningen_clicks(anchors: list[tuple[str, str]]) -> list[str]:
+    clicks = [
+        (url, label.lower())
+        for url, label in anchors
+        if "track.huurwoningen.nl/ls/click" in url
+    ]
+    wanted = ("bekijk", "woning", "reageer", "meer informatie", "details")
+    ranked = [url for url, label in clicks if any(word in label for word in wanted)]
+    ranked.extend(url for url, _label in clicks if url not in ranked)
+    return ranked
 
 
 def _huurwoningen_metadata(subject: str) -> tuple[str, str]:

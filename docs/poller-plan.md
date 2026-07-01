@@ -1,6 +1,6 @@
 # Implementation Plan — Active Listing Poller
 
-Status: **plumbing complete; 19 sites live and verified**, 2026-07-01. Code
+Status: **plumbing complete; 18 sites live and verified**, 2026-07-01. Code
 in `src/poller/`. See "Outcome" below for exactly what works and what is left.
 
 Author: derived from a grilling session, 2026-07-01.
@@ -12,9 +12,7 @@ Build-order items 1–4 are done; item 5 is done except the VPS deploy has not
 been run. Tools: `just discover` (tier triage), `just sniff <site>` (network
 sniffer — DevTools Network tab in code), `just poll` / `poll-once`.
 
-**Working & validated (19):**
-- *tier-1, real JSON API, plain httpx (1):* hurenindemix (`/feed/woningen.js`;
-  parser emits only AVAILABLE Huur units — currently 0, whole project is rented).
+**Working & validated (18):**
 - *tier-2, server-rendered HTML, plain httpx (8):* huurportaal, huurexpert,
   livresidential, ikwilhuren, vgwgroup, nmgwonen, deruitermakelaarshuis,
   stienstra (owner-supplied Utrecht + 20 km / min 30 m2 filter).
@@ -49,9 +47,8 @@ these per-site verdicts. The remaining inactive sites are blocked on actual
 inventory rather than parser work.
 
 **Deviations from the original design, and why:**
-- *Tier 1 (JSON API interception) is rare.* Only hurenindemix exposed a clean
-  public JSON list endpoint; most sites are server-rendered (tier 2) or
-  JS/anti-bot (tier 3).
+- *Tier 1 (JSON API interception) is rare.* No covered site ended up needing
+  it; every site is server-rendered (tier 2) or JS/anti-bot (tier 3).
 - *Tier 3 parses the rendered DOM deterministically, not "a cheap LLM reads the
   list".* Cheaper and more reliable; the LLM is used only for the
   distance/roommate judgment, as for every tier.
@@ -201,7 +198,7 @@ applier:
 ## Sites to cover (big-bang, all 26)
 
 From `state/sources_credentials.json`: pararius.nl, ikwilhuren.nu, vesteda.com,
-hurenviafrits.nl, hurenindemix.nl, mijndak.nl, vgwgroup.nl, rebowonenhuur.nl,
+hurenviafrits.nl, mijndak.nl, vgwgroup.nl, rebowonenhuur.nl,
 verhuurtbeter.nl, huurexpert.nl, huurwoningen.nl, huurmatcher.nl,
 huurportaal.nl, woningnetregioutrecht.nl, plaza.newnewnew.space,
 woonruimte-utrecht.nl, eye-move.nl, nmgwonen.mijnklantdossier.nl. Plus:
