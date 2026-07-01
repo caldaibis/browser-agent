@@ -119,7 +119,7 @@ deploy:
     {{ssh}} 'sudo -u deploy git -C {{remote}} pull --ff-only'
     {{ssh}} 'sudo -u deploy bash -lc "cd {{remote}} && uv sync"'
     {{ssh}} 'bash {{remote}}/deploy/ensure-self-improvement.sh'
-    {{ssh}} 'systemctl restart orchestrator dashboard; systemctl is-enabled poller >/dev/null 2>&1 && systemctl restart poller || true'
+    {{ssh}} 'systemctl restart orchestrator dashboard; systemctl is-active poller >/dev/null 2>&1 && systemctl restart poller || true'
     @echo "deployed + restarted"
 
 # just pull latest on the VPS (no restart)

@@ -2,7 +2,9 @@ name: deploy
 
 # Auto-deploy to the VPS after CI passes on main. Runs the same steps as
 # `just deploy`: fast-forward pull, uv sync, ensure self-improvement runtime
-# (claude CLI + litellm-proxy.service), restart orchestrator + dashboard.
+# (claude CLI + litellm-proxy.service), restart orchestrator + dashboard
+# (+ poller, if it's currently running -- it isn't `systemctl enable`d, so a
+# plain `is-enabled` check would silently skip it; see justfile's `deploy`).
 on:
   workflow_run:
     workflows: ["ci"]
@@ -42,4 +44,5 @@ jobs:
             sudo -u deploy bash -lc 'cd ${REMOTE} && uv sync' && \
             bash ${REMOTE}/deploy/ensure-self-improvement.sh && \
             systemctl restart orchestrator dashboard && \
+            (systemctl is-active poller >/dev/null 2>&1 && systemctl restart poller || true) && \
             echo deployed"
