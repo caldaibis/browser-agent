@@ -13,7 +13,6 @@ it re-arms once the problem clears. Run periodically (systemd timer):
 import json
 import os
 import urllib.request
-from pathlib import Path
 
 from .config import PROJECT_ROOT, CDP_URL
 from .notify import send_alert

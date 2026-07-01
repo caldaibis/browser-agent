@@ -19,8 +19,9 @@ default:
 sync:
     uv sync
 
-# offline sanity: byte-compile + import smoke + render the apply prompt (CI runs this)
+# offline sanity: lint + byte-compile + import smoke + render the apply prompt (CI runs this)
 check:
+    uv run ruff check .
     uv run python -m compileall -q src
     uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; import src.poller.watcher, src.poller.discover, src.poller.registry, src.poller.sniff; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
 

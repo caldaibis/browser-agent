@@ -22,7 +22,18 @@ package = false
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.15",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.ruff.lint]
+# Pyflakes only: catches real bugs (unused/undefined names, redefinitions like
+# the _run/_run shadowing that broke the self-improvement agent), not style.
+select = ["F"]
+# Ruff's default dummy-variable regex (matches any `_foo`) exempts *all*
+# underscore-prefixed names -- including this codebase's `_private_helper`
+# convention -- from F811/F841. That's exactly the class of name that hid the
+# _run/_run collision, so narrow it to a bare `_` (the "don't care" throwaway).
+dummy-variable-rgx = "^_$"

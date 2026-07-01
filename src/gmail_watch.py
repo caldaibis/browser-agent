@@ -21,7 +21,6 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Iterator
 
 from google.auth.transport.requests import Request

@@ -388,7 +388,7 @@ async def _call_tool(name: str, args: dict, context: dict, logger: "_Logger") ->
         if name == "git_status":
             return _git_status()
         if name == "git_diff":
-            return _run(["git", "diff"], timeout=30)
+            return _run_cmd(["git", "diff"], timeout=30)
         if name == "commit_push_deploy":
             return _commit_push_deploy(
                 args.get("message", "fix(self-improvement): repair apply failure"),
@@ -667,7 +667,7 @@ def _search_code(pattern: str, path: str) -> str:
     if not pattern:
         return "empty pattern"
     p = _safe_repo_path(path)
-    return _run([
+    return _run_cmd([
         "rg", "-n",
         "--glob", "!state/**",
         "--glob", "!documents/**",
@@ -711,7 +711,7 @@ def _apply_diff(diff: str) -> str:
 def _commit_push_deploy(message: str, context: dict | None = None) -> str:
     if not SELF_IMPROVEMENT_ALLOW_CODE_CHANGES:
         return "REFUSED: SELF_IMPROVEMENT_ALLOW_CODE_CHANGES=0"
-    branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10).strip()
+    branch = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10).strip()
     if SELF_IMPROVEMENT_REQUIRE_MAIN and branch not in {"main", "master"}:
         return f"REFUSED: current branch is {branch!r}, not main/master"
     if not _porcelain():
@@ -719,11 +719,11 @@ def _commit_push_deploy(message: str, context: dict | None = None) -> str:
     verify = _run_shell(SELF_IMPROVEMENT_VERIFY_CMD, timeout=300)
     if not verify.startswith("rc=0\n"):
         return "verification failed, not committing\n" + verify
-    add = _run(["git", "add", "-A"], timeout=30)
-    commit = _run(["git", "commit", "-m", _commit_message(message)], timeout=60)
+    add = _run_cmd(["git", "add", "-A"], timeout=30)
+    commit = _run_cmd(["git", "commit", "-m", _commit_message(message)], timeout=60)
     if not commit.startswith("rc=0\n"):
         return "commit failed\n" + add + "\n" + commit
-    push = _run(["git", "push"], timeout=120)
+    push = _run_cmd(["git", "push"], timeout=120)
     if not push.startswith("rc=0\n"):
         summary = "Self-improvement committed a local repo fix but push failed."
         _send_fix_email(context, summary, commit + "\n" + push)
@@ -804,7 +804,7 @@ def _tail_file(path: Path, max_chars: int) -> str:
 
 
 def _git_status() -> str:
-    return _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10) + _run(
+    return _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10) + _run_cmd(
         ["git", "status", "--short"], timeout=10)
 
 
@@ -814,7 +814,7 @@ def _porcelain() -> str:
     return r.stdout.strip()
 
 
-def _run(args: list[str], timeout: int) -> str:
+def _run_cmd(args: list[str], timeout: int) -> str:
     r = subprocess.run(args, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=timeout)
     return redact(f"rc={r.returncode}\n{r.stdout}{r.stderr}")[:_MAX_TOOL_TEXT]
 
