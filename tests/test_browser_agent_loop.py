@@ -94,6 +94,15 @@ class _FakeMcpSessionPermissive:
         return _FakeToolResult(f"ok: {name} {args}")
 
 
+class _FakeMcpSessionBigSnapshots(_FakeMcpSessionPermissive):
+    """Permissive session whose browser_snapshot results are large enough to
+    count as page dumps for the stale-dump pruning logic."""
+    async def call_tool(self, name, args):
+        if name == "browser_snapshot":
+            return _FakeToolResult("- generic [ref=eXX]: snapshot line\n" * 200)
+        return await super().call_tool(name, args)
+
+
 class _FakeAsyncCM:
     def __init__(self, value):
         self._value = value
@@ -164,6 +173,71 @@ class TestShouldNudgeSnapshotOveruse(unittest.TestCase):
     def test_threshold_boundary(self):
         self.assertTrue(browser_agent._should_nudge_snapshot_overuse(6, 11))
         self.assertFalse(browser_agent._should_nudge_snapshot_overuse(5, 11))
+
+
+class TestPruneStalePageDumps(unittest.TestCase):
+    """Cumulative input tokens grow quadratically if every ~7k-token page dump
+    stays in `messages` forever (measured: 6.12M prompt tokens over 60 turns,
+    Hof van Oslo 20260701_144029). All but the newest PRUNE_KEEP_RECENT large
+    tool results must be stubbed in place."""
+
+    def _tool(self, id_, content):
+        return {"role": "tool", "tool_call_id": id_, "content": content}
+
+    def _dump(self, id_):
+        return self._tool(id_, "x" * (browser_agent.PRUNE_MIN_CHARS + 1))
+
+    def test_stubs_all_but_newest_two(self):
+        messages = [
+            {"role": "user", "content": "prompt"},
+            self._dump("a"), self._dump("b"), self._dump("c"), self._dump("d"),
+        ]
+        pruned = browser_agent._prune_stale_page_dumps(messages)
+        self.assertEqual(pruned, 2)
+        self.assertEqual(messages[1]["content"], browser_agent.STALE_DUMP_STUB)
+        self.assertEqual(messages[2]["content"], browser_agent.STALE_DUMP_STUB)
+        # Newest two survive intact, ids untouched everywhere.
+        self.assertTrue(messages[3]["content"].startswith("x"))
+        self.assertTrue(messages[4]["content"].startswith("x"))
+        self.assertEqual([m["tool_call_id"] for m in messages[1:]],
+                         ["a", "b", "c", "d"])
+
+    def test_small_results_and_non_tool_messages_untouched(self):
+        small = self._tool("s", "clicked ok")
+        assistant = {"role": "assistant", "content": "y" * 10000}
+        messages = [assistant, small, self._dump("a"), self._dump("b")]
+        pruned = browser_agent._prune_stale_page_dumps(messages)
+        self.assertEqual(pruned, 0)
+        self.assertEqual(small["content"], "clicked ok")
+        self.assertEqual(len(assistant["content"]), 10000)
+
+    def test_idempotent_across_turns(self):
+        messages = [self._dump("a"), self._dump("b"), self._dump("c")]
+        self.assertEqual(browser_agent._prune_stale_page_dumps(messages), 1)
+        # Next turn adds one more dump: exactly one more gets stubbed.
+        messages.append(self._dump("d"))
+        self.assertEqual(browser_agent._prune_stale_page_dumps(messages), 1)
+        self.assertEqual(
+            [m["content"] == browser_agent.STALE_DUMP_STUB for m in messages],
+            [True, True, False, False])
+
+
+class TestClampToolResult(unittest.TestCase):
+    def test_short_result_passes_through_unchanged(self):
+        self.assertEqual(browser_agent._clamp_tool_result("ok"), "ok")
+
+    def test_long_result_is_cut_and_marked(self):
+        """A silent cut makes the model conclude an element below the cap is
+        absent from the page -- the truncation must be visible to it."""
+        text = "x" * (browser_agent.TOOL_RESULT_MAX_CHARS + 500)
+        clamped = browser_agent._clamp_tool_result(text)
+        self.assertTrue(clamped.startswith("x" * browser_agent.TOOL_RESULT_MAX_CHARS))
+        self.assertIn("truncated", clamped)
+        self.assertLess(len(clamped), len(text))
+
+    def test_exactly_at_cap_not_marked(self):
+        text = "x" * browser_agent.TOOL_RESULT_MAX_CHARS
+        self.assertEqual(browser_agent._clamp_tool_result(text), text)
 
 
 class TestRunLoop(unittest.IsolatedAsyncioTestCase):
@@ -241,6 +315,32 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(nudge_lines), 1,
                           "should fire exactly once, not every subsequent turn")
 
+    async def test_stale_snapshots_pruned_during_run(self):
+        """Four big snapshots interleaved with unique clicks (so the
+        repeat-action guard stays quiet): from the third snapshot on, each
+        new dump should stub exactly one older one (keep-newest-2), so the
+        context stops growing with every re-snapshot."""
+        responses = []
+        for i in range(1, 9):
+            if i % 2 == 1:
+                responses.append(_FakeResponse(
+                    tool_calls=[_FakeToolCall(f"id{i}", "browser_snapshot", "{}")]))
+            else:
+                responses.append(_FakeResponse(tool_calls=[_FakeToolCall(
+                    f"id{i}", "browser_click", json.dumps({"target": f"e{i}"}))]))
+        responses.append(_FakeResponse(content="Done.\nOUTCOME: blocked",
+                                       tool_calls=None, finish_reason="stop"))
+        patches = _patch_agent(responses, session=_FakeMcpSessionBigSnapshots())
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2]:
+            rc, text = await browser_agent._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake", log=log,
+            )
+        self.assertEqual(browser_agent._parse_outcome(text, rc), "blocked")
+        prune_lines = [l for l in log.lines if "pruned" in l and "stale page dump" in l]
+        self.assertEqual(len(prune_lines), 2)
+
     async def test_dom_scan_and_click_by_text_handled_locally_not_via_mcp(self):
         """dom_scan/click_by_text are local fallback tools (src/
         browser_dom_tools.py) -- must NOT go through session.call_tool
@@ -265,8 +365,11 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
                 cdp_url="http://fake-cdp", log=log,
             )
         self.assertEqual(browser_agent._parse_outcome(text, rc), "submitted")
-        mock_scan.assert_awaited_once_with("http://fake-cdp")
-        mock_click.assert_awaited_once_with("http://fake-cdp", "Ja, ik ga akkoord")
+        # current_url is None here: the strict session rejects the
+        # browser_tabs lookup, and _current_tab_url swallows that to None.
+        mock_scan.assert_awaited_once_with("http://fake-cdp", current_url=None)
+        mock_click.assert_awaited_once_with(
+            "http://fake-cdp", "Ja, ik ga akkoord", current_url=None)
 
 
 if __name__ == "__main__":

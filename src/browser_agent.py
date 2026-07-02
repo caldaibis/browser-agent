@@ -200,6 +200,57 @@ SELECT_OPTION_BY_LABEL_TOOL = {
 # Playwright MCP tools we never want the model to use (raw JS = token bleed).
 BLOCKED_TOOLS = {"browser_evaluate", "browser_run_code_unsafe"}
 
+# Stale-page-dump pruning. Full-page tool results (browser_snapshot,
+# browser_navigate's embedded snapshot, dom_scan) run ~7k tokens each and the
+# model only ever acts on the newest one -- but every one appended to
+# `messages` is re-sent on every later turn, so cumulative input grows
+# quadratically with turns. Measured on the 60-turn Hof van Oslo transcript
+# (20260701_144029): context grew 7.7k -> 188k tokens and the run consumed
+# 6.12M cumulative prompt tokens, ~all of it re-sent stale page dumps. So:
+# each turn, every large tool result except the newest PRUNE_KEEP_RECENT is
+# replaced in-place with a short stub. Each prune invalidates DeepSeek's
+# prefix cache from the stubbed message onward, but the stub lands near the
+# tail (the 3rd-newest dump), so the one-off miss re-read is far smaller than
+# carrying ~7k extra tokens on every remaining turn.
+PRUNE_MIN_CHARS = int(os.environ.get("APPLY_PRUNE_MIN_CHARS", "2500"))
+PRUNE_KEEP_RECENT = max(1, int(os.environ.get("APPLY_PRUNE_KEEP_RECENT", "2")))
+STALE_DUMP_STUB = (
+    "[stale page dump removed to save context. The page may have changed "
+    "since; rely on the most recent snapshot/scan, or take a fresh one if "
+    "you need the current state.]"
+)
+
+# Cap on any single tool result fed back to the model. Long pages blow past
+# this, and a silent cut makes the model conclude something is absent when it
+# was merely below the cut — so truncation is always marked as such.
+TOOL_RESULT_MAX_CHARS = 20000
+
+
+def _clamp_tool_result(text: str) -> str:
+    if len(text) <= TOOL_RESULT_MAX_CHARS:
+        return text
+    return text[:TOOL_RESULT_MAX_CHARS] + (
+        f"\n[tool output truncated at {TOOL_RESULT_MAX_CHARS} chars -- the "
+        "page continues beyond this point. Do NOT conclude an element is "
+        "absent because it isn't shown above; scroll to it or target it "
+        "directly instead.]"
+    )
+
+
+def _prune_stale_page_dumps(messages: list[dict]) -> int:
+    """Replace all but the newest PRUNE_KEEP_RECENT large tool results with
+    STALE_DUMP_STUB (in place, tool_call_id preserved). Returns how many
+    messages were stubbed this call. Already-stubbed messages fall under the
+    size threshold, so repeat calls are no-ops for them."""
+    big_idx = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "tool"
+        and len(m.get("content") or "") >= PRUNE_MIN_CHARS
+    ]
+    for i in big_idx[:-PRUNE_KEEP_RECENT]:
+        messages[i]["content"] = STALE_DUMP_STUB
+    return len(big_idx[:-PRUNE_KEEP_RECENT])
+
 # Outcomes the model may declare via a final "OUTCOME: <x>" line.
 VALID_OUTCOMES = {
     "submitted", "already_applied", "not_available", "not_eligible",
@@ -565,7 +616,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> dom_scan error: {e}")
                         messages.append({
-                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                            "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
                         continue
                     if name == "click_by_text":
@@ -579,7 +630,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> click_by_text error: {e}")
                         messages.append({
-                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                            "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
                         continue
                     if name == "fill_by_label":
@@ -594,7 +645,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> fill_by_label error: {e}")
                         messages.append({
-                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                            "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
                         continue
                     if name == "select_option_by_label":
@@ -609,7 +660,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> select_option_by_label error: {e}")
                         messages.append({
-                            "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                            "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
                         continue
                     if name == "browser_snapshot":
@@ -621,8 +672,14 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         text = f"### Tool error\n{type(e).__name__}: {e}"
                         log.line(f"[agent]   -> error: {e}")
                     messages.append({
-                        "role": "tool", "tool_call_id": tc.id, "content": text[:20000],
+                        "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                     })
+
+                # Drop page dumps the model has already moved past -- see
+                # _prune_stale_page_dumps for the measured cost of keeping them.
+                pruned = _prune_stale_page_dumps(messages)
+                if pruned:
+                    log.line(f"[agent] pruned {pruned} stale page dump(s) from context")
 
                 # Cross-source duplicate check: once per turn, see where the
                 # browser actually is now. An aggregator listing (e.g.

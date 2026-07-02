@@ -18,7 +18,12 @@ form, uploads docs, submits).
   one-shot nudge when `browser_snapshot` dominates the turns so far
   (`_should_nudge_snapshot_overuse` — the exact/short-cycle repeat guard
   can't catch this: the *type* of call repeats, not its arguments, since
-  each snapshot follows a *different* click), and returns a structured
+  each snapshot follows a *different* click), prunes stale page dumps from
+  the conversation each turn (`_prune_stale_page_dumps` — all but the newest
+  2 large tool results are stubbed in place, since the model only ever acts
+  on the latest snapshot; without this cumulative input tokens grow
+  quadratically with turns — see the hard-won lesson below), and returns a
+  structured
   `AgentResult(rc, outcome, summary, resolved_url)`. Four local (non-MCP)
   fallback tools (`src/browser_dom_tools.py`, shared with self-improvement's
   own browser diagnostics) give the model a way past HTML dialogs/overlays
@@ -311,6 +316,20 @@ form, uploads docs, submits).
   a duplicate can actually be caught — and stops immediately with
   `already_applied` instead of re-filling/resubmitting a form the target site
   itself gives no "already applied" signal for.
+- **Stale page dumps in history = quadratic input tokens.** Every
+  `browser_snapshot`/`browser_navigate`/`dom_scan` result is ~7k tokens (they
+  are already clamped at 20k chars), and until 02-07-2026 every one of them
+  stayed in `messages` for the rest of the run — re-sent to the API on every
+  later turn. Measured on the worst Hof van Oslo transcript
+  (20260701_144029, 60 turns): context grew 7.7k → 188k tokens, 6.12M
+  cumulative prompt tokens for ONE run (the dashboard's 5–6M-token
+  `incomplete` rows). The model only ever acts on the newest snapshot, so
+  `_prune_stale_page_dumps` (browser_agent.py) now stubs all but the newest
+  2 large tool results in place each turn (thresholds via
+  `APPLY_PRUNE_MIN_CHARS`/`APPLY_PRUNE_KEEP_RECENT`). Each stub invalidates
+  DeepSeek's prefix cache from that message onward, but the stub lands near
+  the tail so the one-off miss re-read is far smaller than carrying ~7k
+  extra tokens on every remaining turn.
 - **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
   accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
   These are real states to report, not bugs — stop early and label them.
