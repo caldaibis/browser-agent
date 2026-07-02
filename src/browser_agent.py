@@ -260,7 +260,8 @@ VALID_OUTCOMES = {
 
 @dataclass
 class AgentResult:
-    rc: int            # 0 ok, 1 incomplete/loop, 2 setup error, 124 timeout
+    rc: int            # 0 ok, 1 incomplete/loop, 2 setup error, 124 timeout,
+    #                    125 yielded to a priority (mail-triggered) apply
     outcome: str       # one of VALID_OUTCOMES, or incomplete/timeout/error/unknown
     summary: str       # the model's final one-paragraph status
     transcript_path: str = ""
@@ -297,6 +298,8 @@ def _parse_outcome(final_text: str, rc: int) -> str:
     outcome = _extract_outcome(final_text)
     if outcome:
         return outcome
+    if rc == 125:
+        return "yielded"
     if rc == 124:
         return "timeout"
     if rc == 2:
@@ -400,11 +403,19 @@ def _should_nudge_snapshot_overuse(snapshot_calls: int, turn: int) -> bool:
 
 
 async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger",
-                source_url: str = "", resolved: dict | None = None) -> tuple[int, str]:
+                source_url: str = "", resolved: dict | None = None,
+                yield_check=None) -> tuple[int, str]:
     """resolved, when given, is a plain dict this fills in as {"url": ...} with
     the last distinct external destination the browser actually reached --
     read back by run_agent() after the call so callers can persist it as an
-    extra dedup key (see poller_dedup.known_processed_urls)."""
+    extra dedup key (see poller_dedup.known_processed_urls).
+
+    yield_check, when given, is a zero-arg callable polled once per turn
+    (before spending the LLM call): when it returns True the run aborts with
+    rc=125 / outcome "yielded" so a higher-priority apply (a mail-triggered
+    one, see apply_priority.py) can take the shared browser within seconds
+    instead of waiting out this whole run. A yielded attempt is NOT a verdict
+    on the listing -- callers requeue it untouched."""
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         log.line("[agent] ERROR: DEEPSEEK_API_KEY not set")
@@ -433,6 +444,14 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
             snapshot_calls = 0  # detect excessive re-snapshotting (see _should_nudge_snapshot_overuse)
             snapshot_nudged = False
             for turn in range(1, max_turns + 1):
+                if yield_check is not None and yield_check():
+                    log.line(f"[agent] YIELD at turn {turn}: a priority "
+                             "(mail-triggered) apply is waiting for the browser")
+                    return 125, (
+                        "Yielded the browser mid-run to a priority mail-triggered "
+                        "apply. This attempt did not finish and says nothing about "
+                        "the listing itself; it must be re-run."
+                    )
                 request = {
                     "model": model,
                     "messages": messages,
@@ -772,7 +791,8 @@ class Logger:
 
 
 def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: Path,
-              timeout_seconds: int = 900, source_url: str = "") -> AgentResult:
+              timeout_seconds: int = 900, source_url: str = "",
+              yield_check=None) -> AgentResult:
     log = Logger(log_path)
     resolved: dict = {}
 
@@ -780,7 +800,7 @@ def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: P
         try:
             return await asyncio.wait_for(
                 _run(prompt, model, max_turns, cdp_url, log, source_url=source_url,
-                     resolved=resolved),
+                     resolved=resolved, yield_check=yield_check),
                 timeout=timeout_seconds)
         except asyncio.TimeoutError:
             log.line(f"[agent] TIMEOUT after {timeout_seconds}s")

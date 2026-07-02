@@ -23,11 +23,12 @@ from datetime import datetime
 
 import httpx
 
+from ..apply_priority import priority_pending
 from ..config import LOG_DIR
 from ..notify import send_alert, send_status_email
 from . import filters, judge
 from .browser_lock import browser_lock
-from .dedup import PROCESSED_FILE, SeenStore, release_count
+from .dedup import PROCESSED_FILE, SeenStore
 from .fetch import Blocked, fetch
 from .models import RawListing, SiteConfig
 from .parsers import parse_jsonld
@@ -43,13 +44,15 @@ SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
 # Backoff schedule (seconds) applied on consecutive blocks, capped.
 _BACKOFF = [60, 300, 900, 1800, 3600]
 
-# A non-terminal outcome (incomplete/timeout/error/unknown) is normally kept
-# retryable, since it might be a transient hiccup. But some listings fail the
-# same non-terminal way on every single poll (e.g. a page that reliably burns
-# the agent's whole turn budget) and would otherwise be re-applied forever.
-# Give up automatically after this many non-terminal attempts for the same
-# canonical URL.
-MAX_POLLER_ATTEMPTS = int(os.environ.get("POLLER_MAX_ATTEMPTS", "2"))
+# One attempt per listing — no automatic retries. A retry re-runs the exact
+# same prompt against the exact same page (nothing carries over from the failed
+# attempt), so it is an identical coin flip at full LLM cost; in practice a
+# listing that fails non-terminally once fails the same way again (Hof van
+# Oslo: 15+ retried runs at ~5M tokens each on 01-07-2026, all `incomplete`).
+# Every completed agent run therefore consumes the listing, whatever the
+# outcome. The one exception is outcome "yielded": the run was aborted to hand
+# the browser to a priority mail apply (see ..apply_priority) — that says
+# nothing about the listing, so it is requeued untouched.
 
 
 def _log(event: str, **kw) -> None:
@@ -196,11 +199,27 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
         listing = await queue.get()
         t0 = datetime.now()
         try:
+            # Mail-triggered applies take precedence over speculative poller
+            # ones (see ..apply_priority): don't even start while one is busy.
+            if priority_pending():
+                _log("apply_deferred", url=listing.source_url,
+                     reason="priority mail apply in progress")
+                while priority_pending():
+                    await asyncio.sleep(2)
             _log("apply_start", url=listing.source_url, source=listing.source_name)
-            result = await asyncio.to_thread(apply, listing.to_listing())
+            result = await asyncio.to_thread(
+                apply, listing.to_listing(), yield_to_priority=True)
             seconds = round((datetime.now() - t0).total_seconds(), 1)
             _log("apply_done", url=listing.source_url,
                  outcome=result.outcome, rc=result.rc, seconds=seconds)
+            if result.outcome == "yielded":
+                # Aborted mid-run to hand the browser to a mail apply — not an
+                # attempt, not a verdict. Requeue untouched (claim stays held);
+                # the next dequeue waits out the priority window above.
+                _log("apply_requeued", url=listing.source_url,
+                     reason="yielded to a priority mail apply")
+                await queue.put(listing)
+                continue
             from ..self_improvement_agent import improve_after_apply
             await asyncio.to_thread(
                 improve_after_apply,
@@ -209,14 +228,9 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 trigger="poller",
                 extra={"detected_by": listing.detected_by or listing.source_name},
             )
-            attempts = release_count(listing.source_url) + 1
-            give_up = not result.terminal and attempts >= MAX_POLLER_ATTEMPTS
             message = result.summary or f"Poller agent finished with outcome={result.outcome} (rc={result.rc})."
-            if give_up:
-                message += (
-                    f" Giving up after {attempts} non-terminal attempts for this listing "
-                    "— no further automatic retries."
-                )
+            if not result.terminal:
+                message += " One attempt per listing — no automatic retry."
             rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
@@ -233,15 +247,17 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 f"address={rec.get('address') or 'unknown address'} - {rec.get('message')}"
             )
             send_status_email(rec)
-            # Mark seen on a terminal outcome, or once we give up retrying a
-            # listing that fails the same non-terminal way every time —
-            # otherwise transient failures stay retryable on the next poll.
-            if result.terminal or give_up:
-                seen.mark(listing.source_url, outcome=result.outcome,
-                          source=listing.source_name, address=listing.address)
-                _remember_processed(listing, result.outcome, resolved_url=result.resolved_url)
-            else:
-                seen.release(listing.source_url)
+            # One attempt per listing: the agent ran, so the listing is
+            # consumed whatever the outcome (see the no-retries note above).
+            seen.mark(listing.source_url, outcome=result.outcome,
+                      source=listing.source_name, address=listing.address)
+            _remember_processed(listing, result.outcome, resolved_url=result.resolved_url)
+        except TimeoutError as e:
+            # Could not get the shared browser at all (lock contention) — the
+            # agent never ran, no LLM cost was spent, so this is NOT an
+            # attempt: release the claim and let a future poll re-qualify it.
+            _log("apply_lock_timeout", url=listing.source_url, error=str(e))
+            seen.release(listing.source_url)
         except Exception as e:  # noqa: BLE001 - one bad apply must not kill the worker
             _log("apply_error", url=listing.source_url, error=f"{type(e).__name__}: {e}")
             from ..self_improvement_agent import improve_exception
@@ -252,14 +268,6 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 trigger="poller",
                 extra={"detected_by": listing.detected_by or listing.source_name},
             )
-            attempts = release_count(listing.source_url) + 1
-            give_up = attempts >= MAX_POLLER_ATTEMPTS
-            message = f"{type(e).__name__}: {e}"
-            if give_up:
-                message += (
-                    f" Giving up after {attempts} failed attempts for this listing "
-                    "— no further automatic retries."
-                )
             rec = _summary(
                 source_url=listing.source_url,
                 source=listing.source_name,
@@ -267,15 +275,14 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
                 address=listing.address or listing.title,
                 status="error",
                 detected_ts=listing.detected_ts,
-                message=message,
+                message=f"{type(e).__name__}: {e}. One attempt per listing — no automatic retry.",
             )
             send_status_email(rec)
-            if give_up:
-                seen.mark(listing.source_url, outcome="error",
-                          source=listing.source_name, address=listing.address)
-                _remember_processed(listing, "error")
-            else:
-                seen.release(listing.source_url)
+            # The apply crashed mid-flight; the agent may have spent real turns
+            # already. Same one-attempt rule as above.
+            seen.mark(listing.source_url, outcome="error",
+                      source=listing.source_name, address=listing.address)
+            _remember_processed(listing, "error")
         finally:
             queue.task_done()
 

@@ -14,6 +14,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import site_playbooks
+from .apply_priority import priority_pending
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
 from .credentials import available_domains
 from .message_template import REFERENCE_APPLICATION_MESSAGE
@@ -109,6 +111,19 @@ def build_prompt(listing: dict) -> str:
         "stored password is rejected, stop and report a login failure."
     )
     submit_clause = "Then SUBMIT the application. Confirm submission succeeded."
+    playbook = site_playbooks.load_for_url(listing.get("source_url", ""))
+    playbook_clause = ""
+    if playbook:
+        domain, playbook_text = playbook
+        playbook_clause = f"""
+SITE PLAYBOOK for {domain} — durable lessons distilled from previous runs on
+this exact site. Use it to go straight to the right flow instead of
+rediscovering it, but VERIFY against the live page: the site may have changed,
+and the current page always wins over the playbook.
+\"\"\"
+{playbook_text}
+\"\"\"
+"""
     return f"""You are applying to a Dutch rental listing on my behalf. Act autonomously.
 
 LISTING (external source: {listing.get('source_name','?')})
@@ -154,7 +169,7 @@ STOP immediately and report `OUTCOME: not_eligible`, stating the requirement,
 the applicant's value, and the gap. Only proceed to fill the form when the
 applicant plausibly meets every stated hard requirement. If no requirements are
 stated, proceed normally.
-
+{playbook_clause}
 YOUR TASK
 1. Open the URL above in the browser.
 2. Run the ELIGIBILITY GATE above. If not eligible, stop now (do not apply).
@@ -282,9 +297,16 @@ def _slug(text: str) -> str:
     return (s or "listing")[:50]
 
 
-def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
+def apply(listing: dict, model: str = APPLY_MODEL,
+          yield_to_priority: bool = False) -> AgentResult:
     """Run the apply agent on one listing. Returns an AgentResult with the true
-    outcome (submitted / already_applied / not_available / ... / timeout)."""
+    outcome (submitted / already_applied / not_available / ... / timeout).
+
+    yield_to_priority: set by the poller's applier. The run then checks the
+    mail-apply priority flag once per turn and aborts with outcome "yielded"
+    (listing untouched, caller requeues) so a time-critical mail-triggered
+    apply gets the shared browser within seconds. Mail/manual runs ARE the
+    priority path and leave this off."""
     listing_price = parse_rent(listing.get("price"))
     if listing_price is not None and listing_price > MAX_RENT:
         summary = (
@@ -317,6 +339,7 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
             log_path=transcript,
             timeout_seconds=APPLY_TIMEOUT_SECONDS,
             source_url=listing["source_url"],
+            yield_check=priority_pending if yield_to_priority else None,
         )
     # Keep the convenience "latest" copy too.
     try:
@@ -326,6 +349,9 @@ def apply(listing: dict, model: str = APPLY_MODEL) -> AgentResult:
         pass
     print(f"[apply] ----- agent finished: outcome={result.outcome} (rc={result.rc}) -----")
     result.transcript_path = str(transcript)
+    # Distill durable site knowledge out of this run for the next one on the
+    # same domain(s). Fail-open and outside the browser lock — see the module.
+    site_playbooks.update_after_run(listing, result)
     return result
 
 

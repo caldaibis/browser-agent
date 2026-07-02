@@ -83,16 +83,40 @@ form, uploads docs, submits).
   poller's applier and the Stekkies orchestrator never drive the shared browser
   at once (also wired into `apply.apply()`). `registry.py` lists all 26 sites;
   `discover.py` probes which tier each site currently yields. Run: `just poll`,
-  `just poll-once <site>`, `just discover`. A non-terminal outcome
-  (incomplete/timeout/error/unknown) releases the listing so the next poll
-  retries it — but a listing that fails the same non-terminal way every time
-  (e.g. a page that reliably burns the whole turn budget) is capped at
-  `MAX_POLLER_ATTEMPTS` (default 2, env `POLLER_MAX_ATTEMPTS`) via
-  `dedup.release_count()`; past the cap it's marked seen/processed like a
-  terminal outcome so it stops being retried. Without this a stuck listing
-  gets re-applied every cadence forever, burning real LLM cost for a result
-  that will never change (seen: `Hof van Oslo` retried 15+ times over several
-  hours on 2026-07-01, several million tokens each).
+  `just poll-once <site>`, `just discover`. **One attempt per listing — no
+  automatic retries** (02-07-2026, replaced the earlier `MAX_POLLER_ATTEMPTS`
+  retry cap): a retry re-runs the identical prompt against the same page at
+  full LLM cost — nothing carries over from the failed attempt, so it's the
+  same coin flip again (seen: `Hof van Oslo` retried 15+ times over several
+  hours on 2026-07-01, several million tokens each, all `incomplete`). Every
+  completed agent run marks the listing seen/processed whatever the outcome;
+  the orchestrator's mail path records non-terminal outcomes too, for the same
+  reason. Two carve-outs that are NOT attempts and don't consume the listing:
+  outcome `yielded` (run aborted to hand the browser to a priority mail apply,
+  see `src/apply_priority.py` — requeued untouched) and a browser-lock
+  `TimeoutError` (agent never ran — claim released for a future poll).
+- `src/apply_priority.py` — **mail-apply priority over the poller.** Rentals
+  are won by minutes: a mail-triggered apply (Stekkies/Huurwoningen alert —
+  competitors were just notified too) must not queue behind a speculative
+  poller run holding the shared-browser flock for up to 15 min. The
+  orchestrator holds a priority flag (`state/apply_priority.flag`, stale after
+  `APPLY_PRIORITY_STALE_SECONDS`) around extraction+apply; the poller's
+  applier waits for it before starting, and an in-flight poller run checks it
+  once per agent turn (`browser_agent._run`'s `yield_check`, wired via
+  `apply(..., yield_to_priority=True)`) and aborts with rc=125 / outcome
+  `yielded` so the lock frees within one turn. A yielded listing is requeued
+  untouched — it is not an attempt.
+- `src/site_playbooks.py` — **per-domain playbooks: persistent memory of how
+  each site works.** After every real agent run, one cheap LLM pass per
+  touched domain (source + resolved) distills the redacted transcript into
+  `state/site_playbooks/<domain>.md` — durable site mechanics only (login
+  quirks, where the real apply action is, upsell traps, ref-less dialogs), no
+  listing facts, no personal data. `apply.build_prompt` injects the listing
+  domain's playbook into the next run on that site, so lessons compound
+  instead of every run rediscovering the site from scratch (the whole Hof van
+  Oslo saga was exactly that rediscovery). Fail-open everywhere: a playbook
+  failure never fails an apply. Env: `PLAYBOOK_MODEL`, `PLAYBOOK_MAX_CHARS`,
+  `PLAYBOOK_TIMEOUT_SECONDS`.
 - `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
   (blocked/error/incomplete/timeout/not_available/…, see
   `SELF_IMPROVEMENT_OUTCOMES`). Drives the **Claude Agent SDK**
@@ -141,6 +165,11 @@ form, uploads docs, submits).
 - Python 3.12, managed by **uv** (`pyproject.toml` + `uv.lock`). `uv sync` to
   install; prefix commands with `uv run` (no manual venv activate).
 - Run modules as packages: `uv run python -m src.<module>`.
+- **`just check` runs the unit tests** (`unittest discover tests`), not just
+  lint + import smoke. This is deliberate: it is also the self-improvement
+  agent's verify gate (`SELF_IMPROVEMENT_VERIFY_CMD`), and an autonomous patch
+  that pushes straight to main must not pass on lint alone (found the hard
+  way: the suite sat broken for a while because nothing ran it).
 - **Use the `justfile` recipes for common workflows** instead of reinventing
   commands — run `just` (or read the `justfile`) to list them. Covers local dev
   (`sync`, `host`, `login`, `watch`, `dashboard`, `healthcheck`, `reauth`,
