@@ -104,6 +104,9 @@
       <ul>
         <li><a href="/">Overview</a></li>
         <li><a href="/submissions">Submissions</a></li>
+        <li><button id="push-toggle" class="outline secondary" hidden
+                    style="padding:.2rem .6rem;font-size:.8rem;margin:0;"
+                    title="Native notifications on this device for every submission"></button></li>
       </ul>
     </nav>
     {% block content %}{% endblock %}
@@ -120,6 +123,55 @@
       if (!row || e.target.closest('a, button')) return;
       window.location.href = row.dataset.href;
     });
+
+    // ------------------------------------------------------------ web push --
+    // Native notifications (Chrome desktop + Android) for submissions.
+    // Per device: click the 🔔 button once; unsubscribe by clicking again.
+    (async () => {
+      const btn = document.getElementById('push-toggle');
+      if (!btn || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      btn.hidden = false;
+
+      const b64ToBytes = (b64) => {
+        const pad = '='.repeat((4 - b64.length % 4) % 4);
+        const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+        return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+      };
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      const current = async () => (await reg.pushManager.getSubscription());
+      const render = async () => {
+        btn.textContent = (await current()) ? '🔔 Notifications on' : '🔕 Enable notifications';
+      };
+      await render();
+
+      btn.addEventListener('click', async () => {
+        try {
+          const existing = await current();
+          if (existing) {
+            await fetch('/push/unsubscribe', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ endpoint: existing.endpoint }),
+            });
+            await existing.unsubscribe();
+          } else {
+            if (await Notification.requestPermission() !== 'granted') return;
+            const { key } = await (await fetch('/push/public-key')).json();
+            const sub = await reg.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: b64ToBytes(key),
+            });
+            const r = await fetch('/push/subscribe', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(sub.toJSON()),
+            });
+            if (!r.ok) { await sub.unsubscribe(); alert('Subscribe failed'); }
+          }
+        } catch (e) {
+          alert('Push setup failed: ' + e);
+        }
+        await render();
+      });
+    })();
   </script>
 </body>
 </html>

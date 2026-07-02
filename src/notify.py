@@ -76,6 +76,11 @@ def send_status_email(rec: dict) -> None:
 
     Never raises: logging/apply flow must not break on a mail failure.
     """
+    # Web push piggybacks on this single integration point (both the
+    # orchestrator and the poller route every outcome through here). It has
+    # its own enable flag + outcome filter and never raises.
+    from .push_notify import push_status
+    push_status(rec)
     if not NOTIFY_ENABLED:
         return
     if rec.get("status") not in STATUS_EMAIL_OUTCOMES:

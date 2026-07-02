@@ -15,11 +15,12 @@ import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..config import PROJECT_ROOT, LOG_DIR
+from .. import push_notify
 from . import data
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -123,6 +124,51 @@ def _systemctl(*args: str) -> tuple[bool, str]:
         return r.returncode == 0, (r.stdout + r.stderr).strip()
     except Exception as e:
         return False, str(e)
+
+
+# ---------------------------------------------------------------- web push ---
+# Subscribe this browser/phone to native notifications for submissions.
+# The service worker must be served from / so its scope covers the site
+# (a /static/-scoped worker could not control the dashboard pages).
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(BASE_DIR / "static" / "sw.js",
+                        media_type="application/javascript")
+
+
+@app.get("/push/public-key")
+def push_public_key():
+    return JSONResponse({"key": push_notify.public_key()})
+
+
+@app.post("/push/subscribe")
+async def push_subscribe(request: Request):
+    try:
+        sub = await request.json()
+        push_notify.add_subscription(sub, request.headers.get("user-agent", ""))
+        return JSONResponse({"ok": True, "msg": "subscribed"})
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+
+
+@app.post("/push/unsubscribe")
+async def push_unsubscribe(request: Request):
+    try:
+        sub = await request.json()
+        push_notify.remove_subscription((sub or {}).get("endpoint", ""))
+        return JSONResponse({"ok": True, "msg": "unsubscribed"})
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+
+
+@app.post("/push/test")
+def push_test():
+    n = push_notify.send_push(
+        "🔔 Test notification",
+        "Web push works — you'll get one of these on every submission.")
+    return JSONResponse({"ok": n > 0,
+                         "msg": f"sent to {n} subscription(s)" if n else
+                                "no subscriptions registered"})
 
 
 @app.post("/action/pause")

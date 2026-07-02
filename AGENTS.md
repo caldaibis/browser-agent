@@ -154,7 +154,19 @@ form, uploads docs, submits).
   `self-improvement-deepseek`), `SELF_IMPROVEMENT_MAX_TURNS`,
   `SELF_IMPROVEMENT_MAX_BUDGET_USD`, `SELF_IMPROVEMENT_TIMEOUT_SECONDS`.
 - `src/notify.py` — emails `NOTIFY_TO` after each handled listing
-  (outcome + redacted summary) via Gmail `send` scope.
+  (outcome + redacted summary) via Gmail `send` scope. Also the single
+  integration point for web push: `send_status_email` calls
+  `push_notify.push_status` first (own flag/filter, never raises).
+- `src/push_notify.py` — **native notifications (Chrome desktop + Android)**
+  via the standard Web Push API + VAPID; no third-party account. VAPID keys
+  auto-generate into `state/vapid.json`; per-device subscriptions live in
+  `state/push_subscriptions.jsonl` (expired endpoints pruned on send). The
+  dashboard serves the plumbing (`/sw.js` from root scope, `/push/public-key`,
+  `/push/subscribe`, `/push/unsubscribe`, `/push/test`) and a 🔔 toggle in the
+  nav; the actual send happens in whichever process records the outcome
+  (orchestrator/poller). Enable per device: open the dashboard, click 🔔 once.
+  Env: `WEB_PUSH_ENABLED=0` to disable, `WEB_PUSH_OUTCOMES` (default
+  `submitted`) to widen.
 - `src/healthcheck.py` (+ systemd timer, 30 min) — emails when DeepSeek credit
   is low or the Stekkies session has expired. `remaining_credit()` shared here.
 - `src/dashboard/` — FastAPI + htmx/Chart.js read-only dashboard (stats, per-run
