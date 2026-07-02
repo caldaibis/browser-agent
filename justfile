@@ -19,10 +19,14 @@ default:
 sync:
     uv sync
 
-# offline sanity: lint + byte-compile + import smoke + render the apply prompt (CI runs this)
+# offline sanity: lint + byte-compile + unit tests + import smoke + render the apply prompt (CI runs this)
+# The unit tests are part of this gate ON PURPOSE: the self-improvement agent's
+# verify step is `just check` (SELF_IMPROVEMENT_VERIFY_CMD), and an autonomous
+# patch that pushes straight to main must not pass on lint alone.
 check:
     uv run ruff check .
     uv run python -m compileall -q src
+    uv run python -m unittest discover tests
     uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; import src.poller.watcher, src.poller.discover, src.poller.registry, src.poller.sniff; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
 
 # preflight: verify everything needed to run the agent locally is in place.
