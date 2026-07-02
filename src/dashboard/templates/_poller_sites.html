@@ -1,0 +1,58 @@
+<article id="poller-sites" hx-get="/poller-sites" hx-trigger="every 45s" hx-swap="outerHTML">
+  <header>
+    <strong>Poller site health</strong>
+    <span class="muted-txt" style="font-size:.8rem;">· is each source site actually being polled, and is any of them blocking/challenging us?</span>
+  </header>
+  <div style="margin-bottom:.6rem;">
+    <span class="badge ok">{{ summary.ok }} ok</span>
+    {% if summary.blocked %}<span class="badge bad">{{ summary.blocked }} blocked</span>{% endif %}
+    {% if summary.stale %}<span class="badge warn">{{ summary.stale }} stale</span>{% endif %}
+    {% if summary.erroring %}<span class="badge warn">{{ summary.erroring }} erroring</span>{% endif %}
+    {% if summary.never_polled %}<span class="badge muted">{{ summary.never_polled }} never polled</span>{% endif %}
+    <span class="muted-txt" style="font-size:.8rem;">· {{ summary.total }} sites enabled</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Site</th>
+        <th>Tier</th>
+        <th>Status</th>
+        <th>Last seen</th>
+        <th>Last 6h</th>
+        <th>Last block</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in sites %}
+      <tr>
+        <td>
+          {{ s.name }}
+          {% if s.needs_login %}<span class="muted-txt" style="font-size:.75rem;"> (login)</span>{% endif %}
+        </td>
+        <td class="muted-txt">{{ s.tier }}</td>
+        <td>
+          <span class="dot {{ 'up' if s.status == 'ok' else 'down' if s.status in ['blocked','stale','erroring'] else 'unk' }}"></span>
+          <span class="badge {{ 'ok' if s.status == 'ok' else 'bad' if s.status == 'blocked' else 'warn' if s.status in ['stale','erroring'] else 'muted' }}">{{ s.status_label }}</span>
+        </td>
+        <td class="muted-txt nowrap">{{ fmt_age(s.last_age_s) }}</td>
+        <td class="muted-txt nowrap">
+          {% if s.enabled %}
+            {{ s.polled_recent }} polled
+            {%- if s.new_recent %}, {{ s.new_recent }} new{% endif -%}
+            {%- if s.error_recent %}, <span class="delta-loss">{{ s.error_recent }} errors</span>{% endif -%}
+            {%- if s.blocked_recent %}, <span class="delta-loss">{{ s.blocked_recent }} blocked</span>{% endif -%}
+          {% else %}—{% endif %}
+        </td>
+        <td class="muted-txt">
+          {% if s.last_block_ts %}
+            <div class="truncate" style="max-width:22rem;" title="{{ s.last_block_reason }}">{{ s.last_block_reason }}</div>
+            <div style="font-size:.75rem;">{{ fmt_age(s.last_age_s) if s.status == 'blocked' else s.last_block_ts[:16].replace('T',' ') }}</div>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted-txt">No poller data yet — the poller may not have run.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>

@@ -213,6 +213,23 @@ def format_delta(seconds: float | None) -> str:
     return f"poller +{text}" if ahead else f"mail +{text}"
 
 
+def format_age(seconds: float | None) -> str:
+    """'2m ago' / '1h 5m ago' style, for "when did this site last say
+    anything at all" -- distinct from format_delta's poller-vs-mail race."""
+    if seconds is None:
+        return "never"
+    seconds = max(0, seconds)
+    mins = int(seconds // 60)
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h {mins % 60}m ago"
+    return f"{hours // 24}d {hours % 24}h ago"
+
+
 def format_count(value: int | None) -> str:
     if value is None:
         return "—"
@@ -704,3 +721,130 @@ def recent_activity(n: int = 25) -> list[str]:
         return []
     lines = ACTIVITY_LOG.read_text(encoding="utf-8").splitlines()
     return lines[-n:][::-1]
+
+
+# --------------------------------------------------------------------------- #
+# Poller site health — "is the poller actually working, and is any site
+# blocking/challenging us?" This was previously invisible: the dashboard only
+# showed the `poller` systemd unit as active/inactive, which says nothing
+# about whether individual sites are being blocked or have silently stopped
+# yielding listings (a Blocked exception backs off + retries forever without
+# ever crashing the service).
+# --------------------------------------------------------------------------- #
+POLL_LOG = LOG_DIR / "poller.jsonl"
+POLL_LOG_TAIL_LINES = 30000  # bounds memory even once the log grows for weeks
+
+
+@dataclass
+class SiteHealth:
+    name: str
+    tier: int
+    enabled: bool
+    needs_login: bool
+    cadence_s: int
+    last_ts: str = ""
+    last_event: str = ""
+    last_age_s: float | None = None
+    polled_recent: int = 0
+    blocked_recent: int = 0
+    error_recent: int = 0
+    new_recent: int = 0
+    last_block_reason: str = ""
+    last_block_ts: str = ""
+    block_streak: int = 0
+    status: str = "unknown"  # ok | blocked | stale | erroring | disabled | never_polled
+
+    @property
+    def status_label(self) -> str:
+        return {
+            "ok": "OK", "blocked": "BLOCKED", "stale": "STALE",
+            "erroring": "ERRORING", "disabled": "disabled",
+            "never_polled": "never polled",
+        }.get(self.status, self.status)
+
+
+def _poll_log_events_by_site() -> dict[str, list[dict]]:
+    from collections import deque
+    by_site: dict[str, list[dict]] = defaultdict(list)
+    if not POLL_LOG.exists():
+        return by_site
+    with POLL_LOG.open(encoding="utf-8") as f:
+        for line in deque(f, maxlen=POLL_LOG_TAIL_LINES):
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            site = rec.get("site")
+            if site:
+                by_site[site].append(rec)
+    return by_site
+
+
+def poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
+    """Per-site poller status derived from poller.jsonl, cross-referenced
+    against the registry (so a site that's stopped logging entirely --
+    e.g. an exception outside the try/except in _watch_site, or the whole
+    poller process being down -- shows up as "stale"/"never polled" rather
+    than silently vanishing)."""
+    from ..poller.registry import REGISTRY
+
+    by_site = _poll_log_events_by_site()
+    now = datetime.now()
+    cutoff = now - timedelta(hours=window_hours)
+    results: list[SiteHealth] = []
+    for cfg in REGISTRY:
+        events = by_site.get(cfg.name, [])
+        last = events[-1] if events else None
+        recent = [e for e in events if (parse_ts(e.get("ts")) or now) >= cutoff]
+        polled_recent = sum(1 for e in recent if e.get("event") == "polled")
+        blocked_recent = sum(1 for e in recent if e.get("event") == "blocked")
+        error_recent = sum(1 for e in recent if e.get("event") == "poll_error")
+        new_recent = sum(e.get("new") or 0 for e in recent if e.get("event") == "polled")
+        last_block = next((e for e in reversed(events) if e.get("event") == "blocked"), None)
+
+        last_ts = last.get("ts", "") if last else ""
+        last_dt = parse_ts(last_ts)
+        last_age = (now - last_dt).total_seconds() if last_dt else None
+
+        if not cfg.enabled:
+            status = "disabled"
+        elif last is None:
+            status = "never_polled"
+        elif last.get("event") == "blocked":
+            status = "blocked"
+        elif last_age is not None and last_age > max(cfg.cadence_s * 4, 900):
+            status = "stale"
+        elif polled_recent and error_recent >= max(polled_recent, 3):
+            status = "erroring"
+        else:
+            status = "ok"
+
+        results.append(SiteHealth(
+            name=cfg.name, tier=cfg.tier, enabled=cfg.enabled,
+            needs_login=cfg.needs_login, cadence_s=cfg.cadence_s,
+            last_ts=last_ts, last_event=(last.get("event", "") if last else ""),
+            last_age_s=last_age,
+            polled_recent=polled_recent, blocked_recent=blocked_recent,
+            error_recent=error_recent, new_recent=new_recent,
+            last_block_reason=(last_block or {}).get("reason", ""),
+            last_block_ts=(last_block or {}).get("ts", ""),
+            block_streak=(last.get("streak") or 0) if status == "blocked" else 0,
+            status=status,
+        ))
+
+    # Worst first: blocked > stale > erroring > never_polled > ok > disabled.
+    order = {"blocked": 0, "stale": 1, "erroring": 2, "never_polled": 3, "ok": 4, "disabled": 5}
+    results.sort(key=lambda s: (order.get(s.status, 9), s.name))
+    return results
+
+
+def poller_site_summary(sites: list[SiteHealth]) -> dict:
+    active = [s for s in sites if s.enabled]
+    return {
+        "total": len(active),
+        "ok": sum(1 for s in active if s.status == "ok"),
+        "blocked": sum(1 for s in active if s.status == "blocked"),
+        "stale": sum(1 for s in active if s.status == "stale"),
+        "erroring": sum(1 for s in active if s.status == "erroring"),
+        "never_polled": sum(1 for s in active if s.status == "never_polled"),
+    }

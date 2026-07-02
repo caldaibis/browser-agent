@@ -40,6 +40,7 @@ STATUS_CLASS = {
 }
 templates.env.globals["status_class"] = lambda s: STATUS_CLASS.get(s, "muted")
 templates.env.globals["fmt_delta"] = data.format_delta
+templates.env.globals["fmt_age"] = data.format_age
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -48,10 +49,12 @@ def overview(request: Request):
     mail_events = data.load_mail_events()
     stats = data.compute_stats(subs)
     race = data.race_report(subs, mail_events)
+    poller_sites = data.poller_site_health()
     return templates.TemplateResponse(request, "index.html", {
         "stats": stats, "recent": subs[:12], "race": race,
         "mail_events": mail_events[:10],
         "health": data.health(), "stats_json": json.dumps(stats),
+        "sites": poller_sites, "summary": data.poller_site_summary(poller_sites),
     })
 
 
@@ -94,6 +97,14 @@ def submission_detail(request: Request, sub_id: int):
 def health_panel(request: Request):
     return templates.TemplateResponse(request, "_health.html", {
         "health": data.health(),
+    })
+
+
+@app.get("/poller-sites", response_class=HTMLResponse)
+def poller_sites_panel(request: Request):
+    sites = data.poller_site_health()
+    return templates.TemplateResponse(request, "_poller_sites.html", {
+        "sites": sites, "summary": data.poller_site_summary(sites),
     })
 
 
