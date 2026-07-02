@@ -56,7 +56,12 @@ def _processed_keys() -> set[str]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        for field in ("stekkies_url", "source_url"):
+        # resolved_url is the ACTUAL external destination an earlier run
+        # reached mid-flight (e.g. eenhoornmanagement.nl behind a
+        # huurwoningen.nl entry page). Without it here, a later mail that
+        # points at the real site directly sails past this pre-flight check
+        # and burns a full agent run just to hit the mid-run duplicate guard.
+        for field in ("stekkies_url", "source_url", "resolved_url"):
             value = rec.get(field)
             if value:
                 keys.add(value)
@@ -94,6 +99,16 @@ def _source_duplicate(source_url: str, keys: set[str]) -> bool:
     return source_url in keys or key in keys or key in active_claim_keys()
 
 
+# One shared wording so a deterministically-prevented duplicate is
+# recognizable in the dashboard as money deliberately NOT spent.
+def _prevented_message(url: str) -> str:
+    return (
+        "Prevented by the deterministic duplicate guard before any browser/"
+        f"LLM cost: {url} (canonical key {canonical_url(url)}) was already "
+        "handled by an earlier run."
+    )
+
+
 def process_source(listing: dict, msg_id: str | None = None,
                    trigger: str = "manual", msg_received_ts: str = "") -> dict:
     """Apply directly to an external source listing, used by Huurwoningen mail
@@ -116,7 +131,7 @@ def process_source(listing: dict, msg_id: str | None = None,
             address=address,
             status="skipped_duplicate",
             mark_read=True,
-            message="Skipped because this external listing was already handled.",
+            message=_prevented_message(source_url),
         )
 
     try:
@@ -199,7 +214,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
             stekkies_url=stekkies_url,
             status="skipped_duplicate",
             mark_read=True,
-            message="Skipped because this Stekkies listing was already handled.",
+            message=_prevented_message(stekkies_url),
         )
 
     try:
@@ -240,7 +255,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
                     address=listing.address,
                     status="skipped_duplicate",
                     mark_read=True,
-                    message="Skipped because this external listing was already handled.",
+                    message=_prevented_message(listing.source_url),
                 )
             result = apply(d)
         _log("applied", outcome=result.outcome, returncode=result.rc,
