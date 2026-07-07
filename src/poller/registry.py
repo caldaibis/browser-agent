@@ -53,8 +53,9 @@ REGISTRY: list[SiteConfig] = [
     _jsonld("huurportaal.nl", "https://huurportaal.nl/huurwoningen/utrecht"),
 
     # ---- working now: tier-2 anchor (detail links in server HTML) ----------
-    _anchor("huurexpert.nl", "https://www.huurexpert.nl/huurwoningen/Utrecht",
-            r"/huurwoning/[^\"']+/\d+/"),
+    # huurexpert.nl: dropped 07-07-2026 — applying requires a PAID account the
+    # owner decided not to buy (2 listings had already died as login_required).
+    # Polling a site we can never apply on only burns fetches and judge calls.
     _anchor("livresidential.nl", "https://livresidential.nl/huurwoningen/utrecht",
             r"/huurwoningen/[a-z-]+/[a-z-]+/[a-z0-9-]+"),
     _anchor("ikwilhuren.nu", "https://ikwilhuren.nu/aanbod/utrecht",
