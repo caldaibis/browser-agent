@@ -133,7 +133,11 @@ async def _render_tier3(site: SiteConfig) -> str:
 
         async def _run() -> str:
             async with async_playwright() as p:
-                b = await p.chromium.connect_over_cdp(CDP_URL)
+                # Explicit connect timeout: a hanging CDP connect during a
+                # network disruption was what wedged a tier-3 render inside
+                # the browser lock on 03-07-2026 (diagnosed on-box by the
+                # self-improvement agent).
+                b = await p.chromium.connect_over_cdp(CDP_URL, timeout=30000)
                 ctx = b.contexts[0] if b.contexts else await b.new_context()
                 pg = await ctx.new_page()
                 try:

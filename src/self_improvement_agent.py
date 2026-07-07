@@ -603,22 +603,22 @@ def _clamp_settle(ms: int) -> int:
 
 
 def _browser_open_locked(url: str, settle_ms: int) -> str:
-    with browser_lock(timeout=1800):
+    with browser_lock(timeout=120, holder="self-improvement"):
         return asyncio.run(_browser_open_async(url, settle_ms))
 
 
 def _browser_diagnostics_locked(settle_ms: int) -> str:
-    with browser_lock(timeout=1800):
+    with browser_lock(timeout=120, holder="self-improvement"):
         return asyncio.run(_browser_diagnostics_async(settle_ms))
 
 
 def _browser_safe_click_locked(text: str, settle_ms: int) -> str:
-    with browser_lock(timeout=1800):
+    with browser_lock(timeout=120, holder="self-improvement"):
         return asyncio.run(_browser_safe_click_async(text, settle_ms))
 
 
 def _browser_screenshot_locked(full_page: bool) -> str:
-    with browser_lock(timeout=1800):
+    with browser_lock(timeout=120, holder="self-improvement"):
         return asyncio.run(_browser_screenshot_async(full_page))
 
 
