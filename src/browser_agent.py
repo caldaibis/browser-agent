@@ -20,11 +20,13 @@ import asyncio
 import json
 import os
 import re
+import signal
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -257,6 +259,39 @@ VALID_OUTCOMES = {
     "login_required", "blocked",
 }
 
+# One-shot extra turn budget granted at max_turns when the run is
+# demonstrably mid-form (recent fill/upload/select activity): killing a run
+# that is one dropdown away from submitting consumes the listing forever
+# under the one-attempt rule. Verified twice in production (03/05-07-2026):
+# a run died at turn 60 while dismissing a cookie overlay blocking the LAST
+# form field, another died at turn 60 right after finally locating the real
+# listing URL. Wall-clock APPLY_TIMEOUT_SECONDS still bounds the whole run.
+GRACE_TURNS = int(os.environ.get("APPLY_GRACE_TURNS", "10"))
+_FORM_TOOLS = {
+    "browser_fill_form", "browser_type", "browser_file_upload",
+    "browser_select_option", "fill_by_label", "select_option_by_label",
+}
+
+# Deterministic cookie-banner dismissal after every navigation (free — no LLM
+# turn). Cookie/consent overlays intercept clicks and eat turns: one observed
+# run burned its final turns clicking a consent modal away field by field.
+AUTO_COOKIE = os.environ.get("APPLY_AUTO_COOKIE", "1") != "0"
+
+# rc for "the LLM API refused for lack of credit": the agent never really ran,
+# so callers must NOT consume the listing (one-attempt rule) — the run said
+# nothing about the listing, exactly like a browser-lock timeout.
+NO_CREDIT_RC = 126
+
+
+def _recent_form_activity(sig_history: list[tuple], window: int = 8) -> bool:
+    """True when any of the last `window` turns' tool calls touched a form —
+    the signal that the run is mid-application rather than lost/looping."""
+    for sig in sig_history[-window:]:
+        for name, _args in sig:
+            if name in _FORM_TOOLS:
+                return True
+    return False
+
 
 @dataclass
 class AgentResult:
@@ -298,6 +333,8 @@ def _parse_outcome(final_text: str, rc: int) -> str:
     outcome = _extract_outcome(final_text)
     if outcome:
         return outcome
+    if rc == NO_CREDIT_RC:
+        return "no_credit"
     if rc == 125:
         return "yielded"
     if rc == 124:
@@ -443,7 +480,32 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
             repeat_nudged = False
             snapshot_calls = 0  # detect excessive re-snapshotting (see _should_nudge_snapshot_overuse)
             snapshot_nudged = False
-            for turn in range(1, max_turns + 1):
+            turn = 0
+            budget = max_turns
+            grace_granted = False
+            while True:
+                if turn >= budget:
+                    if not grace_granted and _recent_form_activity(sig_history):
+                        grace_granted = True
+                        budget += GRACE_TURNS
+                        log.line(f"[agent] turn budget reached mid-form -- "
+                                 f"granting {GRACE_TURNS} grace turns (once)")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                f"Your turn budget is nearly exhausted; you have "
+                                f"{GRACE_TURNS} extra turns as a one-time grace "
+                                "because you are mid-form. Finish the remaining "
+                                "fields and SUBMIT now, taking the shortest "
+                                "possible path. If you cannot submit within "
+                                "these turns, stop and report the exact "
+                                "blocking reason with the mandatory "
+                                "'OUTCOME: <x>' line."
+                            ),
+                        })
+                    else:
+                        break
+                turn += 1
                 if yield_check is not None and yield_check():
                     log.line(f"[agent] YIELD at turn {turn}: a priority "
                              "(mail-triggered) apply is waiting for the browser")
@@ -462,7 +524,23 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 }
                 if THINKING["type"] == "enabled":
                     request["reasoning_effort"] = REASONING_EFFORT
-                resp = await client.chat.completions.create(**request)
+                try:
+                    resp = await client.chat.completions.create(**request)
+                except APIStatusError as e:
+                    # Out of API credit is not a verdict on the listing: the
+                    # agent can't run at all. Surface it as its own outcome so
+                    # callers DON'T consume the listing (one-attempt rule) --
+                    # otherwise every listing that drops during a credit
+                    # outage is permanently burned as "error".
+                    if e.status_code == 402 or "insufficient balance" in str(e).lower():
+                        log.line(f"[agent] NO CREDIT: the LLM API refused "
+                                 f"(HTTP {e.status_code}): {e}")
+                        return NO_CREDIT_RC, (
+                            "The DeepSeek API refused the request for lack of "
+                            "credit (HTTP 402). No attempt was made on the "
+                            "listing; top up and it can be retried."
+                        )
+                    raise
                 choice = resp.choices[0]
                 msg = choice.message
                 tool_calls = msg.tool_calls or []
@@ -687,6 +765,20 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     try:
                         result = await session.call_tool(name, args)
                         text = _result_text(result)
+                        # Deterministic cookie-banner sweep right after every
+                        # navigation -- consent overlays intercept all clicks
+                        # and otherwise cost LLM turns to clear (one run burned
+                        # its final turns on exactly this). Free and fail-open.
+                        if AUTO_COOKIE and name == "browser_navigate":
+                            try:
+                                note = await browser_dom_tools.dismiss_cookie_banner(
+                                    cdp_url,
+                                    current_url=await _current_tab_url(session))
+                                if note:
+                                    log.line(f"[agent]   -> auto {note}")
+                                    text += f"\n[auto] {note}"
+                            except Exception as e:  # noqa: BLE001
+                                log.line(f"[agent]   -> cookie sweep error: {e}")
                     except Exception as e:  # surface tool errors to the model
                         text = f"### Tool error\n{type(e).__name__}: {e}"
                         log.line(f"[agent]   -> error: {e}")
@@ -766,8 +858,63 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         ),
                     })
 
-            log.line(f"[agent] STOP: hit max_turns={max_turns}")
+            log.line(f"[agent] STOP: hit turn budget={budget} "
+                     f"(max_turns={max_turns}, grace={grace_granted})")
             return 1, "Hit the turn budget before reaching a conclusion."
+
+
+# How long after the wall-clock timeout the teardown may take before the
+# watchdog assumes the MCP subprocess is wedged and kills it. asyncio.wait_for
+# only CANCELS the task; the cancellation still has to unwind stdio_client's
+# __aexit__, which waits on the npx/node MCP process -- if that process
+# ignores its closed stdin, asyncio.run() blocks forever with the browser
+# flock still held. That is the one failure mode the timeout cannot cover
+# (03-07-2026: the lock stayed held for 9+ hours, starving eight consecutive
+# mail-triggered applies).
+TEARDOWN_GRACE_SECONDS = int(os.environ.get("APPLY_TEARDOWN_GRACE_SECONDS", "120"))
+
+_CHILD_MARKERS = (b"playwright", b"mcp", b"node", b"npx")
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    """All live descendant pids of root_pid, via /proc (no psutil dependency)."""
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            stat = (Path("/proc") / entry / "stat").read_text()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    out: list[int] = []
+    queue = [root_pid]
+    while queue:
+        for child in children.get(queue.pop(), []):
+            out.append(child)
+            queue.append(child)
+    return out
+
+
+def _kill_wedged_children(root_pid: int) -> list[int]:
+    """SIGKILL descendant processes that look like the MCP/Playwright stack
+    (node/npx). Killing them closes the stdio pipes a hung teardown is
+    blocked on, letting asyncio.run() finally return and release the browser
+    flock."""
+    killed: list[int] = []
+    for pid in _descendant_pids(root_pid):
+        try:
+            cmdline = (Path("/proc") / str(pid) / "cmdline").read_bytes().lower()
+        except OSError:
+            continue
+        if any(m in cmdline for m in _CHILD_MARKERS):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except OSError:
+                pass
+    return killed
 
 
 class Logger:
@@ -806,9 +953,26 @@ def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: P
             log.line(f"[agent] TIMEOUT after {timeout_seconds}s")
             return 124, "Timed out before reaching a conclusion."
 
+    # Teardown watchdog: see TEARDOWN_GRACE_SECONDS. Fires only when the run
+    # has blown past its wall-clock timeout AND the grace on top of it -- at
+    # that point the MCP subprocess is wedged and holding everything hostage.
+    def _watchdog_fire() -> None:
+        killed = _kill_wedged_children(os.getpid())
+        try:
+            log.line(f"[agent] WATCHDOG: teardown wedged "
+                     f"{TEARDOWN_GRACE_SECONDS}s past timeout; killed MCP "
+                     f"child pids {killed or '(none found)'}")
+        except Exception:  # noqa: BLE001 - the kill is what matters
+            pass
+
+    watchdog = threading.Timer(timeout_seconds + TEARDOWN_GRACE_SECONDS,
+                               _watchdog_fire)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         rc, final_text = asyncio.run(_with_timeout())
     finally:
+        watchdog.cancel()
         log.close()
 
     outcome = _parse_outcome(final_text, rc)

@@ -1,21 +1,30 @@
-"""Periodic health checks that email you when action is needed:
+"""Periodic health checks that alert (web push + email) when action is needed:
 
   1. Low DeepSeek credit  — so applications don't silently stop.
-  2. Stekkies session expired — so you can re-login (the server can't read new
-     listings without it). Source-site logins are surfaced reactively per-listing
-     via the login_required / no_source_url outcome emails.
+  2. Session expired on Stekkies or a top apply site — so you can re-login
+     before listings are lost to login_required outcomes.
+  3. A pipeline systemd service is not running — a crash-looping orchestrator
+     means every alert mail is being silently dropped (happened 04..07-07-2026:
+     Gmail token revoked, 1136 restarts, 3 days of lost listings, and no email
+     alert could reach the user because email needs that same token; push +
+     this check close that hole).
 
-Alerts are de-duped via state/alerts.json: one email when a problem appears, and
-it re-arms once the problem clears. Run periodically (systemd timer):
+Alerts are de-duped via state/alerts.json: one alert when a problem appears,
+re-armed once the problem clears. Optionally pings a dead-man's-switch URL
+(HEALTHCHECK_PING_URL, e.g. healthchecks.io) at the end of every run so a
+dead VPS/timer also gets noticed — by the ping *stopping*.
+Run periodically (systemd timer):
 
   python -m src.healthcheck
 """
 import json
 import os
+import subprocess
 import urllib.request
 
 from .config import PROJECT_ROOT, CDP_URL
 from .notify import send_alert
+from .poller.browser_lock import browser_lock
 
 ALERTS_FILE = PROJECT_ROOT / "state" / "alerts.json"
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -23,6 +32,36 @@ CREDIT_CURRENCY = os.environ.get("CREDIT_CURRENCY", "USD").upper()
 CREDIT_THRESHOLD = float(os.environ.get("CREDIT_THRESHOLD", os.environ.get("CREDIT_THRESHOLD_USD", "2")))
 CREDIT_THRESHOLD_USD = CREDIT_THRESHOLD  # backward-compatible import for older code
 SERVER_HINT = os.environ.get("SERVER_SSH", "root@your-server-ip")
+
+# systemd units that must be active for the pipeline to work at all.
+SERVICES = tuple(
+    s.strip() for s in os.environ.get(
+        "HEALTHCHECK_SERVICES",
+        "orchestrator,poller,browser-host,litellm-proxy").split(",")
+    if s.strip()
+)
+
+# Dead-man's-switch: GET this URL at the end of every healthcheck run (e.g. a
+# healthchecks.io check). The monitoring service alerts when pings STOP —
+# covering the failure class nothing on this box can report: the box itself.
+PING_URL = os.environ.get("HEALTHCHECK_PING_URL", "")
+
+# Sites whose logged-in session the apply agent depends on. Each probe opens
+# an account-only page in the REAL shared browser (so it sees the profile's
+# actual cookies) and applies the logged-out heuristic below. Extend via
+# HEALTHCHECK_SITE_PROBES='{"name": "https://account-url", ...}'.
+# 6 listings were lost to login_required outcomes (huurwoningen.nl x4,
+# huurexpert.nl x2) before this existed — each one a prime, mail-alerted
+# listing burned on an expired session nothing was watching.
+SITE_PROBES: dict[str, str] = {
+    "stekkies": "https://www.stekkies.com/en/profiles/matches/",
+    "huurwoningen.nl": "https://www.huurwoningen.nl/mijn-huurwoningen/",
+    "kamernet.nl": "https://kamernet.nl/en/my-kamernet",
+}
+try:
+    SITE_PROBES.update(json.loads(os.environ.get("HEALTHCHECK_SITE_PROBES", "{}")))
+except (json.JSONDecodeError, TypeError):
+    print("[health] ignoring malformed HEALTHCHECK_SITE_PROBES")
 
 
 def _load() -> dict:
@@ -86,50 +125,137 @@ def check_credits(state: dict) -> None:
         state["low_credit_sent"] = False
 
 
-def check_stekkies_login(state: dict) -> None:
+def check_services(state: dict) -> None:
+    """Alert when a pipeline systemd unit is not active (crash loop, dead)."""
+    # The canonical "is systemd actually running here" check — without it a
+    # non-systemd host (local WSL dev) reads the bus failure as "everything
+    # is down" and fires alerts for services that were never supposed to run.
+    if not os.path.isdir("/run/systemd/system"):
+        print("[health] not a systemd host; skipping service checks")
+        return
+    for svc in SERVICES:
+        try:
+            rc = subprocess.run(
+                ["systemctl", "is-active", "--quiet", svc],
+                timeout=15,
+            ).returncode
+        except FileNotFoundError:
+            print("[health] systemctl not available; skipping service checks")
+            return
+        except Exception as e:  # noqa: BLE001 - one check must not kill the run
+            print(f"[health] service check error for {svc}: {e}")
+            continue
+        key = f"service_down_sent:{svc}"
+        if rc != 0:
+            print(f"[health] service {svc} NOT active (rc={rc})")
+            if not state.get(key):
+                send_alert(
+                    f"🚨 Stekkies bot: service {svc} is DOWN",
+                    f"systemd reports `{svc}` is not active. While it is down "
+                    "this part of the pipeline processes nothing.\n\n"
+                    f"  ssh {SERVER_HINT} 'systemctl status {svc}'\n"
+                    f"  ssh {SERVER_HINT} 'journalctl -u {svc} -n 50'\n\n"
+                    "If the orchestrator is failing with invalid_grant, the "
+                    "Gmail token died — run `just reauth` from the repo.\n",
+                )
+                state[key] = True
+        else:
+            state[key] = False
+
+
+def _logged_out_heuristic(page) -> bool:
+    """Shared logged-out signal: the account page bounced to a login flow or
+    is showing a password prompt."""
+    url = page.url.lower()
+    if any(m in url for m in ("/login", "inloggen", "aanmelden", "/signin")):
+        return True
+    try:
+        return page.locator("input[type=password]").count() > 0
+    except Exception:
+        return False
+
+
+def check_site_logins(state: dict) -> None:
+    """Probe each SITE_PROBES account page in the real shared browser.
+
+    Takes the browser lock with a SHORT timeout: when an apply run is in
+    flight the checks are simply skipped until the next timer tick — a
+    healthcheck must never queue behind (or interleave tabs with) a live
+    submission. (The pre-existing Stekkies check drove the shared browser
+    without the lock at all; this also fixes that.)
+    """
     from playwright.sync_api import sync_playwright
 
-    logged_out = None
+    results: dict[str, bool] = {}
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = ctx.new_page()
-            try:
-                page.goto("https://www.stekkies.com/en/profiles/matches/",
-                          wait_until="domcontentloaded")
-                page.wait_for_timeout(1500)
-                has_pw = page.locator("input[type=password]").count() > 0
-                logged_out = ("/login" in page.url) or has_pw
-            finally:
-                page.close()
-                browser.close()
-    except Exception as e:
-        print(f"[health] stekkies login check error: {e}")
+        with browser_lock(timeout=60, holder="healthcheck"):
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(CDP_URL)
+                try:
+                    ctx = (browser.contexts[0] if browser.contexts
+                           else browser.new_context())
+                    for name, probe_url in SITE_PROBES.items():
+                        page = ctx.new_page()
+                        try:
+                            page.goto(probe_url, wait_until="domcontentloaded",
+                                      timeout=30000)
+                            page.wait_for_timeout(1500)
+                            results[name] = _logged_out_heuristic(page)
+                        except Exception as e:  # noqa: BLE001 - per-site best effort
+                            print(f"[health] login probe error for {name}: {e}")
+                        finally:
+                            page.close()
+                finally:
+                    browser.close()
+    except TimeoutError:
+        print("[health] browser busy (apply in progress?); skipping login checks")
         return
-    print(f"[health] stekkies logged_out={logged_out}")
-    if logged_out:
-        if not state.get("stekkies_logout_sent"):
-            send_alert(
-                "\U0001f511 Stekkies bot: session expired — re-login needed",
-                "The server's Stekkies session looks logged out, so new listings "
-                "cannot be read. Re-login via VNC:\n\n"
-                f"  ssh {SERVER_HINT} 'systemctl start vnc.service'\n"
-                f"  ssh -L 5900:localhost:5900 {SERVER_HINT}\n"
-                "  # connect a VNC viewer to localhost:5900, log into Stekkies "
-                "(and Google), then:\n"
-                f"  ssh {SERVER_HINT} 'systemctl stop vnc.service'\n",
-            )
-            state["stekkies_logout_sent"] = True
-    else:
-        state["stekkies_logout_sent"] = False
+    except Exception as e:
+        print(f"[health] login checks error: {e}")
+        return
+
+    for name, logged_out in results.items():
+        print(f"[health] {name} logged_out={logged_out}")
+        key = f"logout_sent:{name}"
+        if logged_out:
+            if not state.get(key):
+                send_alert(
+                    f"🔑 Stekkies bot: {name} session expired — re-login needed",
+                    f"The server's {name} session looks logged out. Until you "
+                    "re-login, applications on this site fail with "
+                    "login_required (mail-alerted listings included).\n"
+                    "Re-login via VNC:\n\n"
+                    f"  ssh {SERVER_HINT} 'systemctl start vnc.service'\n"
+                    f"  ssh -L 5900:localhost:5900 {SERVER_HINT}\n"
+                    f"  # connect a VNC viewer to localhost:5900, log into "
+                    f"{name} (credentials: state/sources_credentials.json), then:\n"
+                    f"  ssh {SERVER_HINT} 'systemctl stop vnc.service'\n",
+                )
+                state[key] = True
+        else:
+            state[key] = False
+
+
+def ping_deadman() -> None:
+    """Tell the external dead-man's switch this healthcheck ran. Its absence —
+    box down, timer broken, repo wedged — is what actually raises the alarm,
+    on infrastructure that does not share fate with this VPS."""
+    if not PING_URL:
+        return
+    try:
+        urllib.request.urlopen(PING_URL, timeout=10)
+        print("[health] dead-man ping sent")
+    except Exception as e:  # noqa: BLE001 - the ping must never fail the run
+        print(f"[health] dead-man ping failed: {e}")
 
 
 def main() -> int:
     state = _load()
     check_credits(state)
-    check_stekkies_login(state)
+    check_services(state)
+    check_site_logins(state)
     _save(state)
+    ping_deadman()
     return 0
 
 

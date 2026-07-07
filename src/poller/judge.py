@@ -41,10 +41,17 @@ _SYSTEM = (
     "Treat service costs/inclusive rent conservatively: reject only when the "
     "monthly rent is clearly below the minimum or above the maximum.\n"
     f"4. The living area is clearly below {MIN_SURFACE:.0f} m2.\n"
-    "Use the structured fields first. Also read the title/address/url/type for "
-    "obvious clues. If price or surface is unknown or ambiguous, do not reject "
-    "on that criterion. If you are unsure overall, answer ok=true. Never reject "
-    "for any other reason."
+    "5. The description explicitly RESTRICTS eligibility to a group the "
+    "applicant is not — students only, seniors/55+ only — or is explicitly "
+    "temporary/short-stay with a maximum stay under 6 months. The applicant "
+    "is a working professional in loondienst (not a student, not a senior) "
+    "seeking a long-term home. NB: a listing that merely EXCLUDES students "
+    "('studenten behoren niet tot onze doelgroep') is fine — do not reject "
+    "for that.\n"
+    "Use the structured fields first. Also read the title/address/url/type/"
+    "description for obvious clues. If price or surface is unknown or "
+    "ambiguous, do not reject on that criterion. If you are unsure overall, "
+    "answer ok=true. Never reject for any other reason."
 )
 
 
@@ -77,6 +84,7 @@ async def judge(listing: RawListing, model: str = JUDGE_MODEL) -> tuple[bool, st
         "price_eur_per_month": listing.price,
         "surface_m2": listing.surface,
         "type": listing.listing_type,
+        "description": listing.description[:1500],
     }, ensure_ascii=False)
 
     try:

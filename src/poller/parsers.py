@@ -125,6 +125,10 @@ def _walk_ld(node, base_url: str, out: list[RawListing]) -> None:
         address=address_str or str(node.get("name", "")),
         surface=surface,
         listing_type=" ".join(sorted(types_l)),
+        # Detail pages publish the full body text here (verified: huurportaal
+        # RealEstateListing nodes carry ~2k chars) — feeds the deterministic
+        # eligibility veto + the judge + the apply prompt.
+        description=str(node.get("description", ""))[:6000],
     ))
 
 

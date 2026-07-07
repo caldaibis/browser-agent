@@ -43,5 +43,43 @@ class TestNotify(unittest.TestCase):
         execute.assert_called_once()
 
 
+class TestSendAlertDedup(unittest.TestCase):
+    def test_rate_limits_per_key(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dedup_file = Path(tmp) / "alert_dedup.json"
+            with patch.object(notify, "ALERT_DEDUP_FILE", dedup_file), \
+                    patch.object(notify, "send_alert") as send_alert:
+                self.assertTrue(notify.send_alert_dedup("k", "s", "b"))
+                self.assertFalse(notify.send_alert_dedup("k", "s", "b"))
+                # A different key is independent.
+                self.assertTrue(notify.send_alert_dedup("k2", "s", "b"))
+            self.assertEqual(send_alert.call_count, 2)
+
+    def test_interval_expiry_re_arms(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dedup_file = Path(tmp) / "alert_dedup.json"
+            with patch.object(notify, "ALERT_DEDUP_FILE", dedup_file), \
+                    patch.object(notify, "send_alert"):
+                self.assertTrue(notify.send_alert_dedup("k", "s", "b",
+                                                        min_interval_s=0.0))
+                self.assertTrue(notify.send_alert_dedup("k", "s", "b",
+                                                        min_interval_s=0.0))
+
+    def test_alert_pushes_before_email(self):
+        with patch.object(notify, "get_service") as get_service:
+            get_service.side_effect = RuntimeError("gmail token dead")
+            with patch("src.push_notify.send_push") as send_push:
+                # Must not raise, and the push must go out even though the
+                # email path is dead (the 04-07-2026 failure mode).
+                notify.send_alert("subject", "body")
+            send_push.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

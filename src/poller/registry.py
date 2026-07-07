@@ -117,6 +117,14 @@ REGISTRY: list[SiteConfig] = [
     # househunting.nl outsources its listing display to huurwoningen.nl (its
     # /woningaanbod links out to huurwoningen.nl), which is already covered above.
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
+    # rebogroep.nl: the agency behind 4 of the first 38 real submissions — it
+    # clearly carries Utrecht stock, but until now it was only discovered
+    # indirectly (and late) via huurportaal/huurwoningen aggregator pages.
+    # Server HTML has no listing anchors (client-side rendered; verified
+    # 07-07-2026), so tier-3: render in the shared browser and scrape the
+    # /nl/aanbod/<uuid>-<slug> detail links.
+    _tier3("rebogroep.nl", "https://www.rebogroep.nl/nl/aanbod",
+           parse=make_anchor_parser(r"/nl/aanbod/[0-9a-f]{8}-[0-9a-f-]{27}[a-z0-9-]*")),
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
     _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",
            parse=make_anchor_parser(r"/woning/[0-9a-f]{16,}")),   # VALIDATED: 94, no login

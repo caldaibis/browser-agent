@@ -171,6 +171,60 @@ async def dom_scan(cdp_url: str, settle_ms: int = 500, current_url: str | None =
             await browser.close()
 
 
+# Cookie/consent buttons, most-preferred first. Pass 1 accepts everything in
+# one click (multi-word phrases + well-known CMP button ids only -- a bare
+# "Akkoord"/"Accepteren" could hit a real form button). Pass 2 closes a
+# preferences-style dialog ("Opslaan en sluiten" -- the exact overlay that
+# ate a run's final turns on huurportaal/rebogroep, 05-07-2026).
+_COOKIE_ACCEPT_SELECTORS = [
+    "#onetrust-accept-btn-handler",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "#didomi-notice-agree-button",
+    ".cmplz-accept",
+] + [
+    f'{base}:has-text("{t}")'
+    for t in ("Alles accepteren", "Accepteer alles", "Accepteer alle cookies",
+              "Alle cookies toestaan", "Alles toestaan", "Cookies accepteren",
+              "Accept all", "Allow all cookies")
+    for base in ("button", "[role=button]", "a")
+]
+_COOKIE_CLOSE_SELECTORS = [
+    f'{base}:has-text("{t}")'
+    for t in ("Opslaan en sluiten", "Sluiten en doorgaan", "Save and close")
+    for base in ("button", "[role=button]", "a")
+]
+
+
+async def dismiss_cookie_banner(cdp_url: str, current_url: str | None = None) -> str | None:
+    """Deterministically click away a cookie/consent banner on the current
+    page, if one is present. Returns a short note when something was
+    dismissed, None when nothing matched (the common case, and cheap).
+
+    Called automatically after every navigation (browser_agent) so consent
+    overlays -- which intercept ALL clicks until dealt with -- never cost
+    LLM turns. Fixed, narrow operation like the other helpers here: it only
+    ever clicks a known consent-accept/close control.
+    """
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        try:
+            page = await current_page(browser, hint_url=current_url)
+            for kind, selectors in (("accepted", _COOKIE_ACCEPT_SELECTORS),
+                                    ("closed", _COOKIE_CLOSE_SELECTORS)):
+                loc = page.locator(", ".join(selectors)).first
+                try:
+                    await loc.click(timeout=1200)
+                    await page.wait_for_timeout(400)
+                    return f"{kind} a cookie/consent banner"
+                except Exception:  # noqa: BLE001 - absence is the normal case
+                    continue
+            return None
+        finally:
+            await browser.close()
+
+
 async def click_by_text(cdp_url: str, text: str, settle_ms: int = 600, current_url: str | None = None) -> str:
     """Connect over CDP and click the first element whose visible text
     matches, bypassing the accessibility-tree ref system entirely -- for

@@ -4,6 +4,7 @@ Run:  python -m src.orchestrator            # live watch loop
       python -m src.orchestrator --once URL # process one Stekkies URL and exit
 """
 import json
+import os
 import sys
 import time
 import traceback
@@ -16,8 +17,24 @@ from .stekkies import extract_listing
 from .apply import apply
 from .gmail_watch import message_received_ts, mark_read, watch_events
 from .poller.dedup import active_claim_keys, canonical_url
-from .notify import send_status_email
+from .notify import send_alert_dedup, send_status_email
 from .self_improvement_agent import improve_after_apply, improve_exception
+
+# How long to sleep before re-entering the Gmail watch loop after it dies.
+# Long enough not to hammer a dead token (the failure will not self-heal),
+# short enough to resume within minutes once the user fixes it.
+WATCH_RETRY_SECONDS = int(os.environ.get("WATCH_RETRY_SECONDS", "300"))
+
+
+def _alert_no_credit() -> None:
+    send_alert_dedup(
+        "no_credit",
+        "💸 Stekkies bot: OUT of DeepSeek credit — applies are stopping",
+        "An apply run was refused with HTTP 402 (insufficient balance). "
+        "Mail listings stay UNREAD and are retried after a restart, but "
+        "nothing submits until you top up:\n"
+        "  https://platform.deepseek.com/top_up\n",
+    )
 
 
 PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
@@ -143,6 +160,23 @@ def process_source(listing: dict, msg_id: str | None = None,
             result = apply(listing)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
+        if result.outcome == "no_credit":
+            # The LLM refused for lack of credit: no attempt was made on the
+            # listing. Leave the mail UNREAD and skip the processed record so
+            # a service restart after topping up retries it — otherwise every
+            # mail-alerted listing during a credit outage was burned forever.
+            _alert_no_credit()
+            return _finish(
+                msg_id=msg_id,
+                trigger=trigger,
+                msg_received_ts=msg_received_ts,
+                source_url=source_url,
+                source=source,
+                address=address,
+                status="no_credit",
+                mark_read=False,
+                message=result.summary,
+            )
         improve_after_apply(
             listing=listing,
             result=result,
@@ -260,6 +294,22 @@ def process(stekkies_url: str, msg_id: str | None = None,
             result = apply(d)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
+        if result.outcome == "no_credit":
+            # See process_source: not an attempt; leave unread, retry after
+            # top-up + restart.
+            _alert_no_credit()
+            return _finish(
+                msg_id=msg_id,
+                trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+                msg_received_ts=received_ts,
+                stekkies_url=stekkies_url,
+                source_url=listing.source_url,
+                source=listing.source_name,
+                address=listing.address,
+                status="no_credit",
+                mark_read=False,
+                message=result.summary,
+            )
         improve_after_apply(
             listing=d,
             result=result,
@@ -314,57 +364,97 @@ def process(stekkies_url: str, msg_id: str | None = None,
         )
 
 
+def _handle_event(ev) -> None:
+    msg_id = ev.msg_id
+    if not ev.url:
+        result = _finish(
+            msg_id=msg_id,
+            trigger=ev.trigger,
+            msg_received_ts=ev.received_ts or message_received_ts(msg_id),
+            status="no_listing_link",
+            mark_read=True,
+            message=f"{ev.provider} email matched the Gmail query but no listing link was found.",
+        )
+    elif ev.provider == "stekkies":
+        result = process(ev.url, msg_id=msg_id, trigger=ev.trigger)
+    elif ev.provider == "huurwoningen":
+        listing = {
+            "source_url": ev.url,
+            "source_name": "huurwoningen.nl",
+            "address": ev.address or ev.subject or "?",
+            "price": ev.price or "?",
+        }
+        result = process_source(
+            listing,
+            msg_id=msg_id,
+            trigger=ev.trigger,
+            msg_received_ts=ev.received_ts or message_received_ts(msg_id),
+        )
+    else:
+        result = _finish(
+            msg_id=msg_id,
+            trigger=ev.trigger,
+            msg_received_ts=ev.received_ts or message_received_ts(msg_id),
+            status="no_listing_link",
+            mark_read=True,
+            message=f"Unsupported Gmail provider: {ev.provider}",
+        )
+    if result.get("mark_read"):
+        try:
+            mark_read(msg_id)
+            _log("mail_marked_read", msg_id=msg_id, status=result.get("status"))
+        except Exception as e:
+            _log("mail_mark_read_failed", msg_id=msg_id, error=str(e))
+            _activity(
+                f"mail={msg_id} status=mark_read_failed source=unknown source "
+                f"address=unknown address - {type(e).__name__}: {e}"
+            )
+
+
 def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == "--once":
         process(sys.argv[2])
         return 0
     _log("watcher_started")
-    for ev in watch_events():
-        msg_id = ev.msg_id
-        if not ev.url:
-            result = _finish(
-                msg_id=msg_id,
-                trigger=ev.trigger,
-                msg_received_ts=ev.received_ts or message_received_ts(msg_id),
-                status="no_listing_link",
-                mark_read=True,
-                message=f"{ev.provider} email matched the Gmail query but no listing link was found.",
-            )
-        elif ev.provider == "stekkies":
-            result = process(ev.url, msg_id=msg_id, trigger=ev.trigger)
-        elif ev.provider == "huurwoningen":
-            listing = {
-                "source_url": ev.url,
-                "source_name": "huurwoningen.nl",
-                "address": ev.address or ev.subject or "?",
-                "price": ev.price or "?",
-            }
-            result = process_source(
-                listing,
-                msg_id=msg_id,
-                trigger=ev.trigger,
-                msg_received_ts=ev.received_ts or message_received_ts(msg_id),
-            )
-        else:
-            result = _finish(
-                msg_id=msg_id,
-                trigger=ev.trigger,
-                msg_received_ts=ev.received_ts or message_received_ts(msg_id),
-                status="no_listing_link",
-                mark_read=True,
-                message=f"Unsupported Gmail provider: {ev.provider}",
-            )
-        if result.get("mark_read"):
-            try:
-                mark_read(msg_id)
-                _log("mail_marked_read", msg_id=msg_id, status=result.get("status"))
-            except Exception as e:
-                _log("mail_mark_read_failed", msg_id=msg_id, error=str(e))
-                _activity(
-                    f"mail={msg_id} status=mark_read_failed source=unknown source "
-                    f"address=unknown address - {type(e).__name__}: {e}"
+    # The watch loop must survive Gmail failures INSIDE the process: exiting
+    # on an expired/revoked token put systemd into a silent 10-second crash
+    # loop for 3 days (04..07-07-2026, restart counter 1136) — no mail was
+    # processed and, since alert email needs that same token, nothing could
+    # say so. Alert via push (rate-limited) and retry with a real backoff;
+    # a revoked token won't heal itself, but the alert now reaches a human.
+    while True:
+        try:
+            for ev in watch_events():
+                _handle_event(ev)
+            return 0
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:  # noqa: BLE001 - keep the service alive, alert loudly
+            auth_dead = ("invalid_grant" in str(e)
+                         or type(e).__name__ == "RefreshError")
+            _log("watch_error", error=f"{type(e).__name__}: {e}",
+                 gmail_auth=auth_dead, retry_in_s=WATCH_RETRY_SECONDS)
+            traceback.print_exc()
+            if auth_dead:
+                send_alert_dedup(
+                    "gmail_auth_dead",
+                    "🚨 Stekkies bot: Gmail token dead — mail path is DOWN",
+                    "Gmail refused the refresh token (invalid_grant). NO mail-"
+                    "triggered applies run until you re-authorize:\n\n"
+                    "  just reauth\n\n"
+                    "If this keeps happening weekly, the Google OAuth app is "
+                    "still in Testing status — publish it to Production so "
+                    "refresh tokens stop expiring after 7 days.",
                 )
-    return 0
+            else:
+                send_alert_dedup(
+                    "orchestrator_watch_error",
+                    "⚠️ Stekkies bot: mail watch loop crashed — retrying",
+                    f"{type(e).__name__}: {e}\n"
+                    f"Retrying in {WATCH_RETRY_SECONDS}s. See the orchestrator "
+                    "journal for the traceback.",
+                )
+            time.sleep(WATCH_RETRY_SECONDS)
 
 
 if __name__ == "__main__":

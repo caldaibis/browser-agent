@@ -167,8 +167,22 @@ form, uploads docs, submits).
   (orchestrator/poller). Enable per device: open the dashboard, click 🔔 once.
   Env: `WEB_PUSH_ENABLED=0` to disable, `WEB_PUSH_OUTCOMES` (default
   `submitted`) to widen.
-- `src/healthcheck.py` (+ systemd timer, 30 min) — emails when DeepSeek credit
-  is low or the Stekkies session has expired. `remaining_credit()` shared here.
+- `src/healthcheck.py` (+ systemd timer, 30 min) — alerts (push + email) when:
+  DeepSeek credit is low; a pipeline systemd unit is down (orchestrator/poller/
+  browser-host/litellm-proxy — a crash-looping orchestrator is otherwise
+  invisible, see hard-won lessons); or a session expired on Stekkies or a top
+  apply site (`SITE_PROBES`: huurwoningen.nl, kamernet.nl — extend via
+  `HEALTHCHECK_SITE_PROBES` JSON). Site probes run in the real shared browser
+  under `browser_lock(timeout=60)` and are skipped when an apply is in flight.
+  Optionally GETs `HEALTHCHECK_PING_URL` (dead-man's switch, e.g.
+  healthchecks.io) at the end of each run — its *absence* alerts on total-box
+  death. `remaining_credit()` shared here.
+- `src/listing_context.py` — one cheap httpx GET of a listing's own detail
+  page (JSON-LD): description/price/surface. Used by `poller.watcher._enrich`
+  (anchor-parser sites yield URL-only listings, so the filter/judge were
+  blind on them) and by `apply.build_prompt` (description + aggregator
+  warning in the prompt up front). Strictly fail-open; tier-3 pages just
+  fail the fetch and nothing changes.
 - `src/dashboard/` — FastAPI + htmx/Chart.js read-only dashboard (stats, per-run
   redacted transcripts, health, safe actions) behind Caddy (HTTPS + Basic Auth).
 - `justfile` — every workflow as a `just` command (local + VPS ops + secret push).
@@ -253,6 +267,38 @@ form, uploads docs, submits).
   redacts them and never serves `*.prompt.txt`. Don't undo that.
 
 ## Hard-won lessons (don't relearn these)
+- **Alerting must not share a failure mode with what it monitors.** The Gmail
+  refresh token was revoked on 04-07-2026; the orchestrator crash-looped 1136
+  times over 3+ days and NO alert could reach the user because alert email
+  used that same dead token. Fixes: `notify.send_alert` pushes (web push)
+  BEFORE emailing; the orchestrator's watch loop catches Gmail failures
+  in-process (alert + `WATCH_RETRY_SECONDS` backoff, no systemd crash loop);
+  the healthcheck checks unit liveness and supports a dead-man ping. NB: a
+  Google OAuth app in *Testing* status expires refresh tokens every 7 days —
+  publish it to Production or this recurs weekly.
+- **asyncio's default executor is tiny and DNS shares it.** `asyncio.to_thread`
+  AND `loop.getaddrinfo` both use the loop's default executor (8 threads on a
+  4-vCPU box). ~13 tier-3 watchers parking threads on the browser flock
+  starved DNS, so every pending httpx connect timed out AT ONCE — 10k+
+  ConnectTimeout poll_errors/day, ~80% of tier-2 polls silently lost
+  (diagnosed 07-07-2026 from all-sites-simultaneous timeout bursts). Fixes:
+  a 64-thread default executor (`POLL_EXECUTOR_THREADS`), tier-3 polls give
+  up on the lock after `POLL_TIER3_LOCK_TIMEOUT` (120s) instead of queueing
+  30 min, and startup polls are staggered.
+- **`asyncio.wait_for` cannot unwedge a hung MCP teardown.** It only cancels
+  the task; the cancellation still unwinds `stdio_client.__aexit__`, which
+  waits on the npx process — if that ignores closed stdin, `asyncio.run()`
+  blocks forever holding the browser flock (03-07-2026: 9+ hours, eight
+  consecutive mail applies starved out at 1800s each). `run_agent` now arms a
+  `threading.Timer` watchdog that SIGKILLs wedged MCP descendants
+  `APPLY_TEARDOWN_GRACE_SECONDS` (120s) past the wall-clock timeout, and
+  `browser_lock` records its holder + pushes an alert after a 300s wait.
+- **HTTP 402 (out of credit) is not a verdict on the listing.** Every apply
+  outcome used to consume the listing (one-attempt rule) — so during a credit
+  outage every listing that dropped was burned forever as "error". outcome
+  `no_credit` (rc=126) is now a third carve-out alongside `yielded` and the
+  browser-lock timeout: poller releases the claim, orchestrator leaves the
+  mail unread, both alert (rate-limited via `notify.send_alert_dedup`).
 - **Model:** `deepseek-v4-pro` is the default apply model. Keep
   `gemini-3.5-flash` avoided; it falls into degenerate loops (e.g. ArrowDown ×30).
 - **Reasoning truncation = silent stall.** Reasoning models can emit hidden
@@ -393,6 +439,18 @@ form, uploads docs, submits).
 - **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
   accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
   These are real states to report, not bugs — stop early and label them.
+- **Hard published eligibility gates are readable at poll time.** Full agent
+  runs were spent opening the browser just to read "ALLEEN BESCHIKBAAR VOOR
+  STUDENTEN" (huurportaal, 02-07-2026, twice in one day).
+  `filters.hard_exclusion` vetoes students-only/seniors-only/short-stay
+  listings deterministically from the title+description (sentence-scoped so
+  "geen studenten" — students *excluded*, fine for us — never triggers), the
+  judge gets the description + matching criteria, and
+  `browser_agent`'s turn budget grants one `APPLY_GRACE_TURNS` extension when
+  the run is demonstrably mid-form (two runs died at turn 60 one dropdown from
+  submitting — under one-attempt, that consumed the listings forever). A
+  deterministic cookie-banner sweep (`dismiss_cookie_banner`) runs after every
+  navigation so consent overlays never cost LLM turns.
 - **Gmail listing mails:** from `help@stekkies.com`; the listing link is a
   hex-hash `http://www.stekkies.com/.../redirect/<hash>` and the body is
   quoted-printable (must QP-decode before regex).

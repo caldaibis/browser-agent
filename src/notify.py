@@ -6,15 +6,21 @@ your cached token predates it.
 
 Disable with NOTIFY_ENABLED=0.
 """
+import json
 import os
+import time
 from email.message import EmailMessage
 from base64 import urlsafe_b64encode
 
+from .config import PROJECT_ROOT
 from .gmail_watch import get_service
 
 NOTIFY_TO = os.environ.get("NOTIFY_TO", "you@example.com")
 NOTIFY_ENABLED = os.environ.get("NOTIFY_ENABLED", "1") != "0"
 STATUS_EMAIL_OUTCOMES = {"submitted"}
+
+# Rate-limit bookkeeping for send_alert_dedup (key -> last-sent epoch).
+ALERT_DEDUP_FILE = PROJECT_ROOT / "state" / "alert_dedup.json"
 
 # outcome -> (emoji, human label)
 _OUTCOME = {
@@ -27,6 +33,7 @@ _OUTCOME = {
     "timeout":         ("❌", "Timed out"),
     "incomplete":      ("❌", "Incomplete"),
     "error":           ("❌", "Error"),
+    "no_credit":       ("💸", "Out of API credit"),
 }
 
 
@@ -55,7 +62,19 @@ def _body(rec: dict) -> str:
 
 
 def send_alert(subject: str, body: str) -> None:
-    """Best-effort plain alert email (low credit, login expired, …)."""
+    """Best-effort plain alert (low credit, login expired, service down, …).
+
+    Web push goes out FIRST and independently of the email: the Gmail token
+    is itself one of the things that fails (verified 04..07-07-2026: the
+    token was revoked, the orchestrator crash-looped for 3 days, and the
+    healthcheck's alert email about it could never be sent because it used
+    the same dead token). Push has no shared failure mode with Gmail.
+    """
+    try:
+        from .push_notify import send_push
+        send_push(title=subject, body=body[:300], tag="alert")
+    except Exception as e:  # pragma: no cover - alerts are best-effort
+        print(f"[notify] alert push failed: {e}")
     if not NOTIFY_ENABLED:
         return
     try:
@@ -69,6 +88,34 @@ def send_alert(subject: str, body: str) -> None:
         print(f"[notify] alert sent: {subject}")
     except Exception as e:  # pragma: no cover
         print(f"[notify] alert send failed: {e}")
+
+
+def send_alert_dedup(key: str, subject: str, body: str,
+                     min_interval_s: float = 3600.0) -> bool:
+    """send_alert, rate-limited per ``key``: at most one alert per
+    ``min_interval_s`` seconds. For conditions that would otherwise fire on
+    every poll/turn/listing (browser lock contention, credit exhaustion, a
+    zero-yield site) — one push per hour beats forty. Never raises; returns
+    whether the alert was actually sent."""
+    now = time.time()
+    state: dict = {}
+    try:
+        state = json.loads(ALERT_DEDUP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    try:
+        if now - float(state.get(key, 0)) < min_interval_s:
+            return False
+    except (TypeError, ValueError):
+        pass
+    state[key] = now
+    try:
+        ALERT_DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ALERT_DEDUP_FILE.write_text(json.dumps(state), encoding="utf-8")
+    except Exception as e:  # pragma: no cover - bookkeeping is best-effort
+        print(f"[notify] alert dedup state write failed: {e}")
+    send_alert(subject, body)
+    return True
 
 
 def send_status_email(rec: dict) -> None:

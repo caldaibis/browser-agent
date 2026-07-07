@@ -18,6 +18,7 @@ from . import site_playbooks
 from .apply_priority import priority_pending
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
 from .credentials import available_domains
+from .listing_context import fetch_context, is_aggregator
 from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .applicant_profile import PROFILE, INCOME_TOLERANCE
 from .browser_agent import run_agent, AgentResult
@@ -78,6 +79,41 @@ def _doc_list() -> str:
         entries.append((prio, secondary, p, purpose))
     entries.sort(key=lambda e: (e[0], e[1]))
     return "\n".join(f"  - {p} — {purpose}" for _prio, _sec, p, purpose in entries)
+
+
+def _listing_details_clause(listing: dict) -> str:
+    """Pre-fetched listing description + aggregator warning for the prompt.
+
+    The description feeds the eligibility gate up front (runs used to spend
+    their first turns hunting for it in-browser, and short-stay/students-only
+    gates were sometimes only discovered after opening the form). Fail-open:
+    no description, no clause."""
+    description = (listing.get("description") or "").strip()
+    if not description:
+        ctx = fetch_context(listing.get("source_url", ""))
+        if ctx:
+            description = ctx.description
+    clause = ""
+    if description:
+        clause += f"""
+LISTING PAGE DETAILS (pre-fetched from the listing's own page; may be stale --
+the live page always wins). Use this NOW for the eligibility gate and for
+tailoring the application message, instead of spending turns reading the
+description in the browser:
+\"\"\"
+{description[:1800]}
+\"\"\"
+"""
+    if is_aggregator(listing.get("source_url", "")):
+        clause += """
+AGGREGATOR NOTE: this listing URL is on an aggregator site (a shop window).
+The real application usually happens on the landlord/agency's own website,
+reached through THIS listing page's own apply/contact control ("Contact
+landlord", "Reageer", "Bekijk woning"...). Click that control and follow
+where it leads. NEVER go searching the agency's own website for the listing
+by hand -- a previous run burned 55 of its 60 turns doing exactly that.
+"""
+    return clause
 
 
 def build_prompt(listing: dict) -> str:
@@ -169,7 +205,7 @@ STOP immediately and report `OUTCOME: not_eligible`, stating the requirement,
 the applicant's value, and the gap. Only proceed to fill the form when the
 applicant plausibly meets every stated hard requirement. If no requirements are
 stated, proceed normally.
-{playbook_clause}
+{_listing_details_clause(listing)}{playbook_clause}
 YOUR TASK
 1. Open the URL above in the browser.
 2. Run the ELIGIBILITY GATE above. If not eligible, stop now (do not apply).
@@ -330,7 +366,7 @@ def apply(listing: dict, model: str = APPLY_MODEL,
     print(f"[apply] transcript: {transcript}")
     # Exclusive browser lock: only one component drives the shared CDP browser
     # at a time. Coordinates the Stekkies orchestrator and the poller's applier.
-    with browser_lock():
+    with browser_lock(holder=f"apply:{slug}"):
         result = run_agent(
             prompt=prompt,
             model=model,

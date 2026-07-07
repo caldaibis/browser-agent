@@ -26,6 +26,7 @@ class RawListing:
     surface: Optional[float] = None    # m², numeric when known
     listing_type: str = ""             # e.g. "apartment", "room" — raw site label
     title: str = ""
+    description: str = ""              # listing body text when the site publishes it
     detected_by: str = ""              # poller registry site that found it
     detected_ts: str = ""              # when the watcher first qualified it
 
@@ -38,6 +39,7 @@ class RawListing:
             "detected_by": self.detected_by,
             "address": self.address or self.title or "?",
             "price": f"€{self.price:.0f}" if self.price is not None else "?",
+            **({"description": self.description[:4000]} if self.description else {}),
         }
 
 
