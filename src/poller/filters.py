@@ -88,24 +88,14 @@ def hard_exclusion(text: str) -> str | None:
 
 def passes(listing: RawListing) -> tuple[bool, str]:
     """Return (ok, reason). ok=False means a hard, published fact vetoes it."""
-    if listing.price is None and REQUIRE_KNOWN_PRICE:
-        return False, f"price unknown; rent range is €{MIN_RENT:.0f}-€{MAX_RENT:.0f}"
-    if listing.price is not None and listing.price < MIN_RENT:
-        return False, f"price €{listing.price:.0f} < €{MIN_RENT:.0f}"
-    if listing.price is not None and listing.price > MAX_RENT:
-        return False, f"price €{listing.price:.0f} > €{MAX_RENT:.0f}"
-
     # City often lives only in the URL path (e.g. huurwoningen's JSON-LD address
     # is just the street), so include source_url in the haystack. This both
     # rescues real listings whose parsed address lacks a locality AND cheaply
     # vetoes other-city listings (e.g. an ikwilhuren /object/delft-... URL)
     # before they cost an LLM-judge call.
-    haystack = f"{listing.city} {listing.address} {listing.source_url}".lower()
+    haystack = f"{listing.city} {listing.address} {listing.title} {listing.source_url}".lower()
     if CITIES and haystack.strip() and not any(c in haystack for c in CITIES):
         return False, f"city not in {CITIES}: {(listing.city + ' ' + listing.address).strip()!r}"
-
-    if listing.surface is not None and listing.surface < MIN_SURFACE:
-        return False, f"surface {listing.surface:.0f}m² < {MIN_SURFACE:.0f}m²"
 
     label = f"{listing.listing_type} {listing.title}".lower()
     if any(m in label for m in _ROOM_MARKERS):
@@ -114,5 +104,15 @@ def passes(listing: RawListing) -> tuple[bool, str]:
     veto = hard_exclusion(f"{listing.title}\n{listing.description}")
     if veto:
         return False, veto
+
+    if listing.price is None and REQUIRE_KNOWN_PRICE:
+        return False, f"price unknown; rent range is €{MIN_RENT:.0f}-€{MAX_RENT:.0f}"
+    if listing.price is not None and listing.price < MIN_RENT:
+        return False, f"price €{listing.price:.0f} < €{MIN_RENT:.0f}"
+    if listing.price is not None and listing.price > MAX_RENT:
+        return False, f"price €{listing.price:.0f} > €{MAX_RENT:.0f}"
+
+    if listing.surface is not None and listing.surface < MIN_SURFACE:
+        return False, f"surface {listing.surface:.0f}m² < {MIN_SURFACE:.0f}m²"
 
     return True, "ok"

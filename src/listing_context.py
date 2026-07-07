@@ -39,7 +39,8 @@ from .poller.parsers import _num, parse_jsonld
 # conservative: a wrong guess that inflated the price would drop a valid
 # listing, the exact false-negative we are trying to eliminate.
 _MONTHLY_PRICE_RE = re.compile(
-    r"€\s*([\d.,]+)\s*(?:,-\s*)?(?:/\s*mnd|/\s*maand|p\s*/?\s*m\b|per\s+maand)",
+    r"€\s*([\d.,]+)\s*(?:,-\s*)?(?:[^0-9€]{0,50})"
+    r"(?:/\s*mnd|/\s*maand|p\s*/?\s*m\b|per\s+maand|p\.m\.)",
     re.IGNORECASE,
 )
 _RENT_BAND = (300.0, 8000.0)

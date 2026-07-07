@@ -25,11 +25,13 @@ from .applicant_profile import PROFILE, INCOME_TOLERANCE
 from .browser_agent import run_agent, AgentResult
 from .poller.browser_lock import browser_lock
 from .rent_policy import MAX_RENT, parse_rent
+from .site_fastpaths import try_fast_apply
 
 # Model for the apply agent. Override via APPLY_MODEL.
 APPLY_MODEL = os.environ.get("APPLY_MODEL", "deepseek-v4-pro")
 APPLY_MAX_TURNS = int(os.environ.get("APPLY_MAX_TURNS", "60"))
 APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
+APPLY_FASTPATH_ENABLED = os.environ.get("APPLY_FASTPATH_ENABLED", "1") != "0"
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
@@ -251,6 +253,12 @@ Compare each stated HARD requirement against the APPLICANT PROFILE above.
     MORE than {INCOME_TOLERANCE:.0%}, the applicant does NOT qualify. (Within
     {INCOME_TOLERANCE:.0%} of the minimum is acceptable — proceed.) Do the
     arithmetic explicitly before deciding.
+  - SAVINGS / ASSETS: if income is slightly short but the listing text says
+    savings, assets, eigen vermogen, waarborg, guarantor, or a broader
+    financial file may count, proceed and mention the applicant's savings
+    (EUR {PROFILE.savings_amount:,.0f}) plus complete dossier. Only stop for
+    income when the site states a hard minimum that clearly cannot be met and
+    does NOT allow assets/savings to compensate.
   - If the listing excludes students/woningdelers, the applicant is neither, so
     that exclusion does NOT block this application.
 If ANY hard requirement is clearly NOT met, DO NOT fill or submit anything:
@@ -444,16 +452,26 @@ def apply(listing: dict, model: str = APPLY_MODEL,
     # Exclusive browser lock: only one component drives the shared CDP browser
     # at a time. Coordinates the Stekkies orchestrator and the poller's applier.
     with browser_lock(holder=f"apply:{slug}"):
-        result = run_agent(
-            prompt=prompt,
-            model=model,
-            max_turns=APPLY_MAX_TURNS,
-            cdp_url=CDP_URL,
-            log_path=transcript,
-            timeout_seconds=APPLY_TIMEOUT_SECONDS,
-            source_url=listing["source_url"],
-            yield_check=priority_pending if yield_to_priority else None,
-        )
+        result = None
+        if APPLY_FASTPATH_ENABLED:
+            result = try_fast_apply(
+                listing=listing,
+                cdp_url=CDP_URL,
+                log_path=transcript,
+                message=REFERENCE_APPLICATION_MESSAGE.replace(
+                    "[[ADDRESS]]", listing.get("address") or "de woning"),
+            )
+        if result is None:
+            result = run_agent(
+                prompt=prompt,
+                model=model,
+                max_turns=APPLY_MAX_TURNS,
+                cdp_url=CDP_URL,
+                log_path=transcript,
+                timeout_seconds=APPLY_TIMEOUT_SECONDS,
+                source_url=listing["source_url"],
+                yield_check=priority_pending if yield_to_priority else None,
+            )
     # Keep the convenience "latest" copy too.
     try:
         (LOG_DIR / "last_apply_output.txt").write_text(

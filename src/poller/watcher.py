@@ -21,6 +21,7 @@ import os
 import random
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 
@@ -39,6 +40,7 @@ from .registry import by_name, enabled_sites
 POLL_LOG = LOG_DIR / "poller.jsonl"
 MAIL_SUMMARY_LOG = LOG_DIR / "mail_summary.jsonl"
 ACTIVITY_LOG = LOG_DIR / "activity.log"
+ZERO_YIELD_DIR = LOG_DIR / "poller_zero_yield"
 
 # Tier-3 render settle time (ms) after DOM load, for the listing JS to populate.
 SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
@@ -97,6 +99,32 @@ def _activity(message: str) -> None:
     line = f"[{ts}] {message}"
     with ACTIVITY_LOG.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+async def _write_zero_yield_diagnostic(client: httpx.AsyncClient, site: SiteConfig) -> str:
+    """Capture a small sample of what the parser saw when a site yields zero.
+
+    Alerts are useful, but an HTML sample is what makes the next parser fix
+    fast. Best-effort and side-effect-only in logs/.
+    """
+    ZERO_YIELD_DIR.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() or c in ".-" else "-" for c in site.name)
+    path = ZERO_YIELD_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe}.html"
+    try:
+        if site.tier == 3 and site.own_browser:
+            html = await _render_own_browser(site)
+        elif site.tier == 3:
+            html = await _render_tier3(site)
+        else:
+            result = await fetch(client, site)
+            html = json.dumps(result.json, ensure_ascii=False, indent=2) \
+                if site.tier == 1 else result.text
+        Path(path).write_text((html or "")[:250_000], encoding="utf-8")
+        return str(path)
+    except Exception as e:  # noqa: BLE001 - diagnostics must not break polling
+        _log("zero_yield_diagnostic_failed", site=site.name,
+             error=f"{type(e).__name__}: {e}")
+        return ""
 
 
 def _remember_processed(listing: RawListing, outcome: str, resolved_url: str = "") -> None:
@@ -378,13 +406,15 @@ async def _watch_site(site: SiteConfig, client: httpx.AsyncClient,
                 # indistinguishable per poll; this streak-alert is the only
                 # thing that separates them. (mijndak polled total=0 for days
                 # unnoticed before this existed.)
+                diag_path = await _write_zero_yield_diagnostic(client, site)
                 await asyncio.to_thread(
                     send_alert_dedup, f"zero_yield:{site.name}",
                     f"🕳 Poller: {site.name} has yielded 0 listings for "
                     f"{ZERO_YIELD_ALERT_POLLS} consecutive polls",
                     f"{site.name} keeps answering with zero parsed listings "
                     f"({site.list_url}). Its parser may be silently broken — "
-                    f"verify with: just poll-once {site.name}",
+                    f"verify with: just poll-once {site.name}"
+                    + (f"\nSaved sample: {diag_path}" if diag_path else ""),
                     min_interval_s=86400,
                 )
 
@@ -400,10 +430,13 @@ async def _enrich(l: RawListing) -> None:
     """Fill missing price/surface/description from the listing's own detail
     page (one cheap GET, fail-open). Anchor-parser sites yield URL-only
     listings, so without this the filter/judge fly blind on them and the
-    description-based eligibility veto never sees its text. Tier-3 sites are
-    skipped: their detail pages block plain httpx anyway."""
+    description-based eligibility veto never sees its text. Tier-3 pages used
+    to be skipped because many block plain httpx, but public tier-3 detail
+    pages often still serve enough HTML for price/description. The fetch is
+    cheap and fail-open, so try it before dropping a fresh listing as
+    price-unknown."""
     cfg = by_name(l.detected_by or l.source_name)
-    if cfg is not None and cfg.tier == 3:
+    if cfg is not None and cfg.tier == 3 and cfg.needs_login:
         return
     if l.price is not None and l.surface is not None and l.description:
         return

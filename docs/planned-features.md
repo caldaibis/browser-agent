@@ -27,3 +27,32 @@ Open questions:
 - Whether to notify immediately for `viewing_invited` and `more_info_needed`.
 - How to handle landlord replies that omit the address and only mention a
   project name or agency reference number.
+
+## Active Application Slot Management
+
+Goal: keep scarce per-site active-application slots available for the best new
+listings.
+
+Why it matters: some sites/accounts cap simultaneous viewing requests. Ik Wil
+Huren/MVGM has already blocked fresh applications because five older requests
+were still active. In Utrecht, holding a weak stale request can cost a stronger
+new one.
+
+Proposed shape:
+
+- Add site-specific readers for active viewing/application requests.
+- Track request age, listing fit, source, and current status.
+- Alert when a new high-value listing is blocked by a full active-request cap.
+- Offer a dashboard action to withdraw old, closed, low-fit, or duplicate
+  requests after human confirmation.
+- Later, allow fully automatic withdrawal only for clearly safe cases:
+  expired listings, explicit rejection, already-rented status, or deterministic
+  duplicates.
+
+Open questions:
+
+- Which sites make withdrawals reversible or irreversible.
+- Whether age alone is enough to rank requests, or whether we should include
+  source reliability and exact rent/income fit.
+- Whether withdrawal actions should be allowed from push notification links or
+  dashboard only.

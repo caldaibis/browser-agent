@@ -19,6 +19,7 @@ import os
 from openai import AsyncOpenAI
 
 from ..rent_policy import MAX_RENT
+from ..applicant_profile import PROFILE
 from .models import RawListing
 
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -48,6 +49,10 @@ _SYSTEM = (
     "seeking a long-term home. NB: a listing that merely EXCLUDES students "
     "('studenten behoren niet tot onze doelgroep') is fine — do not reject "
     "for that.\n"
+    f"The applicant has savings/assets of about EUR {PROFILE.savings_amount:,.0f}. "
+    "When income is slightly short but the listing says savings/assets/eigen "
+    "vermogen/guarantor/financial file may count, fail open (ok=true) unless "
+    "the text explicitly says assets do NOT compensate.\n"
     "Use the structured fields first. Also read the title/address/url/type/"
     "description for obvious clues. If price or surface is unknown or "
     "ambiguous, do not reject on that criterion. If you are unsure overall, "

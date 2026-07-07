@@ -24,6 +24,14 @@ from .models import RawListing, SiteConfig
 
 _PRICE_RE = re.compile(r"(\d[\d.,\s]*)")
 _SURFACE_RE = re.compile(r"(\d+)\s*m")
+_MONTHLY_PRICE_RE = re.compile(
+    r"(?:€|eur)\s*([\d.,\s]+)\s*(?:,-\s*)?"
+    r"(?:[^0-9€]{0,50})"
+    r"(?:/\s*(?:mnd|maand)|p\s*/?\s*m\b|per\s+maand|pm\b|p\.m\.)",
+    re.IGNORECASE,
+)
+_SURFACE_HTML_RE = re.compile(r"(\d{2,4})\s*m\s*(?:<sup>\s*2|²|2)?", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _num(value) -> float | None:
@@ -41,6 +49,41 @@ def _num(value) -> float | None:
         return float(raw)
     except ValueError:
         return None
+
+
+def _clean_text(text: str) -> str:
+    text = html.unescape(_TAG_RE.sub(" ", text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _html_monthly_price(fragment: str) -> float | None:
+    candidates = []
+    for m in _MONTHLY_PRICE_RE.finditer(fragment or ""):
+        val = _num(m.group(1))
+        if val is not None and 300 <= val <= 8000:
+            candidates.append(val)
+    return max(candidates) if candidates else None
+
+
+def _html_surface(fragment: str) -> float | None:
+    text = fragment or ""
+    for m in _SURFACE_HTML_RE.finditer(text):
+        val = _num(m.group(1))
+        if val is not None and 10 <= val <= 1000:
+            return val
+    return None
+
+
+def _link_context(doc: str, start: int, end: int, radius: int = 1800) -> str:
+    """Small surrounding HTML chunk for a listing link.
+
+    Rendered tier-3 listing cards usually contain URL, price, m2, and address
+    near each other. This is deliberately heuristic but local to the link so a
+    random footer or unrelated listing price is unlikely to contaminate it.
+    """
+    left = max(0, start - radius)
+    right = min(len(doc), end + radius)
+    return doc[left:right]
 
 
 class _LDExtractor(HTMLParser):
@@ -156,7 +199,7 @@ def make_anchor_parser(path_pattern: str) -> "callable":
     """Build a parser that scrapes listing-detail links matching a regex on the
     URL path. Best-effort tier-2 fallback: yields URLs only (no price/surface),
     which then rely on the LLM/apply stage."""
-    href_re = re.compile(r'href=["\']([^"\']+)["\']', re.I)
+    href_re = re.compile(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
     path_re = re.compile(path_pattern)
 
     def parse(payload: object, site: SiteConfig) -> list[RawListing]:
@@ -164,12 +207,24 @@ def make_anchor_parser(path_pattern: str) -> "callable":
         base = site.list_url or site.endpoint
         seen: set[str] = set()
         out: list[RawListing] = []
-        for href in href_re.findall(doc):
+        for m in href_re.finditer(doc):
+            href, label_html = m.group(1), m.group(2)
             full = urljoin(base, html.unescape(href))
             if not path_re.search(full) or full in seen:
                 continue
             seen.add(full)
-            out.append(RawListing(source_url=full, source_name=site.name))
+            context = _link_context(doc, m.start(), m.end())
+            title = _clean_text(label_html)[:240]
+            context_text = _clean_text(context)
+            out.append(RawListing(
+                source_url=full,
+                source_name=site.name,
+                title=title,
+                address=title,
+                price=_html_monthly_price(context),
+                surface=_html_surface(context),
+                description=context_text[:1200],
+            ))
         return out
 
     return parse

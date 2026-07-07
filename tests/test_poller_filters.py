@@ -71,6 +71,16 @@ class TestHardExclusion(unittest.TestCase):
 
 
 class TestPassesWithDescription(unittest.TestCase):
+    def test_city_veto_happens_before_unknown_price(self):
+        ok, reason = filters.passes(_listing(
+            source_url="https://plaza.example/aanbod/details/1-delft",
+            city="Delft",
+            address="Develdmaat Delft",
+            price=None,
+        ))
+        self.assertFalse(ok)
+        self.assertIn("city not in", reason)
+
     def test_vetoes_students_only_description(self):
         ok, reason = filters.passes(_listing(
             description="ALLEEN BESCHIKBAAR VOOR STUDENTEN."))

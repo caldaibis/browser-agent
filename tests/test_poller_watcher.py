@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.poller import dedup, watcher
-from src.poller.models import RawListing
+from src.listing_context import ListingContext
+from src.poller.models import RawListing, SiteConfig
 
 
 class _FakeResult:
@@ -135,6 +136,36 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(seen.is_new(listing.source_url))
             processed = (Path(td) / "processed.jsonl").read_text(encoding="utf-8")
             self.assertIn('"error"', processed)
+
+
+class TestEnrich(unittest.IsolatedAsyncioTestCase):
+    async def test_public_tier3_listing_can_be_enriched(self):
+        listing = RawListing(
+            source_url="https://www.pararius.nl/appartement-te-huur/utrecht/abc/",
+            source_name="pararius.nl",
+            detected_by="pararius.nl",
+        )
+        cfg = SiteConfig(name="pararius.nl", tier=3, own_browser=True)
+        with patch.object(watcher, "by_name", return_value=cfg), \
+                patch.object(watcher, "fetch_context",
+                             return_value=ListingContext(price=1450, surface=52,
+                                                         description="Nice flat")):
+            await watcher._enrich(listing)
+        self.assertEqual(listing.price, 1450)
+        self.assertEqual(listing.surface, 52)
+        self.assertEqual(listing.description, "Nice flat")
+
+    async def test_login_walled_tier3_skips_plain_fetch(self):
+        listing = RawListing(
+            source_url="https://kamernet.nl/en/for-rent/studio-utrecht/x",
+            source_name="kamernet.nl",
+            detected_by="kamernet.nl",
+        )
+        cfg = SiteConfig(name="kamernet.nl", tier=3, needs_login=True)
+        with patch.object(watcher, "by_name", return_value=cfg), \
+                patch.object(watcher, "fetch_context") as fetch_context:
+            await watcher._enrich(listing)
+        fetch_context.assert_not_called()
 
 
 if __name__ == "__main__":
