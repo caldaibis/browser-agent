@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import site_playbooks
+from . import known_gates, site_playbooks
 from .apply_priority import priority_pending
 from .config import DOCS_DIR, LOG_DIR, CDP_URL
 from .credentials import available_domains
@@ -67,6 +67,13 @@ def _payment_required_reason(listing: dict) -> str | None:
     domain = _domain(listing.get("source_url", ""))
     if domain in KNOWN_PAID_APPLICATION_DOMAINS:
         return f"{domain} is a known paid-registration application site"
+
+    # Gates recorded at diagnosis time by the self-improvement agent
+    # (state/known_gates.json) — same veto as the hardcoded set above, but
+    # updatable at runtime without a deploy. Fail-open.
+    gate_reason = known_gates.paid_registration_reason(listing.get("source_url", ""))
+    if gate_reason:
+        return gate_reason
 
     description = (listing.get("description") or "").strip()
     if not description:
@@ -215,6 +222,17 @@ and the current page always wins over the playbook.
 {playbook_text}
 \"\"\"
 """
+    gate_warnings = known_gates.prompt_warnings(listing.get("source_url", ""))
+    gate_clause = ""
+    if gate_warnings:
+        bullets = "\n".join(f"- {w}" for w in gate_warnings)
+        gate_clause = f"""
+KNOWN GATES on this site, recorded from earlier diagnosed runs. If the page
+confirms one still applies, STOP EARLY with the matching outcome instead of
+spending turns rediscovering it; if the page shows it no longer applies,
+proceed normally (the live page wins).
+{bullets}
+"""
     return f"""You are applying to a Dutch rental listing on my behalf. Act autonomously.
 
 LISTING (external source: {listing.get('source_name','?')})
@@ -266,7 +284,7 @@ STOP immediately and report `OUTCOME: not_eligible`, stating the requirement,
 the applicant's value, and the gap. Only proceed to fill the form when the
 applicant plausibly meets every stated hard requirement. If no requirements are
 stated, proceed normally.
-{_listing_details_clause(listing)}{playbook_clause}
+{_listing_details_clause(listing)}{playbook_clause}{gate_clause}
 YOUR TASK
 1. Open the URL above in the browser.
 2. Run the ELIGIBILITY GATE above. If not eligible, stop now (do not apply).

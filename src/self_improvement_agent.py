@@ -36,6 +36,7 @@ from claude_agent_sdk import (
     tool,
 )
 
+from . import incident_store, known_gates
 from .browser_agent import AgentResult
 from .browser_dom_tools import compact, current_page, evaluate_controls, evaluate_fields
 from .config import CDP_URL, LOG_DIR, PROJECT_ROOT, SCREENSHOT_DIR
@@ -57,6 +58,12 @@ SELF_IMPROVEMENT_ENABLED = _env("SELF_IMPROVEMENT_ENABLED", "1") != "0"
 SELF_IMPROVEMENT_BASE_URL = _env("SELF_IMPROVEMENT_BASE_URL", "http://127.0.0.1:4000")
 SELF_IMPROVEMENT_PROXY_MODEL = _env("SELF_IMPROVEMENT_PROXY_MODEL", "self-improvement-deepseek")
 SELF_IMPROVEMENT_MAX_TURNS = int(_env("SELF_IMPROVEMENT_MAX_TURNS", "30"))
+# The run is split in two phases (verified need: 3 production runs died at
+# "Reached maximum number of turns (30)" because ONE budget had to cover
+# read-conventions + diagnose + patch + verify). Phase 1 diagnoses with
+# read-only tools on a small budget; phase 2 (only on a "fix" verdict)
+# patches with the FULL SELF_IMPROVEMENT_MAX_TURNS budget to itself.
+SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS = int(_env("SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS", "15"))
 # ClaudeAgentOptions.max_budget_usd is enforced against the SDK's own
 # *client-side* cost estimate, which doesn't recognize a proxied model_name
 # and inflates real DeepSeek-v4-pro spend by ~19.5x (verified: a run that
@@ -64,7 +71,8 @@ SELF_IMPROVEMENT_MAX_TURNS = int(_env("SELF_IMPROVEMENT_MAX_TURNS", "30"))
 # or a harder run would get cut short on inflated-phantom budget, not real
 # spend. Real spend is what _estimate_deepseek_cost_usd logs, not this cap.
 SELF_IMPROVEMENT_MAX_BUDGET_USD = float(_env("SELF_IMPROVEMENT_MAX_BUDGET_USD", "40.0"))
-SELF_IMPROVEMENT_TIMEOUT_SECONDS = int(_env("SELF_IMPROVEMENT_TIMEOUT_SECONDS", "900"))
+# Wall-clock cap for BOTH phases together (diagnosis + optional patch).
+SELF_IMPROVEMENT_TIMEOUT_SECONDS = int(_env("SELF_IMPROVEMENT_TIMEOUT_SECONDS", "1500"))
 SELF_IMPROVEMENT_VERIFY_CMD = _env("SELF_IMPROVEMENT_VERIFY_CMD", "just check")
 SELF_IMPROVEMENT_ALLOW_CODE_CHANGES = _env("SELF_IMPROVEMENT_ALLOW_CODE_CHANGES", "1") != "0"
 # Gates whether a verified fix is pushed straight to `main` (where the
@@ -108,6 +116,7 @@ _MAX_TOOL_TEXT = 30000
 # schema-JSON -- so the final result is a text marker parsed with this regex,
 # same convention the pre-Claude-Agent-SDK engine used.
 _RESULT_MARKER_RE = re.compile(r"SELF_IMPROVEMENT_JSON:\s*(\{.*\})", re.DOTALL)
+_DIAGNOSIS_MARKER_RE = re.compile(r"DIAGNOSIS_JSON:\s*(\{.*\})", re.DOTALL)
 
 # Belt-and-suspenders: even though commit_push_deploy is the only tool that can
 # actually write git history, deny raw git-write/deploy attempts via Bash too
@@ -151,6 +160,34 @@ def improve_after_apply(
     """
     if not should_improve(result.outcome):
         return None
+
+    # Incident memory (src/incident_store.py): fingerprint the failure, skip
+    # the run if this incident already had one within the dedup window, and
+    # give a run that does happen its predecessors' findings. Production data
+    # showed ~half of all runs were re-diagnoses of an incident another run
+    # had already worked on the same day. Fail-open: a broken store must
+    # never block self-improvement itself.
+    fp = None
+    incident: dict = {}
+    try:
+        fp = incident_store.fingerprint_failure(listing, result.outcome, result.summary)
+        allowed, reason = incident_store.should_run(fp)
+        incident_store.record_occurrence(fp, listing=listing,
+                                         summary=result.summary, ran=allowed)
+        if not allowed:
+            _log("skipped_duplicate_incident", status=result.outcome,
+                 fingerprint=fp.key, reason=reason)
+            return SelfImprovementResult(action="skipped_duplicate_incident",
+                                         summary=reason)
+        incident = {
+            "fingerprint": fp.key,
+            "occurrences": incident_store.occurrence_count(fp),
+            "prior_attempts": incident_store.attempt_history(fp),
+        }
+    except Exception as e:  # noqa: BLE001 - incident memory is best-effort
+        _log("incident_store_error", status=result.outcome,
+             error=f"{type(e).__name__}: {e}")
+
     ctx = {
         "listing": listing,
         "result": {
@@ -162,6 +199,7 @@ def improve_after_apply(
         "trigger": trigger,
         "msg_id": msg_id,
         "extra": extra or {},
+        "incident": incident,
     }
     try:
         rr = run_self_improvement(ctx)
@@ -169,9 +207,23 @@ def improve_after_apply(
              code_changed=rr.code_changed, deployed=rr.deployed,
              email_sent=rr.email_sent, root_cause=rr.root_cause,
              summary=rr.summary)
+        if fp is not None:
+            try:
+                incident_store.record_attempt(
+                    fp, action=rr.action, root_cause=rr.root_cause,
+                    summary=rr.summary, code_changed=rr.code_changed,
+                    deployed=rr.deployed)
+            except Exception:
+                pass
         return rr
     except Exception as e:  # noqa: BLE001 - self-improvement must be best-effort
         _log("error", status=result.outcome, error=f"{type(e).__name__}: {e}")
+        if fp is not None:
+            try:
+                incident_store.record_attempt(
+                    fp, action="error", summary=f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
         try:
             send_alert(
                 "⚠️ Self-improvement agent failed",
@@ -254,16 +306,106 @@ async def _execute(context: dict, logger: "_Logger") -> SelfImprovementResult:
     worktree_path, branch_name = _create_worktree()
     logger.line(f"[self-improvement] worktree {worktree_path} on branch {branch_name}")
     try:
-        options = ClaudeAgentOptions(
-            cwd=str(worktree_path),
-            system_prompt=(
-                "You are the self-improvement agent for a Dutch rental-application "
-                "bot. You run after an apply attempt ends with a non-terminal "
-                "outcome, working in an isolated git worktree checked out from "
-                "origin/main -- a fix you commit here does not touch the live "
-                "checkout directly; commit_push_deploy pushes it to main (or a "
-                "review branch) for the existing CI/CD pipeline to deploy."
-            ),
+        system_prompt = (
+            "You are the self-improvement agent for a Dutch rental-application "
+            "bot. You run after an apply attempt ends with a non-terminal "
+            "outcome, working in an isolated git worktree checked out from "
+            "origin/main -- a fix you commit here does not touch the live "
+            "checkout directly; commit_push_deploy pushes it to main (or a "
+            "review branch) for the existing CI/CD pipeline to deploy."
+        )
+        mcp_servers = {
+            "browser": _browser_tools(),
+            "self_improve": _self_improve_tools(context, logger, worktree_path, branch_name),
+        }
+
+        def _options(allowed_tools: list[str], max_turns: int) -> ClaudeAgentOptions:
+            return ClaudeAgentOptions(
+                cwd=str(worktree_path),
+                system_prompt=system_prompt,
+                allowed_tools=allowed_tools,
+                disallowed_tools=["WebSearch", "WebFetch"],
+                permission_mode="bypassPermissions",
+                can_use_tool=_can_use_tool,
+                setting_sources=[],
+                mcp_servers=mcp_servers,
+                model=SELF_IMPROVEMENT_PROXY_MODEL,
+                env={
+                    # Redirect Claude Code at the local LiteLLM/DeepSeek proxy
+                    # instead of api.anthropic.com. ANTHROPIC_AUTH_TOKEN only
+                    # needs to be non-empty to satisfy the CLI's own "am I
+                    # configured" check -- the proxy doesn't validate it
+                    # (confirmed with curl).
+                    "ANTHROPIC_BASE_URL": SELF_IMPROVEMENT_BASE_URL,
+                    "ANTHROPIC_AUTH_TOKEN": "not-required",
+                },
+                max_turns=max_turns,
+                max_budget_usd=SELF_IMPROVEMENT_MAX_BUDGET_USD,
+                # No thinking/effort/output_format here -- see AGENTS.md gotchas.
+            )
+
+        # ---- Phase 1: diagnosis (read-only; no Edit/Write, no commit tool).
+        diagnosis_options = _options(
+            allowed_tools=[
+                "Read", "Grep", "Glob", "Bash",
+                "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
+                "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
+                "mcp__self_improve__send_user_email",
+                "mcp__self_improve__record_known_gate",
+            ],
+            max_turns=SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS,
+        )
+        result_msg = await _query_once(
+            _diagnosis_prompt(context), diagnosis_options, logger, phase="diagnosis")
+        if result_msg is None:
+            return SelfImprovementResult(
+                action="incomplete",
+                summary="Diagnosis query ended without a result message.")
+        diagnosis = _parse_marker(result_msg, _DIAGNOSIS_MARKER_RE)
+        if not isinstance(diagnosis, dict):
+            return SelfImprovementResult(
+                action="incomplete",
+                summary=("Diagnosis ended without a DIAGNOSIS_JSON line: "
+                         + (result_msg.result or "no result text")[:1500]))
+
+        verdict = str(diagnosis.get("verdict") or "").strip().lower()
+        root_cause = str(diagnosis.get("root_cause") or "")
+        summary = str(diagnosis.get("summary") or "")
+        email_sent = bool(diagnosis.get("email_sent"))
+        logger.line(f"[self-improvement] diagnosis verdict={verdict!r} root_cause={redact(root_cause)[:300]}")
+
+        if verdict == "noop":
+            return SelfImprovementResult(
+                action="noop", root_cause=root_cause, summary=summary,
+                email_sent=email_sent)
+        if verdict == "email_user":
+            if not email_sent:
+                send_alert("⚠️ Rental agent needs attention",
+                           redact(summary or root_cause or "User action required."))
+                email_sent = True
+            return SelfImprovementResult(
+                action="emailed_user", root_cause=root_cause, summary=summary,
+                email_sent=email_sent)
+        if verdict != "fix":
+            return SelfImprovementResult(
+                action="incomplete", root_cause=root_cause,
+                summary=f"Diagnosis returned unknown verdict {verdict!r}: {summary}"[:1500],
+                email_sent=email_sent)
+
+        if not SELF_IMPROVEMENT_ALLOW_CODE_CHANGES:
+            send_alert(
+                "🛠️ Rental bot diagnosed a fixable bug (code changes disabled)",
+                redact(f"Root cause: {root_cause}\n\nPlan: "
+                       f"{diagnosis.get('fix_plan') or '-'}\n\n{summary}"),
+            )
+            return SelfImprovementResult(
+                action="fix_failed", root_cause=root_cause,
+                summary="Fix verdict, but SELF_IMPROVEMENT_ALLOW_CODE_CHANGES=0; "
+                        "diagnosis emailed instead.",
+                email_sent=True)
+
+        # ---- Phase 2: patch, with the full turn budget to itself.
+        patch_options = _options(
             allowed_tools=[
                 "Read", "Edit", "Write", "Grep", "Glob", "Bash",
                 "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
@@ -271,60 +413,52 @@ async def _execute(context: dict, logger: "_Logger") -> SelfImprovementResult:
                 "mcp__self_improve__run_verification",
                 "mcp__self_improve__commit_push_deploy",
                 "mcp__self_improve__send_user_email",
+                "mcp__self_improve__record_known_gate",
             ],
-            disallowed_tools=["WebSearch", "WebFetch"],
-            permission_mode="bypassPermissions",
-            can_use_tool=_can_use_tool,
-            setting_sources=[],
-            mcp_servers={
-                "browser": _browser_tools(),
-                "self_improve": _self_improve_tools(context, logger, worktree_path, branch_name),
-            },
-            model=SELF_IMPROVEMENT_PROXY_MODEL,
-            env={
-                # Redirect Claude Code at the local LiteLLM/DeepSeek proxy instead
-                # of api.anthropic.com. ANTHROPIC_AUTH_TOKEN only needs to be
-                # non-empty to satisfy the CLI's own "am I configured" check --
-                # the proxy doesn't validate it (confirmed with curl).
-                "ANTHROPIC_BASE_URL": SELF_IMPROVEMENT_BASE_URL,
-                "ANTHROPIC_AUTH_TOKEN": "not-required",
-            },
             max_turns=SELF_IMPROVEMENT_MAX_TURNS,
-            max_budget_usd=SELF_IMPROVEMENT_MAX_BUDGET_USD,
-            # No thinking/effort/output_format here -- see AGENTS.md gotchas.
         )
-
-        result_msg: ResultMessage | None = None
-        async for message in query(prompt=_one_shot_prompt(_prompt(context)), options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text.strip():
-                        logger.line(f"[self-improvement] say: {block.text.strip()[:500]}")
-                    elif isinstance(block, ToolUseBlock):
-                        logger.line(f"[self-improvement] call {block.name} {_safe_args(block.input)}")
-                if message.usage:
-                    logger.line(f"[self-improvement] turn usage {json.dumps(message.usage, ensure_ascii=False)}")
-            elif isinstance(message, ResultMessage):
-                result_msg = message
-
+        result_msg = await _query_once(
+            _patch_prompt(context, diagnosis), patch_options, logger, phase="patch")
         if result_msg is None:
-            return SelfImprovementResult(action="incomplete", summary="Agent SDK query ended without a result message.")
+            return SelfImprovementResult(
+                action="fix_failed", root_cause=root_cause,
+                summary="Patch query ended without a result message.")
+        rr = _parse_result(result_msg)
+        if not rr.root_cause:
+            rr.root_cause = root_cause
+        return rr
+    finally:
+        _remove_worktree(worktree_path, branch_name, logger)
 
+
+async def _query_once(prompt: str, options: ClaudeAgentOptions,
+                      logger: "_Logger", *, phase: str) -> ResultMessage | None:
+    result_msg: ResultMessage | None = None
+    async for message in query(prompt=_one_shot_prompt(prompt), options=options):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text.strip():
+                    logger.line(f"[self-improvement:{phase}] say: {block.text.strip()[:500]}")
+                elif isinstance(block, ToolUseBlock):
+                    logger.line(f"[self-improvement:{phase}] call {block.name} {_safe_args(block.input)}")
+            if message.usage:
+                logger.line(f"[self-improvement:{phase}] turn usage {json.dumps(message.usage, ensure_ascii=False)}")
+        elif isinstance(message, ResultMessage):
+            result_msg = message
+    if result_msg is not None:
         # Log raw usage + both the SDK's own cost figure and an independent
         # estimate from known deepseek-v4-pro per-token rates, so cost is
         # cross-checked rather than trusted blindly (litellm's cost tracking can
         # silently default to 0/wrong rates for a custom model_name alias).
         est_cost = _estimate_deepseek_cost_usd(result_msg.usage or result_msg.model_usage or {})
         logger.line(
-            f"[self-improvement] done subtype={result_msg.subtype} is_error={result_msg.is_error} "
+            f"[self-improvement:{phase}] done subtype={result_msg.subtype} is_error={result_msg.is_error} "
             f"turns={result_msg.num_turns} sdk_cost_usd={result_msg.total_cost_usd} "
             f"estimated_cost_usd={est_cost}"
         )
-        logger.line(f"[self-improvement] usage={json.dumps(result_msg.usage, ensure_ascii=False)}")
-        logger.line(f"[self-improvement] model_usage={json.dumps(result_msg.model_usage, ensure_ascii=False)}")
-        return _parse_result(result_msg)
-    finally:
-        _remove_worktree(worktree_path, branch_name, logger)
+        logger.line(f"[self-improvement:{phase}] usage={json.dumps(result_msg.usage, ensure_ascii=False)}")
+        logger.line(f"[self-improvement:{phase}] model_usage={json.dumps(result_msg.model_usage, ensure_ascii=False)}")
+    return result_msg
 
 
 # deepseek-v4-pro per-token rates (USD), cross-checked directly against
@@ -377,35 +511,7 @@ async def _one_shot_prompt(text: str):
     }
 
 
-def _prompt(context: dict) -> str:
-    result = context.get("result") or {}
-    transcript = result.get("transcript_path") or ""
-    log_paths = ", ".join(str(LOG_DIR / n) for n in
-                           ("runs.jsonl", "poller.jsonl", "mail_summary.jsonl", "activity.log"))
-    return f"""You are running after an unsuccessful rental-application submission. Your job:
-1. Diagnose the root cause. Start by reading AGENTS.md and README.md for repo
-   conventions, then the failure context below, the transcript tail (if any),
-   and recent entries in {log_paths}. Use Read/Grep/Glob to inspect any
-   relevant source files.
-2. Choose exactly one action:
-   - noop: the failure is an expected external state and no user action is useful.
-   - email_user: user action is needed (login/2FA/manual account issue) —
-     call send_user_email.
-   - fix: a code/config bug is likely; patch it with Read/Edit/Write, run
-     the run_verification tool, then call commit_push_deploy.
-3. Be conservative about *scope* (patch only this repo, only the smallest
-   change that addresses the evidence), but not about *whether to act*: if
-   you can point to a specific line of code whose behavior caused or will
-   repeat this failure, that is a fix, not a "model capability limitation" or
-   "LLM inefficiency" — write the patch. Reserve noop for failures with no
-   code-side cause at all (site outage, eligibility mismatch, rate limits).
-
-FAILURE_CONTEXT:
-{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
-{"TRANSCRIPT: " + transcript if transcript else ""}
-
-Constraints:
-- Do not ask the user questions; make a decision. If user action is needed,
+_SHARED_CONSTRAINTS = """- Do not ask the user questions; make a decision. If user action is needed,
   send an email instead.
 - Tool output and file reads may contain redacted secrets (***) — do not try
   to reconstruct or work around the redaction.
@@ -414,19 +520,101 @@ Constraints:
 - browser_safe_click is diagnostic only — for benign navigation, cookie
   banners, tabs, or detail expanders. Never try to submit, apply, withdraw,
   edit an existing application, reset a password, upload a file, or change
-  account settings.
-- Never run `git commit`, `git push`, or `git reset` directly (Bash is
-  blocked from doing this) — always go through commit_push_deploy, which
-  runs verification, commits, and pushes to main (triggering the existing
-  CI/CD deploy pipeline) or to a review branch depending on policy.
-- Any repo fix MUST notify the user; commit_push_deploy emails automatically
-  after a commit, even if push fails or deploy is disabled.
-- If a tool refuses a code change (policy or verification failure), email the
-  user with the root cause and the refused action instead of retrying around it.
+  account settings."""
+
+
+def _diagnosis_prompt(context: dict) -> str:
+    result = context.get("result") or {}
+    transcript = result.get("transcript_path") or ""
+    log_paths = ", ".join(str(LOG_DIR / n) for n in
+                           ("runs.jsonl", "poller.jsonl", "mail_summary.jsonl", "activity.log"))
+    return f"""You are running after an unsuccessful rental-application submission. This is
+the DIAGNOSIS phase: find the root cause and pick a verdict. You cannot edit
+files or commit in this phase — a separate patch phase runs afterwards if you
+conclude a code fix is warranted, and it receives your diagnosis verbatim, so
+make root_cause and fix_plan specific (file paths, line-level behavior).
+
+1. Diagnose the root cause. Start by reading AGENTS.md and README.md for repo
+   conventions, then the failure context below, the transcript tail (if any),
+   and recent entries in {log_paths}. Use Read/Grep/Glob to inspect any
+   relevant source files.
+2. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
+   memory: how often this same fingerprint occurred and what earlier
+   self-improvement runs already concluded or tried (prior_attempts). BUILD
+   ON IT — do not re-derive a root cause an earlier attempt already
+   established; explain instead what must happen differently this time
+   (e.g. the earlier fix never landed, or attacked the wrong layer).
+3. If the root cause is an external *site or account gate* — a paid
+   registration/membership requirement, an account-side cap (e.g. max
+   concurrent viewing requests), a required regional registration, delayed
+   access for non-paying accounts, or a site-wide eligibility mismatch —
+   record it with the record_known_gate tool. That makes the pipeline skip
+   or warn deterministically on this domain from the next listing onward,
+   with no code change. Use expires_ts for temporary caps.
+4. Choose exactly one verdict:
+   - noop: expected external state; nothing useful for code or user to do
+     (record_known_gate, when applicable, still counts as noop).
+   - email_user: user action is needed (login/2FA/manual account issue) —
+     call send_user_email yourself, then report email_sent true.
+   - fix: a code/config bug is likely; name the file(s) and the smallest
+     change in fix_plan. Do NOT attempt the edit here.
+   Be conservative about *scope*, but not about *whether to act*: if you can
+   point to a specific line of code whose behavior caused or will repeat
+   this failure, that is a fix verdict, not a "model capability limitation"
+   or "LLM inefficiency". Reserve noop for failures with no code-side cause
+   at all (site outage, eligibility mismatch, rate limits).
+
+FAILURE_CONTEXT:
+{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
+{"TRANSCRIPT: " + transcript if transcript else ""}
+
+Constraints:
+{_SHARED_CONSTRAINTS}
 
 When done, end your final message with exactly one line in this shape,
 nothing after it:
-SELF_IMPROVEMENT_JSON: {{"action":"noop|emailed_user|fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
+DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
+
+
+def _patch_prompt(context: dict, diagnosis: dict) -> str:
+    result = context.get("result") or {}
+    transcript = result.get("transcript_path") or ""
+    return f"""You are the PATCH phase of the self-improvement agent. A diagnosis phase
+already ran on this failure and concluded a code fix is warranted. Its
+verdict is below — trust it as your starting point, verify the named code
+with Read/Grep before editing, and implement the SMALLEST change that
+addresses the evidence.
+
+DIAGNOSIS (from the diagnosis phase):
+{json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
+
+FAILURE_CONTEXT:
+{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
+{"TRANSCRIPT: " + transcript if transcript else ""}
+
+Steps:
+1. Read the code the diagnosis names (plus AGENTS.md if you need repo
+   conventions). If the diagnosis turns out to be wrong at the code level,
+   say so and stop with action fix_failed — do not improvise a different fix
+   the diagnosis gives no evidence for.
+2. Patch with Read/Edit/Write. Patch only this repo, smallest change that
+   addresses the evidence. Match the surrounding code's style.
+3. Run the run_verification tool; iterate until it passes.
+4. Call commit_push_deploy with a conventional-commit message. Never run
+   `git commit`, `git push`, or `git reset` directly (Bash is blocked from
+   doing this) — commit_push_deploy enforces verification and the
+   push-to-main-or-review-branch policy, and it emails the user
+   automatically after a commit, even if push fails or deploy is disabled.
+5. If a tool refuses the change (policy or verification failure), email the
+   user with the root cause and the refused action instead of retrying
+   around it.
+
+Constraints:
+{_SHARED_CONSTRAINTS}
+
+When done, end your final message with exactly one line in this shape,
+nothing after it:
+SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
 
 
 async def _can_use_tool(
@@ -550,9 +738,43 @@ def _self_improve_tools(
         send_alert(subject, redact(str(args.get("body") or "")))
         return {"content": [{"type": "text", "text": "email sent"}]}
 
+    @tool("record_known_gate", (
+        "Record a durable per-site gate in state/known_gates.json so the "
+        "pipeline skips (paid_registration) or warns (other kinds) "
+        "deterministically on this domain from the next listing onward — a "
+        "data fix that needs no code change or deploy. Kinds: "
+        "paid_registration (applying costs money — pre-flight skip), "
+        "account_cap (temporary account limit; set expires_ts), "
+        "region_registration, delayed_access, eligibility. Use ONLY for "
+        "verified external site/account gates, never for code bugs."
+    ), {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string", "description": "site domain, e.g. your-house.nl"},
+            "kind": {"type": "string", "enum": sorted(known_gates.GATE_KINDS)},
+            "note": {"type": "string", "description": "one-line evidence, e.g. '€25 membership via Mollie before applying'"},
+            "expires_ts": {"type": "string", "description": "optional ISO-8601 expiry for temporary caps"},
+        },
+        "required": ["domain", "kind", "note"],
+    })
+    async def record_known_gate(args: dict) -> dict:
+        try:
+            confirmation = known_gates.record_gate(
+                domain=str(args.get("domain") or ""),
+                kind=str(args.get("kind") or ""),
+                note=redact(str(args.get("note") or "")),
+                source=f"self-improvement:{context.get('trigger') or '-'}",
+                expires_ts=str(args.get("expires_ts") or ""),
+            )
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"REFUSED: {e}"}]}
+        logger.line(f"[self-improvement] known gate: {confirmation}")
+        return {"content": [{"type": "text", "text": confirmation}]}
+
     return create_sdk_mcp_server(
         name="self_improve",
-        tools=[run_verification, commit_push_deploy, send_user_email],
+        tools=[run_verification, commit_push_deploy, send_user_email,
+               record_known_gate],
     )
 
 
@@ -751,6 +973,9 @@ def _commit_push_deploy(
     if not SELF_IMPROVEMENT_ALLOW_DEPLOY:
         push = _run_cmd(["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
                         timeout=120, cwd=worktree_path)
+        if not push.startswith("rc=0\n"):
+            return _handle_push_failure(context, worktree_path, branch_name,
+                                        commit, push, target=branch_name)
         summary = (
             f"Self-improvement committed a fix on branch {branch_name} for manual "
             "review (deploy disabled -- SELF_IMPROVEMENT_ALLOW_DEPLOY=0)."
@@ -766,6 +991,9 @@ def _commit_push_deploy(
     if not ff_check.startswith("rc=0"):
         push = _run_cmd(["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
                         timeout=120, cwd=worktree_path)
+        if not push.startswith("rc=0\n"):
+            return _handle_push_failure(context, worktree_path, branch_name,
+                                        commit, push, target=branch_name)
         summary = (
             f"Self-improvement committed a fix, but origin/main moved since this "
             f"run branched off it -- pushed to {branch_name} instead of merging "
@@ -776,12 +1004,73 @@ def _commit_push_deploy(
 
     push = _run_cmd(["git", "push", "origin", "HEAD:refs/heads/main"], timeout=120, cwd=worktree_path)
     if not push.startswith("rc=0\n"):
-        summary = "Self-improvement committed a fix but push to main failed."
-        _send_fix_email(context, summary, commit + "\n" + push)
-        return "push to main failed; user email sent\n" + push
+        # Try the review branch before falling back to a local patch: a
+        # branch-protection rule can reject main while branches still work.
+        branch_push = _run_cmd(["git", "push", "origin", f"HEAD:refs/heads/{branch_name}"],
+                               timeout=120, cwd=worktree_path)
+        if branch_push.startswith("rc=0\n"):
+            summary = (
+                f"Self-improvement committed a fix; push to main failed but the "
+                f"review branch {branch_name} was pushed. Please review and merge."
+            )
+            _send_fix_email(context, summary, commit + "\n" + push + "\n" + branch_push)
+            return (f"push to main failed; pushed to {branch_name} instead; "
+                    "user email sent\n" + push)
+        return _handle_push_failure(context, worktree_path, branch_name,
+                                    commit, push + "\n" + branch_push, target="main")
     summary = "Self-improvement committed and pushed a fix directly to main -- CI/CD will deploy it automatically."
     _send_fix_email(context, summary, commit + "\n" + push)
     return "pushed to main; CI/CD deploy triggered; user email sent\n" + push
+
+
+# Every verified fix used to die silently at a failed `git push` (verified in
+# production 03-07-2026: the VPS deploy key was read-only, so FIVE runs each
+# wrote a correct browser_lock fix and lost it; one had to be rescued from
+# the worktree by hand before cleanup deleted it). The worktree is removed in
+# a `finally`, so a fix that isn't pushed AND isn't saved here is gone.
+PENDING_PATCH_DIR = PROJECT_ROOT / "state" / "pending_patches"
+
+
+def _handle_push_failure(context: dict | None, worktree_path: Path,
+                         branch_name: str, commit: str, push_output: str,
+                         *, target: str) -> str:
+    patch_path = _save_pending_patch(worktree_path, branch_name)
+    saved = (f"Patch saved locally: {patch_path}\n"
+             f"Apply with: git am {patch_path}" if patch_path
+             else "Saving the patch locally ALSO failed -- the fix is lost "
+                  "with the worktree; see the log for the diff.")
+    summary = (
+        f"Self-improvement committed a verified fix but could not push to "
+        f"{target}. {saved}"
+    )
+    body = commit + "\n" + push_output
+    if patch_path:
+        try:
+            body += "\n\n--- patch ---\n" + Path(patch_path).read_text(encoding="utf-8")
+        except OSError:
+            pass
+    _send_fix_email(context, summary, body)
+    return f"push to {target} failed; {saved}; user email sent\n" + push_output
+
+
+def _save_pending_patch(worktree_path: Path, branch_name: str) -> str:
+    try:
+        r = subprocess.run(
+            ["git", "format-patch", "-1", "HEAD", "--stdout"],
+            cwd=worktree_path, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return ""
+        PENDING_PATCH_DIR.mkdir(parents=True, exist_ok=True)
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", branch_name)[:80]
+        path = PENDING_PATCH_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}.patch"
+        # The patch is the raw commit (code + message), NOT passed through
+        # redact(): it must stay `git am`-able. Fix commits contain repo code,
+        # never credentials; state/ is gitignored and local-only anyway.
+        path.write_text(r.stdout, encoding="utf-8")
+        return str(path)
+    except Exception:  # noqa: BLE001 - last-resort persistence must not raise
+        return ""
 
 
 def _send_fix_email(context: dict | None, summary: str, details: str) -> None:
@@ -867,17 +1156,22 @@ def _remove_worktree(path: Path, branch: str, logger: "_Logger") -> None:
         logger.line(f"[self-improvement] worktree cleanup error: {type(e).__name__}: {e}")
 
 
-def _parse_result(msg: ResultMessage) -> SelfImprovementResult:
+def _parse_marker(msg: ResultMessage, marker_re: re.Pattern[str]) -> dict | None:
     # DeepSeek via the LiteLLM proxy doesn't honor structured output, so the
-    # final result comes from a text marker (see _prompt) instead of
-    # msg.structured_output.
-    m = _RESULT_MARKER_RE.search(msg.result or "")
-    data: Any = None
-    if m:
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            data = None
+    # final result comes from a text marker (see the phase prompts) instead
+    # of msg.structured_output.
+    m = marker_re.search(msg.result or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_result(msg: ResultMessage) -> SelfImprovementResult:
+    data = _parse_marker(msg, _RESULT_MARKER_RE)
     if not isinstance(data, dict):
         return SelfImprovementResult(
             action="error" if msg.is_error else "unknown",

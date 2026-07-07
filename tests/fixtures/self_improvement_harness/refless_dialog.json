@@ -1,0 +1,7 @@
+{
+  "outcome": "incomplete",
+  "domain": "rebogroep.nl",
+  "expected_surface": "tool_registry",
+  "expected_signature": "refless-dialog",
+  "transcript": "The modal dialog was not visible in browser_snapshot. dom_scan showed open dialog fields. fill_by_label Voornaam timed out on a duplicate id hidden field; click_by_text was needed for Ja, ik ga akkoord."
+}

@@ -103,6 +103,15 @@ class _FakeMcpSessionBigSnapshots(_FakeMcpSessionPermissive):
         return await super().call_tool(name, args)
 
 
+class _FakeMcpSessionPayment(_FakeMcpSessionPermissive):
+    async def call_tool(self, name, args):
+        if name == "browser_tabs":
+            return _FakeToolResult(
+                "- 0: (current) Checkout (https://www.mollie.com/checkout/select-method/abc)"
+            )
+        return await super().call_tool(name, args)
+
+
 class _FakeAsyncCM:
     def __init__(self, value):
         self._value = value
@@ -173,6 +182,13 @@ class TestShouldNudgeSnapshotOveruse(unittest.TestCase):
     def test_threshold_boundary(self):
         self.assertTrue(browser_agent._should_nudge_snapshot_overuse(6, 11))
         self.assertFalse(browser_agent._should_nudge_snapshot_overuse(5, 11))
+
+
+class TestPaymentUrlGuard(unittest.TestCase):
+    def test_payment_processor_hosts_are_blocked(self):
+        self.assertTrue(browser_agent._is_payment_url("https://www.mollie.com/checkout/x"))
+        self.assertTrue(browser_agent._is_payment_url("https://checkout.stripe.com/c/pay"))
+        self.assertFalse(browser_agent._is_payment_url("https://example.test/listing"))
 
 
 class TestPruneStalePageDumps(unittest.TestCase):
@@ -355,6 +371,21 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(rc, 125)
         self.assertEqual(browser_agent._parse_outcome(text, rc), "yielded")
+
+    async def test_payment_url_aborts_before_next_model_turn(self):
+        responses = [
+            _FakeResponse(tool_calls=[_FakeToolCall("id1", "browser_snapshot", "{}")]),
+            _FakeResponse(content="never reached", finish_reason="stop"),
+        ]
+        patches = _patch_agent(responses, session=_FakeMcpSessionPayment())
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2]:
+            rc, text = await browser_agent._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake", log=log,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(browser_agent._parse_outcome(text, rc), "payment_required")
 
     async def test_dom_scan_and_click_by_text_handled_locally_not_via_mcp(self):
         """dom_scan/click_by_text are local fallback tools (src/

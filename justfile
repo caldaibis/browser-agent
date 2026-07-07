@@ -100,6 +100,18 @@ sniff target:
 healthcheck:
     uv run python -m src.healthcheck
 
+# Mine recent failed apply transcripts into clustered self-improvement evidence.
+self-improve-mine:
+    uv run python -m src.self_improvement_harness mine
+
+# Run offline self-improvement harness regression fixtures.
+self-improve-eval:
+    uv run python -m src.self_improvement_harness eval
+
+# print the weekly outcome digest (outcomes, guards, incidents, pending fixes)
+digest:
+    uv run python -m src.digest
+
 # re-authorize Gmail (prints a consent URL to open in any browser)
 reauth:
     uv run python -m src.reauth

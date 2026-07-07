@@ -1,0 +1,7 @@
+{
+  "outcome": "blocked",
+  "domain": "your-house.nl",
+  "expected_surface": "control_policy",
+  "expected_signature": "payment",
+  "transcript": "12:00 [agent] turn 4 call browser_click {'element': 'apply'}\n12:01 [agent] PAYMENT PAGE reached ('https://www.mollie.com/checkout/select-method/abc'); aborting to avoid any real payment\nOUTCOME: payment_required"
+}

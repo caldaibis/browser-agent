@@ -187,6 +187,75 @@ class TestSelfImprovementAgent(unittest.TestCase):
                 "echo legacy",
             )
 
+    def test_parse_marker_reads_diagnosis_json(self):
+        msg = type("FakeResult", (), {
+            "result": (
+                "Diagnosed.\n"
+                'DIAGNOSIS_JSON: {"verdict":"fix","root_cause":"off-by-one in '
+                'browser_lock timeout","fix_plan":"clamp the wait","summary":"s",'
+                '"email_sent":false}'
+            ),
+        })()
+        data = self_improvement_agent._parse_marker(
+            msg, self_improvement_agent._DIAGNOSIS_MARKER_RE)
+        self.assertEqual(data["verdict"], "fix")
+        self.assertIn("browser_lock", data["root_cause"])
+
+    def test_parse_marker_returns_none_without_marker(self):
+        msg = type("FakeResult", (), {"result": "no marker here"})()
+        self.assertIsNone(self_improvement_agent._parse_marker(
+            msg, self_improvement_agent._DIAGNOSIS_MARKER_RE))
+
+
+class TestPushFallback(unittest.TestCase):
+    """A verified fix must survive a failed push: format-patch to
+    state/pending_patches (production 03-07-2026: five correct browser_lock
+    fixes were lost to a read-only deploy key, one rescued by hand)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        _git(["init", "-b", "main"], cwd=self.repo)
+        _git(["config", "user.email", "test@example.com"], cwd=self.repo)
+        _git(["config", "user.name", "Test"], cwd=self.repo)
+        (self.repo / "file.py").write_text("x = 1\n")
+        _git(["add", "-A"], cwd=self.repo)
+        _git(["commit", "-m", "fix(test): the fix"], cwd=self.repo)
+        self.patch_dir = Path(self.tmp.name) / "pending_patches"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_save_pending_patch_writes_git_am_able_file(self):
+        with patch.object(self_improvement_agent, "PENDING_PATCH_DIR", self.patch_dir):
+            path = self_improvement_agent._save_pending_patch(
+                self.repo, "self-improvement/20260707_test")
+        self.assertTrue(path)
+        text = Path(path).read_text(encoding="utf-8")
+        self.assertIn("fix(test): the fix", text)
+        self.assertIn("x = 1", text)
+
+    def test_save_pending_patch_fails_open_outside_git(self):
+        with patch.object(self_improvement_agent, "PENDING_PATCH_DIR", self.patch_dir):
+            path = self_improvement_agent._save_pending_patch(
+                Path(self.tmp.name), "branch")
+        self.assertEqual(path, "")
+
+    def test_handle_push_failure_saves_patch_and_emails(self):
+        with patch.object(self_improvement_agent, "PENDING_PATCH_DIR", self.patch_dir), \
+             patch.object(self_improvement_agent, "_send_fix_email") as email:
+            out = self_improvement_agent._handle_push_failure(
+                None, self.repo, "self-improvement/x",
+                "rc=0\ncommitted", "rc=1\npermission denied", target="main")
+        self.assertIn("push to main failed", out)
+        self.assertIn("git am", out)
+        email.assert_called_once()
+        summary = email.call_args.args[1]
+        self.assertIn("could not push", summary)
+        self.assertIn("pending_patches", summary)
+        self.assertEqual(len(list(self.patch_dir.glob("*.patch"))), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

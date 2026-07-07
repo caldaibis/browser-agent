@@ -32,6 +32,7 @@ from mcp.client.stdio import stdio_client
 
 from . import browser_dom_tools, credentials
 from .poller import dedup as poller_dedup
+from .self_improvement_harness import record_trajectory_event
 
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
@@ -301,7 +302,6 @@ AUTO_COOKIE = os.environ.get("APPLY_AUTO_COOKIE", "1") != "0"
 # nothing about the listing, exactly like a browser-lock timeout.
 NO_CREDIT_RC = 126
 
-
 def _recent_form_activity(sig_history: list[tuple], window: int = 8) -> bool:
     """True when any of the last `window` turns' tool calls touched a form —
     the signal that the run is mid-application rather than lost/looping."""
@@ -458,9 +458,14 @@ def _should_nudge_snapshot_overuse(snapshot_calls: int, turn: int) -> bool:
     return turn >= 10 and snapshot_calls >= max(6, turn // 2)
 
 
+def _record_trajectory(run_id: str, event: str, payload: dict | None = None) -> None:
+    if run_id:
+        record_trajectory_event(run_id, event, payload or {})
+
+
 async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger",
                 source_url: str = "", resolved: dict | None = None,
-                yield_check=None) -> tuple[int, str]:
+                yield_check=None, trajectory_id: str = "") -> tuple[int, str]:
     """resolved, when given, is a plain dict this fills in as {"url": ...} with
     the last distinct external destination the browser actually reached --
     read back by run_agent() after the call so callers can persist it as an
@@ -491,6 +496,12 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 FILL_BY_LABEL_TOOL, SELECT_OPTION_BY_LABEL_TOOL,
             ]
             log.line(f"[agent] model={model} tools={len(tools)} cdp={cdp_url}")
+            _record_trajectory(trajectory_id, "run_start", {
+                "model": model,
+                "tool_count": len(tools),
+                "source_url": source_url,
+                "max_turns": max_turns,
+            })
 
             messages: list[dict] = [{"role": "user", "content": prompt}]
             nudges_left = 2  # if the model stops early without finishing, prod it
@@ -509,6 +520,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         budget += GRACE_TURNS
                         log.line(f"[agent] turn budget reached mid-form -- "
                                  f"granting {GRACE_TURNS} grace turns (once)")
+                        _record_trajectory(trajectory_id, "guard", {
+                            "name": "grace_turns",
+                            "turn": turn,
+                            "extra_turns": GRACE_TURNS,
+                        })
                         messages.append({
                             "role": "user",
                             "content": (
@@ -528,6 +544,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 if yield_check is not None and yield_check():
                     log.line(f"[agent] YIELD at turn {turn}: a priority "
                              "(mail-triggered) apply is waiting for the browser")
+                    _record_trajectory(trajectory_id, "final", {
+                        "rc": 125,
+                        "outcome": "yielded",
+                        "turn": turn,
+                    })
                     return 125, (
                         "Yielded the browser mid-run to a priority mail-triggered "
                         "apply. This attempt did not finish and says nothing about "
@@ -588,6 +609,16 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                          f"cache_hit_tokens={cache_hit_tok} "
                          f"cache_miss_tokens={cache_miss_tok} "
                          f"(cap={MAX_TOKENS})")
+                _record_trajectory(trajectory_id, "turn_usage", {
+                    "turn": turn,
+                    "finish_reason": finish_reason,
+                    "prompt_tokens": prompt_tok,
+                    "completion_tokens": completion_tok,
+                    "total_tokens": total_tok,
+                    "reasoning_tokens": reasoning_tok,
+                    "cache_hit_tokens": cache_hit_tok,
+                    "cache_miss_tokens": cache_miss_tok,
+                })
 
                 # A turn cut off mid-reasoning comes back as finish_reason="length"
                 # with empty content and no tool_calls — a truncation glitch. We've
@@ -604,6 +635,12 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     log.line(f"[agent] turn {turn} truncated/dropped "
                              f"(finish_reason={finish_reason}, empty); retrying "
                              f"({trunc_retries_left} left)")
+                    _record_trajectory(trajectory_id, "guard", {
+                        "name": "truncated_empty_retry",
+                        "turn": turn,
+                        "finish_reason": finish_reason,
+                        "retries_left": trunc_retries_left,
+                    })
                     # The empty assistant turn was never appended (we continue
                     # before recording it), so just add a prod and retry.
                     messages.append({
@@ -631,6 +668,10 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 
                 if msg.content:
                     log.line(f"[agent] turn {turn} say: {msg.content.strip()[:400]}")
+                    _record_trajectory(trajectory_id, "assistant_text", {
+                        "turn": turn,
+                        "text": msg.content.strip()[:1000],
+                    })
 
                 if not tool_calls:
                     content = (msg.content or "").strip()
@@ -644,6 +685,12 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             log.line(f"[agent] nudge (model stopped without a "
                                      f"valid OUTCOME line, finish_reason="
                                      f"{finish_reason}; {nudges_left} left)")
+                            _record_trajectory(trajectory_id, "guard", {
+                                "name": "missing_outcome_nudge",
+                                "turn": turn,
+                                "finish_reason": finish_reason,
+                                "nudges_left": nudges_left,
+                            })
                             messages.append({
                                 "role": "user",
                                 "content": (
@@ -661,8 +708,19 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         log.line(f"[agent] STOP after {turn} turns: exhausted "
                                  f"nudges without a valid OUTCOME line "
                                  f"(finish_reason={finish_reason})")
+                        _record_trajectory(trajectory_id, "final", {
+                            "rc": 1,
+                            "outcome": "incomplete",
+                            "turn": turn,
+                            "reason": "missing_outcome",
+                        })
                         return 1, content
                     log.line(f"[agent] DONE after {turn} turns")
+                    _record_trajectory(trajectory_id, "final", {
+                        "rc": 0,
+                        "outcome": _extract_outcome(content),
+                        "turn": turn,
+                    })
                     return 0, content
 
                 # Detect degenerate repeated-action loops: exact repeats (e.g.
@@ -681,6 +739,13 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     repeat_nudged = False
                 if repeats >= 4:
                     log.line(f"[agent] ABORT: action cycle repeated {repeats + 1}x with no progress")
+                    _record_trajectory(trajectory_id, "final", {
+                        "rc": 1,
+                        "outcome": "incomplete",
+                        "turn": turn,
+                        "reason": "repeated_action_cycle",
+                        "repeats": repeats + 1,
+                    })
                     return 1, "Repeated the same action (or short cycle of actions) without progress."
 
                 for tc in tool_calls:
@@ -695,6 +760,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     short = {k: (v if k in ("url", "ref", "element")
                                  else str(v)[:200]) for k, v in args.items()}
                     log.line(f"[agent] turn {turn} call {name} {short}")
+                    _record_trajectory(trajectory_id, "tool_call", {
+                        "turn": turn,
+                        "tool": name,
+                        "args": short,
+                    })
                     if name == "lookup_credential":
                         # Handled locally; the password is returned to the model
                         # but never written to the transcript.
@@ -706,12 +776,24 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                                 f"password: {cred.get('password','')}"
                             )
                             log.line(f"[agent]   -> credential found for {site!r} (redacted)")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "summary": f"credential found for {site!r}",
+                            })
                         else:
                             text = (
                                 f"No stored credential for {site!r}. Stored sites: "
                                 f"{', '.join(credentials.available_domains()) or '(none)'}."
                             )
                             log.line(f"[agent]   -> no credential for {site!r}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "summary": f"no credential for {site!r}",
+                            })
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": text,
                         })
@@ -728,9 +810,21 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             current_url = await _current_tab_url(session)
                             text = await browser_dom_tools.dom_scan(cdp_url, current_url=current_url)
                             log.line(f"[agent]   -> dom_scan ({len(text)} chars)")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "chars": len(text),
+                            })
                         except Exception as e:
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> dom_scan error: {e}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "error": f"{type(e).__name__}: {e}",
+                            })
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
@@ -742,9 +836,21 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = await browser_dom_tools.click_by_text(
                                 cdp_url, click_text, current_url=current_url)
                             log.line(f"[agent]   -> click_by_text {click_text!r}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "summary": click_text,
+                            })
                         except Exception as e:
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> click_by_text error: {e}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "error": f"{type(e).__name__}: {e}",
+                            })
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
@@ -757,9 +863,21 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = await browser_dom_tools.fill_by_label(
                                 cdp_url, field_label, value, current_url=current_url)
                             log.line(f"[agent]   -> fill_by_label {field_label!r}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "summary": field_label,
+                            })
                         except Exception as e:
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> fill_by_label error: {e}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "error": f"{type(e).__name__}: {e}",
+                            })
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
@@ -772,9 +890,21 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                             text = await browser_dom_tools.select_option_by_label(
                                 cdp_url, field_label, option, current_url=current_url)
                             log.line(f"[agent]   -> select_option_by_label {field_label!r} -> {option!r}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "summary": f"{field_label} -> {option}",
+                            })
                         except Exception as e:
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> select_option_by_label error: {e}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "error": f"{type(e).__name__}: {e}",
+                            })
                         messages.append({
                             "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
@@ -784,6 +914,12 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     try:
                         result = await session.call_tool(name, args)
                         text = _result_text(result)
+                        _record_trajectory(trajectory_id, "tool_result", {
+                            "turn": turn,
+                            "tool": name,
+                            "ok": True,
+                            "chars": len(text),
+                        })
                         # Deterministic cookie-banner sweep right after every
                         # navigation -- consent overlays intercept all clicks
                         # and otherwise cost LLM turns to clear (one run burned
@@ -801,6 +937,12 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     except Exception as e:  # surface tool errors to the model
                         text = f"### Tool error\n{type(e).__name__}: {e}"
                         log.line(f"[agent]   -> error: {e}")
+                        _record_trajectory(trajectory_id, "tool_result", {
+                            "turn": turn,
+                            "tool": name,
+                            "ok": False,
+                            "error": f"{type(e).__name__}: {e}",
+                        })
                     messages.append({
                         "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                     })
@@ -810,6 +952,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 pruned = _prune_stale_page_dumps(messages)
                 if pruned:
                     log.line(f"[agent] pruned {pruned} stale page dump(s) from context")
+                    _record_trajectory(trajectory_id, "guard", {
+                        "name": "prune_stale_page_dumps",
+                        "turn": turn,
+                        "count": pruned,
+                    })
 
                 # Cross-source duplicate check: once per turn, see where the
                 # browser actually is now. An aggregator listing (e.g.
@@ -832,6 +979,12 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     # can act on the checkout — never enter payment details.
                     log.line(f"[agent] PAYMENT PAGE reached ({current_url!r}); "
                              "aborting to avoid any real payment")
+                    _record_trajectory(trajectory_id, "final", {
+                        "rc": 0,
+                        "outcome": "payment_required",
+                        "turn": turn,
+                        "url": current_url,
+                    })
                     return 0, (
                         f"Reached a payment/checkout page ({current_url}). This "
                         "site requires paying to apply/register; I stopped "
@@ -848,6 +1001,13 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                                 "already has a recorded submission from a different "
                                 "source/entry point -- stopping without resubmitting."
                             )
+                            _record_trajectory(trajectory_id, "final", {
+                                "rc": 0,
+                                "outcome": "already_applied",
+                                "turn": turn,
+                                "url": current_url,
+                                "reason": "cross_source_duplicate",
+                            })
                             return 0, (
                                 f"This listing's actual destination ({current_url}) already "
                                 "has a recorded submission reached via a different source/"
@@ -859,6 +1019,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 if repeats >= 2 and not repeat_nudged:
                     repeat_nudged = True
                     log.line("[agent] repeat-guard nudge")
+                    _record_trajectory(trajectory_id, "guard", {
+                        "name": "repeat_action_nudge",
+                        "turn": turn,
+                        "repeats": repeats + 1,
+                    })
                     messages.append({
                         "role": "user",
                         "content": (
@@ -873,6 +1038,11 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                     snapshot_nudged = True
                     log.line(f"[agent] snapshot-overuse nudge "
                              f"({snapshot_calls} snapshots in {turn} turns)")
+                    _record_trajectory(trajectory_id, "guard", {
+                        "name": "snapshot_overuse_nudge",
+                        "turn": turn,
+                        "snapshot_calls": snapshot_calls,
+                    })
                     messages.append({
                         "role": "user",
                         "content": (
@@ -890,6 +1060,13 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 
             log.line(f"[agent] STOP: hit turn budget={budget} "
                      f"(max_turns={max_turns}, grace={grace_granted})")
+            _record_trajectory(trajectory_id, "final", {
+                "rc": 1,
+                "outcome": "incomplete",
+                "turn": turn,
+                "reason": "turn_budget",
+                "budget": budget,
+            })
             return 1, "Hit the turn budget before reaching a conclusion."
 
 
@@ -977,7 +1154,8 @@ def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: P
         try:
             return await asyncio.wait_for(
                 _run(prompt, model, max_turns, cdp_url, log, source_url=source_url,
-                     resolved=resolved, yield_check=yield_check),
+                     resolved=resolved, yield_check=yield_check,
+                     trajectory_id=log_path.stem),
                 timeout=timeout_seconds)
         except asyncio.TimeoutError:
             log.line(f"[agent] TIMEOUT after {timeout_seconds}s")

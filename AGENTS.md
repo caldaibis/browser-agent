@@ -117,6 +117,51 @@ form, uploads docs, submits).
   Oslo saga was exactly that rediscovery). Fail-open everywhere: a playbook
   failure never fails an apply. Env: `PLAYBOOK_MODEL`, `PLAYBOOK_MAX_CHARS`,
   `PLAYBOOK_TIMEOUT_SECONDS`.
+- `src/self_improvement_harness.py` — **structured failure evidence** (offline,
+  fail-open). `record_trajectory_event` is called from `browser_agent._run` to
+  write redacted, typed JSONL per run (`logs/trajectories/`): turn usage, tool
+  calls/results, guard firings, final outcome — the machine-readable
+  counterpart of the transcript (`APPLY_TRAJECTORY_ENABLED=0` disables).
+  `classify_failure` is the deterministic weakness classifier shared by
+  incident fingerprinting, `just self-improve-mine` (cluster recent failed
+  transcripts into evidence bundles) and `just self-improve-eval` (fixture
+  regressions in `tests/fixtures/self_improvement_harness/` that keep this
+  file's hard-won lessons executable; also runs inside `just check` via the
+  test suite). Deliberately NOT here: autonomous "harness evolution"
+  self-patching — that duplicated `self_improvement_agent.py` with weaker
+  guardrails and was dropped (07-07-2026); code changes go through the
+  guarded agent only.
+- `src/incident_store.py` — **cross-run memory: incidents, not episodes.**
+  Production data (48 runs to 07-07-2026) showed ~half of all
+  self-improvement runs re-diagnosed a failure another run had already worked
+  on the same day (the 03-07 browser_lock hang: FIVE full runs in seven
+  hours). Every failure gets a deterministic fingerprint
+  (`classify_failure` signature, domain-scoped for site-specific classes,
+  global for infrastructure classes so cross-listing infra failures collapse
+  into one incident); `state/self_improvement/incidents.jsonl` records every
+  occurrence and attempt. `improve_after_apply` skips the run when the
+  fingerprint already had one within `SELF_IMPROVEMENT_DEDUP_HOURS` (24h
+  default — the occurrence is still recorded, so prevented spend stays
+  observable) and otherwise injects `attempt_history` into the context so
+  run N starts from run N-1's findings.
+- `src/known_gates.py` — **a data lever for diagnosed external gates.**
+  `state/known_gates.json` holds per-domain gates the self-improvement agent
+  records via its `record_known_gate` tool at diagnosis time
+  (paid_registration / account_cap / region_registration / delayed_access /
+  eligibility, optional `expires_ts` for temporary caps). `apply.apply`
+  pre-flight skips paid_registration domains as `payment_required` before
+  the browser opens (merged into `_payment_required_reason`);
+  `apply.build_prompt` injects the other kinds as KNOWN GATES warnings. A
+  diagnosis becomes deterministic prevention with no commit/CI/deploy, and
+  is reversible by deleting a JSON entry. (Why: your-house.nl's €25 gate was
+  correctly diagnosed twice in one day, but turning that into prevention
+  needed a human commit.)
+- `src/digest.py` — weekly outcome digest (`just digest`; sent by the
+  healthcheck every `DIGEST_INTERVAL_DAYS`, default 7): outcomes by trigger,
+  apply-loop guard fire counts (from trajectories), self-improvement actions
+  + landing rate, top incident fingerprints, **unlanded pending patches**,
+  active known gates. Exists because nobody could tell whether a change
+  improved the pipeline without aggregating logs by hand.
 - `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
   (blocked/error/incomplete/timeout/not_available/…, see
   `SELF_IMPROVEMENT_OUTCOMES`). Drives the **Claude Agent SDK**
@@ -127,7 +172,15 @@ form, uploads docs, submits).
   freshly-fetched `origin/main` — never `PROJECT_ROOT` itself, so a run can
   never collide with the live checkout or in-progress human edits) and
   always removes it in a `finally` (`_remove_worktree`), even on timeout.
-  Diagnoses the failure from the redacted transcript/logs/code, then either
+  **Two phases** (07-07-2026 — 3 production runs died at "Reached maximum
+  number of turns (30)" because ONE budget had to cover diagnose+patch+verify):
+  a read-only diagnosis run (`SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS`, 15) ends
+  with a `DIAGNOSIS_JSON` verdict (noop / email_user / fix, plus
+  `record_known_gate` for external gates); only a `fix` verdict starts the
+  patch run, which gets the full `SELF_IMPROVEMENT_MAX_TURNS` budget to
+  itself and the diagnosis injected. Diagnoses the failure from the redacted
+  transcript/logs/code (plus `incident.prior_attempts` — see
+  `incident_store`), then either
   does nothing, emails the user, or patches + verifies (`just check` in the
   worktree, which finds an already-installed environment via a `.venv`
   *symlink* to `PROJECT_ROOT`'s real one — `uv run` follows it transparently
@@ -144,7 +197,11 @@ form, uploads docs, submits).
   `deploy.yml` pipeline; there is no separate local deploy script anymore.
   Otherwise (deploy disabled, or `main` moved during the run) it pushes a
   `self-improvement/<ts>` review branch instead and emails the user to merge
-  by hand. Browser diagnostics (`browser_open`, `browser_diagnostics`,
+  by hand. **When every push fails** (verified in production: the VPS deploy
+  key was read-only, so five correct fixes in a row were written and lost),
+  the commit is saved as a `git am`-able patch in `state/pending_patches/`
+  and attached to the alert email — a verified fix must never die with the
+  worktree. Browser diagnostics (`browser_open`, `browser_diagnostics`,
   `browser_safe_click`, `browser_screenshot`) are custom MCP tools over the
   same shared CDP browser, guarded by `browser_lock`. Routed through a local
   **LiteLLM proxy** (`deploy/litellm.config.yaml`, `just litellm-proxy`)
@@ -170,9 +227,13 @@ form, uploads docs, submits).
 - `src/healthcheck.py` (+ systemd timer, 30 min) — alerts (push + email) when:
   DeepSeek credit is low; a pipeline systemd unit is down (orchestrator/poller/
   browser-host/litellm-proxy — a crash-looping orchestrator is otherwise
-  invisible, see hard-won lessons); or a session expired on Stekkies or a top
+  invisible, see hard-won lessons); a session expired on Stekkies or a top
   apply site (`SITE_PROBES`: huurwoningen.nl, kamernet.nl — extend via
-  `HEALTHCHECK_SITE_PROBES` JSON). Site probes run in the real shared browser
+  `HEALTHCHECK_SITE_PROBES` JSON); or the **last
+  `SELF_IMPROVEMENT_HEALTH_WINDOW` (5) self-improvement runs all failed**
+  (27 identical crashes on 01-07-2026 went unnoticed as a pattern — the
+  layer that repairs failures needs its own watcher). Also sends the weekly
+  `src/digest.py` summary, piggybacked on this timer. Site probes run in the real shared browser
   under `browser_lock(timeout=60)` and are skipped when an apply is in flight.
   Optionally GETs `HEALTHCHECK_PING_URL` (dead-man's switch, e.g.
   healthchecks.io) at the end of each run — its *absence* alerts on total-box

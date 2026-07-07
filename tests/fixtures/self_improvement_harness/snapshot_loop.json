@@ -1,0 +1,7 @@
+{
+  "outcome": "incomplete",
+  "domain": "example.test",
+  "expected_surface": "control_policy",
+  "expected_signature": "context-growth",
+  "transcript": "snapshot-overuse nudge (14 snapshots in 20 turns)\n[agent] pruned 7 stale page dump(s) from context\nHit the turn budget before reaching a conclusion."
+}

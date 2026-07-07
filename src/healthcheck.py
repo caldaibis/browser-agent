@@ -8,6 +8,13 @@
      Gmail token revoked, 1136 restarts, 3 days of lost listings, and no email
      alert could reach the user because email needs that same token; push +
      this check close that hole).
+  4. The self-improvement layer itself failing repeatedly — 27 identical
+     crashes over 01-07-2026 went unnoticed as a pattern because each one
+     looked like a single bad run. Same lesson as #3 applied one level up:
+     the thing that fixes failures needs its own watcher.
+
+Also sends the weekly outcome digest (src/digest.py) piggybacked on this
+timer — no extra systemd unit needed.
 
 Alerts are de-duped via state/alerts.json: one alert when a problem appears,
 re-armed once the problem clears. Optionally pings a dead-man's-switch URL
@@ -20,9 +27,10 @@ Run periodically (systemd timer):
 import json
 import os
 import subprocess
+import time
 import urllib.request
 
-from .config import PROJECT_ROOT, CDP_URL
+from .config import LOG_DIR, PROJECT_ROOT, CDP_URL
 from .notify import send_alert
 from .poller.browser_lock import browser_lock
 
@@ -236,6 +244,71 @@ def check_site_logins(state: dict) -> None:
             state[key] = False
 
 
+# Alert when the last N self-improvement runs ALL failed (crash, fix_failed,
+# timeout, incomplete). Skips/dedup records are neither success nor failure.
+SELF_IMPROVEMENT_HEALTH_WINDOW = int(os.environ.get("SELF_IMPROVEMENT_HEALTH_WINDOW", "5"))
+_SI_FAILURE_ACTIONS = {"error", "fix_failed", "timeout", "incomplete"}
+
+
+def check_self_improvement(state: dict) -> None:
+    runs: list[bool] = []  # True = failed
+    try:
+        with (LOG_DIR / "self_improvement.jsonl").open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event = rec.get("event")
+                if event == "error":
+                    runs.append(True)
+                elif event == "done":
+                    runs.append(str(rec.get("action") or "") in _SI_FAILURE_ACTIONS)
+    except OSError:
+        return
+    recent = runs[-SELF_IMPROVEMENT_HEALTH_WINDOW:]
+    all_failing = (len(recent) >= SELF_IMPROVEMENT_HEALTH_WINDOW and all(recent))
+    print(f"[health] self-improvement recent failures: "
+          f"{sum(recent)}/{len(recent)} (window {SELF_IMPROVEMENT_HEALTH_WINDOW})")
+    if all_failing:
+        if not state.get("si_failing_sent"):
+            send_alert(
+                "🚨 Stekkies bot: self-improvement keeps failing",
+                f"The last {len(recent)} self-improvement runs ALL ended in "
+                "error/fix_failed/timeout/incomplete — the layer that is "
+                "supposed to repair failures is itself broken or blocked "
+                "(dead proxy? read-only deploy key? see "
+                "state/pending_patches/ for unlanded fixes).\n\n"
+                f"  ssh {SERVER_HINT} 'tail -n 20 ~deploy/browser-agent/logs/self_improvement.jsonl'\n",
+            )
+            state["si_failing_sent"] = True
+    else:
+        state["si_failing_sent"] = False
+
+
+# Weekly outcome digest, piggybacked on the healthcheck timer (30 min) so it
+# needs no extra systemd unit. 0 disables.
+DIGEST_INTERVAL_DAYS = float(os.environ.get("DIGEST_INTERVAL_DAYS", "7"))
+
+
+def maybe_send_digest(state: dict) -> None:
+    if DIGEST_INTERVAL_DAYS <= 0:
+        return
+    last = float(state.get("digest_sent_ts") or 0)
+    if time.time() - last < DIGEST_INTERVAL_DAYS * 86400:
+        return
+    try:
+        from .digest import build_digest
+
+        body = build_digest(days=DIGEST_INTERVAL_DAYS)
+    except Exception as e:  # noqa: BLE001 - digest must never fail the healthcheck
+        print(f"[health] digest build failed: {e}")
+        return
+    send_alert("📊 Stekkies bot: weekly digest", body)
+    state["digest_sent_ts"] = time.time()
+    print("[health] weekly digest sent")
+
+
 def ping_deadman() -> None:
     """Tell the external dead-man's switch this healthcheck ran. Its absence —
     box down, timer broken, repo wedged — is what actually raises the alarm,
@@ -254,6 +327,8 @@ def main() -> int:
     check_credits(state)
     check_services(state)
     check_site_logins(state)
+    check_self_improvement(state)
+    maybe_send_digest(state)
     _save(state)
     ping_deadman()
     return 0
