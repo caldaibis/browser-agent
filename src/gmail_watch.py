@@ -346,6 +346,14 @@ def watch_events(poll_seconds: int = POLL_SECONDS) -> Iterator[GmailListingEvent
     seen_this_process: set[str] = set()
     while True:
         try:
+            # Gather this cycle's new mails from BOTH providers, then yield
+            # NEWEST-LISTING-FIRST. Rentals are won in the first minute, and
+            # the applier is serial (one shared browser), so on a burst the
+            # order of this queue decides which listings are still winnable by
+            # the time we reach them. Verified worth it 07-07-2026: 13 mails
+            # arrived in a 32-min window; FIFO made the last-queued (but often
+            # freshest) listing wait ~25 min behind older ones.
+            batch: list[GmailListingEvent] = []
             for provider, query in queries:
                 resp = svc.users().messages().list(
                     userId="me", q=query, maxResults=10,
@@ -355,12 +363,13 @@ def watch_events(poll_seconds: int = POLL_SECONDS) -> Iterator[GmailListingEvent
                     if not msg_id or msg_id in seen_this_process:
                         continue
                     seen_this_process.add(msg_id)
-                    ev = _event_from_message(svc, msg_id, provider)
-                    if ev.url:
-                        yield ev
-                    else:
-                        print(f"[gmail] {provider} mail {msg_id} had no listing link; skipped.")
-                        yield ev
+                    batch.append(_event_from_message(svc, msg_id, provider))
+            # Newest received first; empty received_ts sorts last.
+            batch.sort(key=lambda e: e.received_ts or "", reverse=True)
+            for ev in batch:
+                if not ev.url:
+                    print(f"[gmail] {ev.provider} mail {ev.msg_id} had no listing link; skipped.")
+                yield ev
         except Exception as e:  # keep the watcher alive
             print("[gmail] error:", e)
         time.sleep(poll_seconds)

@@ -34,6 +34,7 @@ _OUTCOME = {
     "incomplete":      ("❌", "Incomplete"),
     "error":           ("❌", "Error"),
     "no_credit":       ("💸", "Out of API credit"),
+    "payment_required": ("💳", "Payment required (not paid)"),
 }
 
 

@@ -17,6 +17,7 @@ fine, they already publish structured data on their list pages.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -24,7 +25,41 @@ import httpx
 
 from .poller.fetch import DEFAULT_HEADERS
 from .poller.models import SiteConfig
-from .poller.parsers import parse_jsonld
+from .poller.parsers import _num, parse_jsonld
+
+# HTML fallback for anchor sites whose detail pages carry NO schema.org housing
+# JSON-LD (verified 07-07-2026: ikwilhuren.nu detail pages have only
+# Organization/breadcrumb LD, but show "€ 1.355,- /mnd" in plain HTML). Without
+# this, 158 such listings were the single largest poller drop ("price unknown").
+#
+# A page has several € amounts (rent, parking, service costs, deposit), so we
+# only trust € values with a PER-MONTH marker right after them and take the
+# largest in a sane rent band — rent is ~always the biggest recurring monthly
+# figure, and a one-time deposit ("borg") carries no /mnd marker. Deliberately
+# conservative: a wrong guess that inflated the price would drop a valid
+# listing, the exact false-negative we are trying to eliminate.
+_MONTHLY_PRICE_RE = re.compile(
+    r"€\s*([\d.,]+)\s*(?:,-\s*)?(?:/\s*mnd|/\s*maand|p\s*/?\s*m\b|per\s+maand)",
+    re.IGNORECASE,
+)
+_RENT_BAND = (300.0, 8000.0)
+
+
+def _html_price(html: str) -> float | None:
+    candidates = []
+    for m in _MONTHLY_PRICE_RE.finditer(html):
+        val = _num(m.group(1))
+        if val is not None and _RENT_BAND[0] <= val <= _RENT_BAND[1]:
+            candidates.append(val)
+    return max(candidates) if candidates else None
+
+
+# NB: surface is deliberately NOT extracted from raw HTML. A detail page shows
+# several "N m2" figures (living area, storage/berging, balcony, plot) and the
+# living area is not reliably first or largest; a wrong small value would only
+# ever FALSELY DROP a valid listing (the surface filter only rejects, never
+# rescues). Leaving surface None is strictly safer — an unknown surface passes
+# the filter and the apply agent reads the real area on the page anyway.
 
 # Sites that are shop windows: the page describes the listing, but the real
 # application usually happens on the landlord/agency's own site behind the
@@ -66,19 +101,22 @@ def fetch_context(url: str, timeout: float = 8.0) -> ListingContext | None:
         listings = parse_jsonld(resp.text, SiteConfig(name=_domain(url), list_url=url))
     except Exception:  # noqa: BLE001 - strictly fail-open, see module docstring
         return None
-    if not listings:
-        return None
-    # Prefer the node with a real description (a detail page can also embed
-    # e.g. Organization/breadcrumb nodes); fall back to the first.
-    best = max(listings, key=lambda l: len(l.description))
+
+    # Prefer the JSON-LD node with a real description (a detail page can also
+    # embed Organization/breadcrumb nodes); anchor sites yield none at all.
+    best = max(listings, key=lambda l: len(l.description)) if listings else None
     ctx = ListingContext(
-        description=best.description.strip(),
-        title=best.title,
-        city=best.city,
-        address=best.address,
-        price=best.price,
-        surface=best.surface,
+        description=(best.description.strip() if best else ""),
+        title=(best.title if best else ""),
+        city=(best.city if best else ""),
+        address=(best.address if best else ""),
+        price=(best.price if best else None),
+        surface=(best.surface if best else None),
     )
+    # HTML fallback when JSON-LD gave no price (the anchor-site case). Surface
+    # is intentionally left to JSON-LD only (see _html_price note above).
+    if ctx.price is None:
+        ctx.price = _html_price(resp.text)
     if not (ctx.description or ctx.price or ctx.surface):
         return None
     return ctx

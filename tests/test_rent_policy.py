@@ -46,6 +46,31 @@ class TestRentPolicy(unittest.TestCase):
         self.assertEqual(result.rc, 0)
         self.assertIn("above the configured max rent", result.summary)
 
+    def test_apply_short_circuits_known_paid_application_site(self):
+        result = apply.apply({
+            "source_url": "https://your-house.nl/woningaanbod/huur/utrecht/test/1",
+            "source_name": "your-house.nl",
+            "address": "Teststraat 1",
+            "price": "€ 1.500 per maand",
+        })
+        self.assertEqual(result.outcome, "payment_required")
+        self.assertEqual(result.rc, 0)
+        self.assertIn("requires payment", result.summary)
+
+    def test_payment_wording_detected_without_browser(self):
+        reason = apply._payment_required_reason({
+            "source_url": "https://example.test/listing",
+            "description": "Om te reageren is een lidmaatschap van €25 per jaar vereist.",
+        })
+        self.assertIsNotNone(reason)
+
+    def test_free_registration_wording_not_detected_as_payment(self):
+        reason = apply._payment_required_reason({
+            "source_url": "https://example.test/listing",
+            "description": "Geen inschrijfkosten. Reageren is gratis.",
+        })
+        self.assertIsNone(reason)
+
 
 if __name__ == "__main__":
     unittest.main()

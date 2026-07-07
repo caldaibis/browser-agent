@@ -194,6 +194,53 @@ _COOKIE_CLOSE_SELECTORS = [
     for base in ("button", "[role=button]", "a")
 ]
 
+_CONSENT_SYNC_URL_MARKERS = (
+    "user-sync", "usersync", "sync.privacy", "sync.ad", "adnxs.com",
+    "doubleclick.net", "rubiconproject.com", "pubmatic.com", "criteo.com",
+    "bing.com/fd/ls",
+)
+
+
+def _is_consent_sync_url(url: str) -> bool:
+    low = (url or "").lower()
+    return any(marker in low for marker in _CONSENT_SYNC_URL_MARKERS)
+
+
+async def _close_consent_sync_tabs(browser, preferred_url: str | None) -> int:
+    """Close adtech/user-sync tabs opened by consent managers.
+
+    Pararius consent has been seen to open/select a user-sync tab after the
+    auto-dismiss click, so the next agent turn wastes time on an irrelevant
+    page. Only close known sync/adtech URLs, and bring the original page back
+    to front when it is still present.
+    """
+    closed = 0
+    for ctx in browser.contexts:
+        pages = list(ctx.pages)
+        keep = None
+        if preferred_url:
+            for page in pages:
+                if page.url == preferred_url and not _is_consent_sync_url(page.url):
+                    keep = page
+                    break
+        if keep is None:
+            keep = next((p for p in pages if not _is_consent_sync_url(p.url)), None)
+        for page in pages:
+            if page is keep:
+                continue
+            if _is_consent_sync_url(page.url):
+                try:
+                    await page.close()
+                    closed += 1
+                except Exception:
+                    pass
+        if keep is not None:
+            try:
+                await keep.bring_to_front()
+            except Exception:
+                pass
+    return closed
+
 
 async def dismiss_cookie_banner(cdp_url: str, current_url: str | None = None) -> str | None:
     """Deterministically click away a cookie/consent banner on the current
@@ -217,9 +264,14 @@ async def dismiss_cookie_banner(cdp_url: str, current_url: str | None = None) ->
                 try:
                     await loc.click(timeout=1200)
                     await page.wait_for_timeout(400)
-                    return f"{kind} a cookie/consent banner"
+                    closed = await _close_consent_sync_tabs(browser, page.url)
+                    note = f"{kind} a cookie/consent banner"
+                    if closed:
+                        note += f" and closed {closed} consent sync tab(s)"
+                    return note
                 except Exception:  # noqa: BLE001 - absence is the normal case
                     continue
+            await _close_consent_sync_tabs(browser, current_url)
             return None
         finally:
             await browser.close()

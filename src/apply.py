@@ -13,6 +13,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import site_playbooks
 from .apply_priority import priority_pending
@@ -32,6 +33,58 @@ APPLY_TIMEOUT_SECONDS = int(os.environ.get("APPLY_TIMEOUT_SECONDS", "900"))
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = os.environ.get("GOOGLE_ACCOUNT", "you@example.com")
+
+# Sites/wording where applying is gated by a paid registration or membership.
+# These are not normal free rental forms, and the bot must not spend money or
+# spend LLM turns discovering a checkout. your-house.nl was verified on
+# 07-07-2026 to lead to a live Mollie EUR 25 membership payment before applying.
+KNOWN_PAID_APPLICATION_DOMAINS = {"your-house.nl"}
+_PAYMENT_SENTENCE_SPLIT = re.compile(r"[.!?\n|]+")
+_PAYMENT_NEGATIONS = ("geen", "niet", "no ", "not ", "gratis", "free")
+_PAYMENT_TEXT_RES = (
+    re.compile(
+        r"\b(lidmaatschap|inschrijfkosten|registratiekosten|servicekosten)\b"
+        r"[^.!?\n]{0,120}(€\s*\d|eur\s*\d|\d+[\d.,]*\s*euro)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(€\s*\d[\d.,]*|eur\s*\d[\d.,]*|\d+[\d.,]*\s*euro)"
+        r"[^.!?\n]{0,120}\b(lidmaatschap|inschrijven|registratie|reageren)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(paywall|upgrade required|plus account required)\b", re.IGNORECASE),
+)
+
+
+def _domain(url: str) -> str:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _payment_required_reason(listing: dict) -> str | None:
+    domain = _domain(listing.get("source_url", ""))
+    if domain in KNOWN_PAID_APPLICATION_DOMAINS:
+        return f"{domain} is a known paid-registration application site"
+
+    description = (listing.get("description") or "").strip()
+    if not description:
+        ctx = fetch_context(listing.get("source_url", ""))
+        if ctx:
+            description = ctx.description
+    text = "\n".join(
+        str(x or "") for x in (
+            listing.get("source_name"), listing.get("address"),
+            listing.get("title"), description,
+        )
+    )
+    for sentence in _PAYMENT_SENTENCE_SPLIT.split(text):
+        low = sentence.lower()
+        if not low.strip() or any(n in low for n in _PAYMENT_NEGATIONS):
+            continue
+        for rx in _PAYMENT_TEXT_RES:
+            if rx.search(sentence):
+                return f"paid registration/application wording: {sentence.strip()[:180]}"
+    return None
 
 
 # Priority (lower = attach first) + one-line purpose per document type, matched
@@ -274,10 +327,24 @@ TOOL USE — BE EFFICIENT AND CORRECT (this saves tokens and time):
   re-snapshot and retry; never claim the server crashed or ask me to type
   "retry". You run autonomously to completion.
 
+NEVER SPEND MONEY — ABSOLUTE RULE. You must NEVER enter payment details, and
+NEVER proceed past any checkout, payment, or paid-registration step. If applying
+or registering requires a fee — wording like "lidmaatschap", "inschrijfkosten",
+"registratiekosten", "servicekosten voor inschrijving", "€X eenmalig/per jaar
+om te reageren", an iDEAL/creditcard/Mollie/PayPal payment screen, or any
+"betalen"/"afrekenen" button gating the application — STOP IMMEDIATELY without
+paying and report `OUTCOME: payment_required`, stating the fee and what it was
+for. A normal FREE application form that merely asks for your income type or a
+credit-check consent checkbox is NOT a payment and is fine to complete. When in
+doubt about whether something costs money, do NOT proceed: stop and report
+payment_required. (A one-time paid email-alert subscription is the separate
+upsell trap already described above — same rule: never pay.)
+
 STOP EARLY WHEN THE LISTING CANNOT BE RESPONDED TO. If the property shows any of:
-paywall ("Plus"/"upgrade required"), not eligible ("je komt niet in aanmerking"),
-suitability still being recalculated, or the "reageer"/apply control is simply
-absent — then STOP IMMEDIATELY and report that status.
+paywall ("Plus"/"upgrade required"), a paid registration/membership requirement
+(report payment_required, per the rule above), not eligible ("je komt niet in
+aanmerking"), suitability still being recalculated, or the "reageer"/apply
+control is simply absent — then STOP IMMEDIATELY and report that status.
 
 ALREADY-APPLIED = STOP (never resubmit). If the page offers to MODIFY, CHANGE,
 WITHDRAW, or CONTINUE an existing request — e.g. "Aanvraag wijzigen", "wijzig je
@@ -324,6 +391,7 @@ a last line that is EXACTLY one of:
   OUTCOME: not_available      (listing expired/archived/removed)
   OUTCOME: not_eligible       (you do not qualify / blocked by criteria)
   OUTCOME: login_required     (could not log in / account needed)
+  OUTCOME: payment_required   (applying/registering requires paying a fee; you did NOT pay)
   OUTCOME: blocked            (any other reason you could not submit)
 """
 
@@ -351,6 +419,15 @@ def apply(listing: dict, model: str = APPLY_MODEL,
         )
         print(f"[apply] {summary}")
         return AgentResult(rc=0, outcome="not_eligible", summary=summary)
+
+    payment_reason = _payment_required_reason(listing)
+    if payment_reason:
+        summary = (
+            "Skipped before opening the browser: applying or registering "
+            f"requires payment ({payment_reason}). I did not pay."
+        )
+        print(f"[apply] {summary}")
+        return AgentResult(rc=0, outcome="payment_required", summary=summary)
 
     prompt = build_prompt(listing)
     # Persist a per-run transcript + prompt so nothing is overwritten/lost.

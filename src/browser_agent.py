@@ -256,8 +256,27 @@ def _prune_stale_page_dumps(messages: list[dict]) -> int:
 # Outcomes the model may declare via a final "OUTCOME: <x>" line.
 VALID_OUTCOMES = {
     "submitted", "already_applied", "not_available", "not_eligible",
-    "login_required", "blocked",
+    "login_required", "blocked", "payment_required",
 }
+
+# HARD MONEY GUARD. The agent must never spend real money. On 07-07-2026 a run
+# navigated all the way to a live Mollie €25 "membership" checkout on
+# your-house.nl and spent a whole turn *deliberating whether to pay* before
+# declining — one tool call from entering payment details. Prompt text is not
+# a spending boundary, so this is enforced in code: the moment the browser's
+# current tab lands on a known payment processor / checkout, the run aborts
+# with payment_required BEFORE the model can act on that page. Substring match
+# on the host (adyen/stripe expose checkout on subdomains).
+_PAYMENT_HOST_MARKERS = (
+    "mollie.com", "buckaroo.nl", "buckaroo.eu", "adyen.com", "stripe.com",
+    "checkout.stripe", "paypal.com", "pay.nl", "ideal.nl", "targetpay",
+    "sisow", "multisafepay", "worldline", "ingenico",
+)
+
+
+def _is_payment_url(url: str) -> bool:
+    host = (re.sub(r"^https?://", "", url or "").split("/", 1)[0]).lower()
+    return any(m in host for m in _PAYMENT_HOST_MARKERS)
 
 # One-shot extra turn budget granted at max_turns when the run is
 # demonstrably mid-form (recent fill/upload/select activity): killing a run
@@ -807,6 +826,17 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                 # because nothing cross-checked the two paths' URLs against
                 # each other before this existed.
                 current_url = await _current_tab_url(session)
+                if current_url and _is_payment_url(current_url):
+                    # HARD MONEY GUARD (see _PAYMENT_HOST_MARKERS): the browser
+                    # reached a payment processor. Stop NOW, before the model
+                    # can act on the checkout — never enter payment details.
+                    log.line(f"[agent] PAYMENT PAGE reached ({current_url!r}); "
+                             "aborting to avoid any real payment")
+                    return 0, (
+                        f"Reached a payment/checkout page ({current_url}). This "
+                        "site requires paying to apply/register; I stopped "
+                        "without paying, as instructed.\nOUTCOME: payment_required"
+                    )
                 if current_url:
                     current_canon = poller_dedup.canonical_url(current_url)
                     if current_canon != source_canon:

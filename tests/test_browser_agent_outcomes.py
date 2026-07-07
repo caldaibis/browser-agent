@@ -20,6 +20,25 @@ class TestParseOutcome(unittest.TestCase):
         self.assertEqual(browser_agent._parse_outcome("", 125), "yielded")
         self.assertEqual(browser_agent._parse_outcome("", 124), "timeout")
 
+    def test_payment_required_is_valid_outcome(self):
+        self.assertEqual(
+            browser_agent._extract_outcome("Stopped before paying.\nOUTCOME: payment_required"),
+            "payment_required")
+
+
+class TestPaymentUrlGuard(unittest.TestCase):
+    def test_known_payment_processors(self):
+        self.assertTrue(browser_agent._is_payment_url(
+            "https://www.mollie.com/checkout/select-method/abc"))
+        self.assertTrue(browser_agent._is_payment_url(
+            "https://checkout.stripe.com/c/pay/cs_test"))
+        self.assertTrue(browser_agent._is_payment_url(
+            "https://checkoutshopper-live.adyen.com/checkoutshopper/"))
+
+    def test_normal_listing_url_not_payment(self):
+        self.assertFalse(browser_agent._is_payment_url(
+            "https://www.huurwoningen.nl/huren/utrecht/abc/test/"))
+
 
 class TestRecentFormActivity(unittest.TestCase):
     def test_detects_fill_in_recent_window(self):

@@ -100,8 +100,9 @@ REGISTRY: list[SiteConfig] = [
     _tier3("plaza.newnewnew.space", "https://plaza.newnewnew.space/aanbod",
            needs_login=True,
            parse=make_anchor_parser(r"/aanbod/huurwoningen/details/\d+-")),         # VALIDATED: 32
-    _tier3("your-house.nl", "https://your-house.nl/woningaanbod/huur",
-           parse=make_anchor_parser(r"/woningaanbod/huur/[a-z-]+/[^/?]+/\d")),      # VALIDATED: 12
+    # your-house.nl: dropped 07-07-2026. Applying now requires a paid EUR 25
+    # membership and led the agent to a live Mollie checkout. We never pay, so
+    # polling it only burns tier-3 browser time and LLM turns.
     _tier3("vesteda.com", "https://www.vesteda.com/nl/woning-zoeken",
            parse=make_anchor_parser(
                r"/nl/huurwoning(?:en)?-utrecht/[a-z0-9-]+/[a-z0-9-]+")),
