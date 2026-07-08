@@ -93,12 +93,45 @@ class TestEvidenceAndEval(unittest.TestCase):
             signatures = {c["signature"] for c in bundle["clusters"]}
             self.assertIn("refless-dialog-dom-fallback", signatures)
             self.assertIn("payment-checkout-hard-stop", signatures)
+            self.assertEqual(len(bundle["preserved_success_examples"]), 1)
             self.assertEqual(len(list(out.glob("*.json"))), 1)
 
     def test_eval_harness_uses_fixture_expectations(self):
         summary = harness.eval_harness()
         self.assertGreaterEqual(summary["passed"], 3)
         self.assertEqual(summary["failed"], 0, summary)
+
+    def test_build_failure_record_has_causal_fields(self):
+        rec = harness.build_failure_record(
+            "Reached Mollie checkout before applying.",
+            outcome="blocked",
+            domain="your-house.nl",
+        )
+        self.assertEqual(rec.signature, "payment-checkout-hard-stop")
+        self.assertEqual(rec.surface, "control_policy")
+        self.assertIn("checkout", rec.causal_behavior)
+
+    def test_apply_harness_eval_fixtures_pass(self):
+        summary = harness.eval_apply_harness()
+        self.assertGreaterEqual(summary["passed"], 4)
+        self.assertEqual(summary["failed"], 0, summary)
+
+    def test_candidate_archive_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(harness, "LINEAGE_LOG", Path(td) / "lineage.jsonl"):
+            harness.record_candidate_event("start", {
+                "candidate_id": "c1",
+                "strategy": "control_policy",
+            })
+            rows = harness.candidate_history()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["event"], "candidate.start")
+
+    def test_changes_touch_apply_harness(self):
+        self.assertTrue(harness.changes_touch_apply_harness(["src/browser_agent.py"]))
+        self.assertTrue(harness.changes_touch_apply_harness([
+            "tests/fixtures/apply_harness_eval/payment.json"]))
+        self.assertFalse(harness.changes_touch_apply_harness(["README.md"]))
 
 
 if __name__ == "__main__":

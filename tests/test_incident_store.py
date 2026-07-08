@@ -124,6 +124,18 @@ class TestAttemptHistory(_TempLog):
         self.assertEqual(rows[0]["attempts"], 1)
         self.assertEqual(rows[0]["last_action"], "fix_failed")
 
+    def test_post_deploy_status_reports_recurrence(self):
+        fp = incident_store.fingerprint_failure(
+            {"source_url": "https://example.nl/x"}, "error", "browser_lock timeout")
+        incident_store.record_attempt(
+            fp, action="fixed_deployed", summary="try", deployed=True,
+            strategy="control_policy", candidate_id="c1")
+        incident_store.record_occurrence(fp, summary="same failure", ran=False)
+        status = incident_store.post_deploy_status(fp)
+        self.assertTrue(status["recurred"])
+        self.assertEqual(status["candidate_id"], "c1")
+        self.assertEqual(status["deployed_strategy"], "control_policy")
+
     def test_passwords_never_reach_disk(self):
         fp = incident_store.fingerprint_failure(
             {"source_url": "https://example.nl/x"}, "error", "browser_lock timeout")

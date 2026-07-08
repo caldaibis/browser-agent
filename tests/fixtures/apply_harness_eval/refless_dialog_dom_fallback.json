@@ -1,0 +1,22 @@
+{
+  "classification": {
+    "text": "browser_snapshot missed the dialog, but dom_scan found duplicate id first_name and fill_by_label completed it.",
+    "outcome": "incomplete",
+    "domain": "rebogroep.nl",
+    "expected_signature": "refless-dialog-dom-fallback",
+    "expected_surface": "tool_registry"
+  },
+  "trajectory": {
+    "expected_outcome": "submitted",
+    "max_turns": 30,
+    "max_tool_calls": 18,
+    "required_tools": ["dom_scan", "fill_by_label", "select_option_by_label"],
+    "events": [
+      {"event": "turn_usage", "payload": {"turn": 1, "tool_calls": [{"name": "browser_snapshot"}]}},
+      {"event": "tool_call", "payload": {"name": "dom_scan"}},
+      {"event": "tool_call", "payload": {"name": "fill_by_label", "label": "Voornaam"}},
+      {"event": "tool_call", "payload": {"name": "select_option_by_label", "label": "Inkomen"}},
+      {"event": "final", "payload": {"outcome": "submitted"}}
+    ]
+  }
+}

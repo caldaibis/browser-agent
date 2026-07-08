@@ -37,7 +37,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import incident_store, known_gates
+from . import incident_store, known_gates, self_improvement_harness
 from . import llm_pricing as _pricing
 from .browser_agent import AgentResult
 from .browser_dom_tools import compact, current_page, evaluate_controls, evaluate_fields
@@ -86,6 +86,7 @@ SELF_IMPROVEMENT_ALLOW_CODE_CHANGES = _env("SELF_IMPROVEMENT_ALLOW_CODE_CHANGES"
 # branched from a freshly-fetched origin/main (see _create_worktree), so
 # there's no shared/dirty checkout and no other branch it could be based on.
 SELF_IMPROVEMENT_ALLOW_DEPLOY = _env("SELF_IMPROVEMENT_ALLOW_DEPLOY", "1") != "0"
+SELF_IMPROVEMENT_PROPOSAL_CANDIDATES = int(_env("SELF_IMPROVEMENT_PROPOSAL_CANDIDATES", "2"))
 
 # Sibling directory (never nested inside PROJECT_ROOT) holding one throwaway
 # worktree per self-improvement run.
@@ -138,6 +139,8 @@ class SelfImprovementResult:
     code_changed: bool = False
     deployed: bool = False
     log_path: str = ""  # per-run text log, so the dashboard can link to it
+    strategy: str = ""
+    candidate_id: str = ""
 
 
 def should_recover(status: str | None) -> bool:
@@ -167,7 +170,18 @@ def _run_for_incident(
     incident: dict = {}
     try:
         if fp is not None:
+            post_deploy = incident_store.post_deploy_status(fp)
             allowed, reason = incident_store.should_run(fp)
+            current_is_post_deploy_recurrence = bool(
+                post_deploy.get("recurred") or post_deploy.get("latest_deploy_within_window")
+            )
+            if not allowed and current_is_post_deploy_recurrence:
+                allowed = True
+                reason = (
+                    f"incident {fp.key} recurred after deployed fix "
+                    f"{post_deploy.get('candidate_id') or post_deploy.get('deployed_at')}; "
+                    "running again with a different proposal strategy"
+                )
             incident_store.record_occurrence(fp, listing=occurrence_listing,
                                              summary=occurrence_summary, ran=allowed)
             if not allowed:
@@ -179,6 +193,9 @@ def _run_for_incident(
                 "fingerprint": fp.key,
                 "occurrences": incident_store.occurrence_count(fp),
                 "prior_attempts": incident_store.attempt_history(fp),
+                "post_deploy": post_deploy,
+                "scheduler_reason": reason,
+                "recent_candidates": self_improvement_harness.candidate_history(limit=8),
             }
     except Exception as e:  # noqa: BLE001 - incident memory is best-effort
         _log("incident_store_error", status=status_label,
@@ -207,7 +224,8 @@ def _run_for_incident(
                 incident_store.record_attempt(
                     fp, action=rr.action, root_cause=rr.root_cause,
                     summary=rr.summary, code_changed=rr.code_changed,
-                    deployed=rr.deployed)
+                    deployed=rr.deployed, strategy=rr.strategy,
+                    candidate_id=rr.candidate_id)
             except Exception:
                 pass
         return rr
@@ -503,31 +521,135 @@ async def _execute(context: dict, logger: "_Logger") -> SelfImprovementResult:
                         "diagnosis emailed instead.",
                 email_sent=True)
 
-        # ---- Phase 2: patch, with the full turn budget to itself.
-        patch_options = _options(
-            allowed_tools=[
-                "Read", "Edit", "Write", "Grep", "Glob", "Bash",
-                "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
-                "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
-                "mcp__self_improve__run_verification",
-                "mcp__self_improve__commit_push_deploy",
-                "mcp__self_improve__send_user_email",
-                "mcp__self_improve__record_known_gate",
-            ],
-            max_turns=SELF_IMPROVEMENT_MAX_TURNS,
+        return await _run_patch_candidates(
+            context=context,
+            diagnosis=diagnosis,
+            root_cause=root_cause,
+            logger=logger,
+            options_factory=_options,
+            worktree_path=worktree_path,
         )
-        result_msg = await _query_once(
-            _patch_prompt(context, diagnosis), patch_options, logger, phase="patch")
-        if result_msg is None:
-            return SelfImprovementResult(
-                action="fix_failed", root_cause=root_cause,
-                summary="Patch query ended without a result message.")
-        rr = _parse_result(result_msg)
-        if not rr.root_cause:
-            rr.root_cause = root_cause
-        return rr
     finally:
         _remove_worktree(worktree_path, branch_name, logger)
+
+
+async def _run_patch_candidates(
+    *,
+    context: dict,
+    diagnosis: dict,
+    root_cause: str,
+    logger: "_Logger",
+    options_factory,
+    worktree_path: Path,
+) -> SelfImprovementResult:
+    patch_options = options_factory(
+        allowed_tools=[
+            "Read", "Edit", "Write", "Grep", "Glob", "Bash",
+            "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
+            "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
+            "mcp__self_improve__run_verification",
+            "mcp__self_improve__commit_push_deploy",
+            "mcp__self_improve__send_user_email",
+            "mcp__self_improve__record_known_gate",
+        ],
+        max_turns=SELF_IMPROVEMENT_MAX_TURNS,
+    )
+    strategies = _candidate_strategies(context, diagnosis)
+    last = SelfImprovementResult(
+        action="fix_failed", root_cause=root_cause,
+        summary="No patch candidate ran.")
+    for idx, strategy in enumerate(strategies, start=1):
+        candidate_id = _candidate_id(context, idx, strategy)
+        logger.line(f"[self-improvement] patch candidate {idx}/{len(strategies)} strategy={strategy} id={candidate_id}")
+        self_improvement_harness.record_candidate_event("start", {
+            "candidate_id": candidate_id,
+            "strategy": strategy,
+            "incident": (context.get("incident") or {}).get("fingerprint", ""),
+            "diagnosis": diagnosis,
+        })
+        result_msg = await _query_once(
+            _patch_prompt(context, diagnosis, candidate_strategy=strategy),
+            patch_options,
+            logger,
+            phase=f"patch:{strategy}",
+        )
+        if result_msg is None:
+            last = SelfImprovementResult(
+                action="fix_failed", root_cause=root_cause,
+                summary="Patch query ended without a result message.",
+                strategy=strategy, candidate_id=candidate_id)
+        else:
+            last = _parse_result(result_msg)
+            if not last.root_cause:
+                last.root_cause = root_cause
+            last.strategy = strategy
+            last.candidate_id = candidate_id
+        self_improvement_harness.record_candidate_event("result", {
+            "candidate_id": candidate_id,
+            "strategy": strategy,
+            "action": last.action,
+            "root_cause": last.root_cause,
+            "summary": last.summary,
+            "code_changed": last.code_changed,
+            "deployed": last.deployed,
+        })
+        if last.action == "fixed_deployed" or last.deployed or last.code_changed:
+            return last
+        if idx < len(strategies):
+            reset = _reset_worktree_to_head(worktree_path)
+            logger.line(f"[self-improvement] reset after failed candidate: {reset[:500]}")
+    return last
+
+
+def _candidate_strategies(context: dict, diagnosis: dict) -> list[str]:
+    incident = context.get("incident") or {}
+    post_deploy = incident.get("post_deploy") or {}
+    recurrent = int(incident.get("occurrences") or 0) > 1 or bool(post_deploy.get("latest_deploy_within_window"))
+    surface = str(diagnosis.get("surface") or "")
+    if not surface:
+        try:
+            record = self_improvement_harness.build_failure_record(
+                json.dumps(context.get("result") or {}, ensure_ascii=False),
+                outcome=str((context.get("result") or {}).get("outcome") or ""),
+            )
+            surface = record.surface
+        except Exception:
+            surface = "control_policy"
+    base = {
+        "prompt_context": ["prompt_context", "evaluator", "control_policy"],
+        "tool_registry": ["tool_registry", "prompt_context", "evaluator"],
+        "memory": ["memory", "prompt_context", "evaluator"],
+        "control_policy": ["control_policy", "evaluator", "prompt_context"],
+        "observability": ["observability", "evaluator", "control_policy"],
+        "evaluator": ["evaluator", "control_policy", "prompt_context"],
+    }.get(surface, ["control_policy", "prompt_context", "evaluator"])
+    prior = {
+        str(a.get("strategy") or "")
+        for a in incident.get("prior_attempts") or []
+        if isinstance(a, dict)
+    }
+    deployed_strategy = str(post_deploy.get("deployed_strategy") or "")
+    avoid = prior | ({deployed_strategy} if deployed_strategy else set())
+    ordered = [s for s in base if s not in avoid] + [s for s in base if s in avoid]
+    count = max(1, min(SELF_IMPROVEMENT_PROPOSAL_CANDIDATES if recurrent else 1, len(ordered)))
+    return ordered[:count]
+
+
+def _candidate_id(context: dict, idx: int, strategy: str) -> str:
+    fp = str((context.get("incident") or {}).get("fingerprint") or "incident")
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{fp}-{idx}-{strategy}")[:100]
+    return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}-{slug}"
+
+
+def _reset_worktree_to_head(worktree_path: Path) -> str:
+    # This is a disposable self-improvement worktree. Resetting it between
+    # failed candidates prevents one proposal's partial edits from contaminating
+    # the next proposal.
+    return (
+        _run_cmd(["git", "reset", "--hard", "HEAD"], timeout=30, cwd=worktree_path)
+        + "\n"
+        + _run_cmd(["git", "clean", "-fd"], timeout=30, cwd=worktree_path)
+    )
 
 
 async def _query_once(prompt: str, options: ClaudeAgentOptions,
@@ -724,7 +846,8 @@ nothing after it:
 DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
 
 
-def _poller_patch_prompt(context: dict, diagnosis: dict) -> str:
+def _poller_patch_prompt(context: dict, diagnosis: dict,
+                         candidate_strategy: str = "") -> str:
     p = context.get("poller") or {}
     return f"""You are the PATCH phase for a broken POLLER PARSER. A diagnosis phase
 already ran and concluded a code fix is warranted for site
@@ -733,6 +856,12 @@ the sample and the code before editing.
 
 DIAGNOSIS (from the diagnosis phase):
 {json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
+
+CANDIDATE STRATEGY:
+{candidate_strategy or "parser_control_policy"} — keep the fix bounded to this
+angle unless the code proves it impossible. Preserve known-good parser behavior
+for unrelated sites; do not broaden a regex so far that it captures navigation,
+blog, or account links.
 
 SAVED SAMPLE HTML: {p.get('sample_path')}
 LIST URL: {p.get('list_url')}
@@ -767,9 +896,10 @@ nothing after it:
 SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
 
 
-def _patch_prompt(context: dict, diagnosis: dict) -> str:
+def _patch_prompt(context: dict, diagnosis: dict,
+                  candidate_strategy: str = "") -> str:
     if context.get("kind") == "poller_zero_yield":
-        return _poller_patch_prompt(context, diagnosis)
+        return _poller_patch_prompt(context, diagnosis, candidate_strategy)
     result = context.get("result") or {}
     transcript = result.get("transcript_path") or ""
     return f"""You are the PATCH phase of the self-improvement agent. A diagnosis phase
@@ -780,6 +910,13 @@ addresses the evidence.
 
 DIAGNOSIS (from the diagnosis phase):
 {json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
+
+CANDIDATE STRATEGY:
+{candidate_strategy or "smallest_fix"} — treat this as the proposed surface for
+this candidate. If this is a recurrent incident, other candidates may try other
+surfaces; keep this candidate narrow and make the validation evidence decide.
+Preserve passing behavior: do not weaken rent/eligibility/payment/already-
+applied safeguards to make the failing trace look better.
 
 FAILURE_CONTEXT:
 {json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
@@ -1153,11 +1290,22 @@ def _commit_push_deploy(
 ) -> str:
     if not SELF_IMPROVEMENT_ALLOW_CODE_CHANGES:
         return "REFUSED: SELF_IMPROVEMENT_ALLOW_CODE_CHANGES=0"
-    if not _porcelain(worktree_path):
+    porcelain = _porcelain(worktree_path)
+    if not porcelain:
         return "nothing to commit"
+    changed = _changed_paths_from_porcelain(porcelain)
     verify = _run_shell(SELF_IMPROVEMENT_VERIFY_CMD, timeout=300, cwd=worktree_path)
     if not verify.startswith("rc=0\n"):
         return "verification failed, not committing\n" + verify
+    apply_eval = ""
+    if self_improvement_harness.changes_touch_apply_harness(changed):
+        apply_eval = _run_shell(
+            "uv run python -m src.self_improvement_harness apply-eval",
+            timeout=300,
+            cwd=worktree_path,
+        )
+        if not apply_eval.startswith("rc=0\n") or '"failed": 0' not in apply_eval:
+            return "apply-harness eval failed, not committing\n" + apply_eval
     add = _run_cmd(["git", "add", "-A"], timeout=30, cwd=worktree_path)
     commit = _run_cmd(["git", "commit", "-m", _commit_message(message)], timeout=60, cwd=worktree_path)
     if not commit.startswith("rc=0\n"):
@@ -1173,7 +1321,7 @@ def _commit_push_deploy(
             f"Self-improvement committed a fix on branch {branch_name} for manual "
             "review (deploy disabled -- SELF_IMPROVEMENT_ALLOW_DEPLOY=0)."
         )
-        _send_fix_email(context, summary, commit + "\n" + push)
+        _send_fix_email(context, summary, commit + "\n" + apply_eval + "\n" + push)
         return f"committed to {branch_name}; deploy disabled; pushed for review; user email sent\n" + push
 
     # Re-fetch in case main moved during this run; only fast-forward, never
@@ -1192,7 +1340,7 @@ def _commit_push_deploy(
             f"run branched off it -- pushed to {branch_name} instead of merging "
             "automatically. Please review and merge by hand."
         )
-        _send_fix_email(context, summary, commit + "\n" + push)
+        _send_fix_email(context, summary, commit + "\n" + apply_eval + "\n" + push)
         return f"main moved ahead; pushed to {branch_name} instead; user email sent\n" + push
 
     push = _run_cmd(["git", "push", "origin", "HEAD:refs/heads/main"], timeout=120, cwd=worktree_path)
@@ -1206,14 +1354,27 @@ def _commit_push_deploy(
                 f"Self-improvement committed a fix; push to main failed but the "
                 f"review branch {branch_name} was pushed. Please review and merge."
             )
-            _send_fix_email(context, summary, commit + "\n" + push + "\n" + branch_push)
+            _send_fix_email(context, summary, commit + "\n" + apply_eval + "\n" + push + "\n" + branch_push)
             return (f"push to main failed; pushed to {branch_name} instead; "
                     "user email sent\n" + push)
         return _handle_push_failure(context, worktree_path, branch_name,
                                     commit, push + "\n" + branch_push, target="main")
     summary = "Self-improvement committed and pushed a fix directly to main -- CI/CD will deploy it automatically."
-    _send_fix_email(context, summary, commit + "\n" + push)
+    _send_fix_email(context, summary, commit + "\n" + apply_eval + "\n" + push)
     return "pushed to main; CI/CD deploy triggered; user email sent\n" + push
+
+
+def _changed_paths_from_porcelain(porcelain: str) -> list[str]:
+    paths = []
+    for line in (porcelain or "").splitlines():
+        # `git status --porcelain` uses two status chars, a space, then path;
+        # rename lines contain "old -> new", where the new path is what matters.
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[-1].strip()
+        if path:
+            paths.append(path)
+    return paths
 
 
 # Every verified fix used to die silently at a failed `git push` (verified in

@@ -1,0 +1,19 @@
+{
+  "prompt": {
+    "listing": {
+      "source_url": "https://example.test/listing/1",
+      "address": "Teststraat 1",
+      "price": "EUR 1500",
+      "source_name": "Kamernet"
+    },
+    "must_contain": [
+      "PERSONAL RENT CAP",
+      "ELIGIBILITY GATE",
+      "NEVER reset, change, or recover a password",
+      "SUBMIT the application"
+    ],
+    "must_not_contain": [
+      "dry run"
+    ]
+  }
+}

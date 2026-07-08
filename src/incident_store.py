@@ -107,7 +107,8 @@ def record_occurrence(fp: Fingerprint, *, listing: dict | None = None,
 
 def record_attempt(fp: Fingerprint, *, action: str, root_cause: str = "",
                    summary: str = "", code_changed: bool = False,
-                   deployed: bool = False) -> None:
+                   deployed: bool = False, strategy: str = "",
+                   candidate_id: str = "") -> None:
     _append({
         "event": "attempt",
         "fingerprint": fp.key,
@@ -118,6 +119,8 @@ def record_attempt(fp: Fingerprint, *, action: str, root_cause: str = "",
         "summary": (summary or "")[:600],
         "code_changed": bool(code_changed),
         "deployed": bool(deployed),
+        "strategy": (strategy or "")[:80],
+        "candidate_id": (candidate_id or "")[:120],
     })
 
 
@@ -151,11 +154,50 @@ def attempt_history(fp: Fingerprint, *, limit: int = 3) -> list[dict[str, Any]]:
     """Most-recent-last prior attempts, for injection into the next prompt."""
     attempts = [
         {k: rec.get(k) for k in
-         ("ts", "action", "root_cause", "summary", "code_changed", "deployed")}
+         ("ts", "action", "root_cause", "summary", "code_changed", "deployed",
+          "strategy", "candidate_id")}
         for rec in _read()
         if rec.get("event") == "attempt" and rec.get("fingerprint") == fp.key
     ]
     return attempts[-limit:]
+
+
+def post_deploy_status(fp: Fingerprint, *, now: datetime | None = None,
+                       window_hours: float | None = None) -> dict[str, Any]:
+    """Report whether this incident recurred after its latest deployed fix."""
+    now = now or datetime.now()
+    window = timedelta(hours=window_hours or SELF_IMPROVEMENT_DEDUP_HOURS)
+    latest_deploy: dict[str, Any] | None = None
+    latest_deploy_ts: datetime | None = None
+    recurrences: list[dict[str, Any]] = []
+    for rec in _read():
+        if rec.get("fingerprint") != fp.key:
+            continue
+        ts = _parse_ts(rec.get("ts"))
+        if ts is None:
+            continue
+        if rec.get("event") == "attempt" and rec.get("deployed"):
+            if latest_deploy_ts is None or ts > latest_deploy_ts:
+                latest_deploy_ts = ts
+                latest_deploy = rec
+    if latest_deploy_ts is None:
+        return {"status": "no_deployed_fix", "recurred": False}
+    for rec in _read():
+        if rec.get("fingerprint") != fp.key or rec.get("event") != "occurrence":
+            continue
+        ts = _parse_ts(rec.get("ts"))
+        if ts and latest_deploy_ts <= ts <= now and (ts - latest_deploy_ts) <= window:
+            recurrences.append(rec)
+    return {
+        "status": "regressed" if recurrences else "no_recurrence",
+        "recurred": bool(recurrences),
+        "latest_deploy_within_window": (now - latest_deploy_ts) <= window,
+        "deployed_at": latest_deploy_ts.isoformat(timespec="seconds"),
+        "deployed_action": latest_deploy.get("action") if latest_deploy else "",
+        "deployed_strategy": latest_deploy.get("strategy") if latest_deploy else "",
+        "candidate_id": latest_deploy.get("candidate_id") if latest_deploy else "",
+        "recurrences": len(recurrences),
+    }
 
 
 def occurrence_count(fp: Fingerprint) -> int:

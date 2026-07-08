@@ -95,6 +95,39 @@ class TestUpdateAfterRun(unittest.TestCase):
                 text = (Path(td) / f"{domain}.md").read_text(encoding="utf-8")
                 self.assertIn("durable site lesson", text)
 
+    def test_json_delta_merges_without_rewriting_blob(self):
+        with tempfile.TemporaryDirectory() as td:
+            transcript = Path(td) / "run.log"
+            transcript.write_text("turn 1: dialog required fill_by_label",
+                                  encoding="utf-8")
+
+            class _FakeClient:
+                def __init__(self, **kw):
+                    self.chat = SimpleNamespace(completions=self)
+
+                def create(self, **kw):
+                    msg = SimpleNamespace(content=(
+                        '{"items":[{"id":"dialog.refless",'
+                        '"surface":"dialog",'
+                        '"content":"Use fill_by_label for the ref-less viewing dialog."}]}'
+                    ))
+                    return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+            with patch.object(site_playbooks, "PLAYBOOK_DIR", Path(td)), \
+                 patch.dict(os.environ, {"DEEPSEEK_API_KEY": "k"}), \
+                 patch("openai.OpenAI", _FakeClient):
+                site_playbooks.update_after_run(
+                    {"source_url": "https://www.rebogroep.nl/x"},
+                    _result(outcome="submitted", transcript_path=str(transcript)))
+                site_playbooks.update_after_run(
+                    {"source_url": "https://www.rebogroep.nl/x"},
+                    _result(outcome="submitted", transcript_path=str(transcript)))
+                items = site_playbooks.items_for_domain("rebogroep.nl")
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["id"], "dialog.refless")
+                self.assertGreaterEqual(items[0]["evidence_count"], 2)
+                self.assertIn("fill_by_label", site_playbooks.load("rebogroep.nl"))
+
 
 class TestPromptInjection(unittest.TestCase):
     def test_build_prompt_includes_playbook_when_present(self):

@@ -1,0 +1,21 @@
+{
+  "classification": {
+    "text": "snapshot-overuse fired after stale page dump pruning prevented quadratic context growth.",
+    "outcome": "timeout",
+    "expected_signature": "context-growth-snapshot-loop",
+    "expected_surface": "control_policy"
+  },
+  "trajectory": {
+    "expected_outcome": "incomplete",
+    "max_turns": 20,
+    "max_tool_calls": 20,
+    "required_guards": ["snapshot_overuse"],
+    "events": [
+      {"event": "turn_usage", "payload": {"turn": 1, "tool_calls": [{"name": "browser_snapshot"}]}},
+      {"event": "turn_usage", "payload": {"turn": 2, "tool_calls": [{"name": "browser_snapshot"}]}},
+      {"event": "guard", "payload": {"name": "snapshot_overuse"}},
+      {"event": "guard", "payload": {"name": "prune_stale_page_dumps"}},
+      {"event": "final", "payload": {"outcome": "incomplete"}}
+    ]
+  }
+}

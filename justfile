@@ -27,6 +27,7 @@ check:
     uv run ruff check .
     uv run python -m compileall -q src
     uv run python -m unittest discover tests
+    uv run python -m src.self_improvement_harness apply-eval
     uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; import src.poller.watcher, src.poller.discover, src.poller.registry, src.poller.sniff; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
 
 # preflight: verify everything needed to run the agent locally is in place.
@@ -107,6 +108,10 @@ self-improve-mine:
 # Run offline self-improvement harness regression fixtures.
 self-improve-eval:
     uv run python -m src.self_improvement_harness eval
+
+# Run offline apply-agent harness regression fixtures.
+self-improve-apply-eval:
+    uv run python -m src.self_improvement_harness apply-eval
 
 # print the weekly outcome digest (outcomes, guards, incidents, pending fixes)
 digest:

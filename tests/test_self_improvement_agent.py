@@ -206,6 +206,21 @@ class TestSelfImprovementAgent(unittest.TestCase):
         self.assertIsNone(self_improvement_agent._parse_marker(
             msg, self_improvement_agent._DIAGNOSIS_MARKER_RE))
 
+    def test_candidate_strategies_expand_for_recurrent_incident(self):
+        ctx = {"incident": {"occurrences": 3, "prior_attempts": [
+            {"strategy": "control_policy"},
+        ]}, "result": {"outcome": "error", "summary": "browser_lock timeout"}}
+        strategies = self_improvement_agent._candidate_strategies(
+            ctx, {"surface": "control_policy"})
+        self.assertGreaterEqual(len(strategies), 2)
+        self.assertNotEqual(strategies[0], "control_policy")
+
+    def test_changed_paths_from_porcelain_handles_renames(self):
+        out = self_improvement_agent._changed_paths_from_porcelain(
+            " M src/apply.py\nR  old.py -> src/browser_agent.py\n")
+        self.assertIn("src/apply.py", out)
+        self.assertIn("src/browser_agent.py", out)
+
 
 class TestPushFallback(unittest.TestCase):
     """A verified fix must survive a failed push: format-patch to
