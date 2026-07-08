@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -186,6 +187,17 @@ def _run_for_incident(
     ctx = ctx_builder(incident)
     try:
         rr = run_self_improvement(ctx)
+        if not isinstance(rr, SelfImprovementResult):
+            # Should be unreachable, but a deploy-time module version skew
+            # (late import loading a torn mix of old/new code mid-restart) once
+            # produced a bare dict here, crashing with an opaque
+            # AttributeError. Coerce instead of crashing, and record it.
+            _log("error", status=status_label,
+                 error=f"run_self_improvement returned {type(rr).__name__}, not "
+                       "SelfImprovementResult (likely deploy-time version skew)")
+            return SelfImprovementResult(
+                action="error",
+                summary=f"internal: unexpected result type {type(rr).__name__}")
         _log("done", status=status_label, action=rr.action,
              code_changed=rr.code_changed, deployed=rr.deployed,
              email_sent=rr.email_sent, root_cause=rr.root_cause,
@@ -200,7 +212,11 @@ def _run_for_incident(
                 pass
         return rr
     except Exception as e:  # noqa: BLE001 - self-improvement must be best-effort
-        _log("error", status=status_label, error=f"{type(e).__name__}: {e}")
+        # Log the FULL traceback (not just str(e)): the crash email only carried
+        # "AttributeError: 'dict' ..." with no frames, which made the 08-07-2026
+        # version-skew crash hard to place.
+        _log("error", status=status_label, error=f"{type(e).__name__}: {e}",
+             traceback=traceback.format_exc()[-3000:])
         if fp is not None:
             try:
                 incident_store.record_attempt(

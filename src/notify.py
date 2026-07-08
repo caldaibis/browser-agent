@@ -15,8 +15,19 @@ from base64 import urlsafe_b64encode
 from .config import PROJECT_ROOT
 from .gmail_watch import get_service
 
-NOTIFY_TO = os.environ.get("NOTIFY_TO", "you@example.com")
-NOTIFY_ENABLED = os.environ.get("NOTIFY_ENABLED", "1") != "0"
+_PLACEHOLDER_TO = "you@example.com"
+NOTIFY_TO = os.environ.get("NOTIFY_TO", _PLACEHOLDER_TO)
+# Enabled only when a real recipient is configured. Without this guard, any
+# process that runs without NOTIFY_TO in its env falls back to the placeholder
+# and actually emails it -- e.g. the Claude Agent SDK spawns the `claude` CLI
+# with a stripped env (only ANTHROPIC_*), so a command its Bash tool runs would
+# send to you@example.com and bounce (observed 08-07-2026). Treat the
+# placeholder as "notifications not configured": push still fires, email does not.
+NOTIFY_ENABLED = (
+    os.environ.get("NOTIFY_ENABLED", "1") != "0"
+    and bool(NOTIFY_TO)
+    and NOTIFY_TO != _PLACEHOLDER_TO
+)
 STATUS_EMAIL_OUTCOMES = {"submitted"}
 
 # Rate-limit bookkeeping for send_alert_dedup (key -> last-sent epoch).

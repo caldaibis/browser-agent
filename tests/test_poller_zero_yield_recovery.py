@@ -88,6 +88,24 @@ class TestImprovePollerZeroYield(unittest.TestCase):
                          "regex still off")
 
 
+class TestNonResultReturnGuard(unittest.TestCase):
+    """A deploy-time module version skew once made run_self_improvement return
+    a bare dict, crashing with an opaque AttributeError and emailing garbage.
+    _run_for_incident must coerce a non-Result return into a clean error
+    without raising or alerting."""
+
+    def test_dict_return_is_coerced_not_crashed(self):
+        with patch.object(sia, "SELF_IMPROVEMENT_ENABLED", True), \
+             patch.object(sia, "run_self_improvement", return_value={"action": "x"}), \
+             patch.object(sia, "_log"), \
+             patch.object(sia, "send_alert") as send_alert, \
+             patch.object(sia.incident_store, "INCIDENT_LOG",
+                          Path(tempfile.mkdtemp()) / "i.jsonl"):
+            rr = sia.improve_poller_zero_yield(site_name="mijndak.nl", streak=120)
+        self.assertEqual(rr.action, "error")
+        send_alert.assert_not_called()  # a transient skew must not alarm the user
+
+
 class TestPollerPrompts(unittest.TestCase):
     def _ctx(self):
         return {
