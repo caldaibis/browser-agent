@@ -147,6 +147,74 @@ def should_improve(status: str | None) -> bool:
     return should_recover(status)
 
 
+def _run_for_incident(
+    *,
+    fp,
+    ctx_builder,
+    status_label: str,
+    crash_detail: str,
+    occurrence_listing: dict | None = None,
+    occurrence_summary: str = "",
+) -> SelfImprovementResult:
+    """Shared engine for every self-improvement trigger (apply failures AND
+    poller zero-yield). Incident memory (src/incident_store.py): fingerprint,
+    skip if this incident already had a run in the dedup window, and feed a
+    run that does happen its predecessors' findings. Fail-open: a broken store
+    never blocks self-improvement, and self-improvement never raises into the
+    pipeline that called it.
+    """
+    incident: dict = {}
+    try:
+        if fp is not None:
+            allowed, reason = incident_store.should_run(fp)
+            incident_store.record_occurrence(fp, listing=occurrence_listing,
+                                             summary=occurrence_summary, ran=allowed)
+            if not allowed:
+                _log("skipped_duplicate_incident", status=status_label,
+                     fingerprint=fp.key, reason=reason)
+                return SelfImprovementResult(action="skipped_duplicate_incident",
+                                             summary=reason)
+            incident = {
+                "fingerprint": fp.key,
+                "occurrences": incident_store.occurrence_count(fp),
+                "prior_attempts": incident_store.attempt_history(fp),
+            }
+    except Exception as e:  # noqa: BLE001 - incident memory is best-effort
+        _log("incident_store_error", status=status_label,
+             error=f"{type(e).__name__}: {e}")
+
+    ctx = ctx_builder(incident)
+    try:
+        rr = run_self_improvement(ctx)
+        _log("done", status=status_label, action=rr.action,
+             code_changed=rr.code_changed, deployed=rr.deployed,
+             email_sent=rr.email_sent, root_cause=rr.root_cause,
+             summary=rr.summary, log_path=rr.log_path)
+        if fp is not None:
+            try:
+                incident_store.record_attempt(
+                    fp, action=rr.action, root_cause=rr.root_cause,
+                    summary=rr.summary, code_changed=rr.code_changed,
+                    deployed=rr.deployed)
+            except Exception:
+                pass
+        return rr
+    except Exception as e:  # noqa: BLE001 - self-improvement must be best-effort
+        _log("error", status=status_label, error=f"{type(e).__name__}: {e}")
+        if fp is not None:
+            try:
+                incident_store.record_attempt(
+                    fp, action="error", summary=f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
+        try:
+            send_alert("⚠️ Self-improvement agent failed",
+                       f"{crash_detail}\n\n{type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return SelfImprovementResult(action="error", summary=f"{type(e).__name__}: {e}")
+
+
 def improve_after_apply(
     *,
     listing: dict,
@@ -162,80 +230,90 @@ def improve_after_apply(
     """
     if not should_improve(result.outcome):
         return None
-
-    # Incident memory (src/incident_store.py): fingerprint the failure, skip
-    # the run if this incident already had one within the dedup window, and
-    # give a run that does happen its predecessors' findings. Production data
-    # showed ~half of all runs were re-diagnoses of an incident another run
-    # had already worked on the same day. Fail-open: a broken store must
-    # never block self-improvement itself.
     fp = None
-    incident: dict = {}
     try:
         fp = incident_store.fingerprint_failure(listing, result.outcome, result.summary)
-        allowed, reason = incident_store.should_run(fp)
-        incident_store.record_occurrence(fp, listing=listing,
-                                         summary=result.summary, ran=allowed)
-        if not allowed:
-            _log("skipped_duplicate_incident", status=result.outcome,
-                 fingerprint=fp.key, reason=reason)
-            return SelfImprovementResult(action="skipped_duplicate_incident",
-                                         summary=reason)
-        incident = {
-            "fingerprint": fp.key,
-            "occurrences": incident_store.occurrence_count(fp),
-            "prior_attempts": incident_store.attempt_history(fp),
-        }
-    except Exception as e:  # noqa: BLE001 - incident memory is best-effort
+    except Exception as e:  # noqa: BLE001
         _log("incident_store_error", status=result.outcome,
              error=f"{type(e).__name__}: {e}")
 
-    ctx = {
-        "listing": listing,
-        "result": {
-            "outcome": result.outcome,
-            "rc": result.rc,
-            "summary": result.summary,
-            "transcript_path": result.transcript_path,
-        },
-        "trigger": trigger,
-        "msg_id": msg_id,
-        "extra": extra or {},
-        "incident": incident,
-    }
+    def _ctx(incident: dict) -> dict:
+        return {
+            "kind": "apply",
+            "listing": listing,
+            "result": {
+                "outcome": result.outcome,
+                "rc": result.rc,
+                "summary": result.summary,
+                "transcript_path": result.transcript_path,
+            },
+            "trigger": trigger,
+            "msg_id": msg_id,
+            "extra": extra or {},
+            "incident": incident,
+        }
+
+    return _run_for_incident(
+        fp=fp, ctx_builder=_ctx, status_label=result.outcome,
+        occurrence_listing=listing, occurrence_summary=result.summary,
+        crash_detail=(f"The self-improvement agent crashed while handling "
+                      f"{result.outcome}.\nListing: {listing.get('source_url') or '-'}"),
+    )
+
+
+def improve_poller_zero_yield(
+    *,
+    site_name: str,
+    list_url: str = "",
+    tier: int = 0,
+    parser_desc: str = "",
+    sample_path: str = "",
+    streak: int = 0,
+) -> SelfImprovementResult | None:
+    """Close the loop on a silently-broken poller parser: a site that has
+    yielded zero listings for many consecutive polls almost always means its
+    parser stopped matching the site's markup (URL scheme changed, JSON-LD
+    dropped, now behind login). Instead of emailing a human to run
+    `just poll-once` and fix it, drive the same two-phase diagnose→patch→
+    deploy engine against the saved sample HTML. Returns None only when
+    self-improvement is disabled entirely (so the caller can fall back to the
+    old alert); otherwise always returns a result (possibly a dedup skip)."""
+    if not SELF_IMPROVEMENT_ENABLED:
+        return None
+    fp = None
     try:
-        rr = run_self_improvement(ctx)
-        _log("done", status=result.outcome, action=rr.action,
-             code_changed=rr.code_changed, deployed=rr.deployed,
-             email_sent=rr.email_sent, root_cause=rr.root_cause,
-             summary=rr.summary, log_path=rr.log_path)
-        if fp is not None:
-            try:
-                incident_store.record_attempt(
-                    fp, action=rr.action, root_cause=rr.root_cause,
-                    summary=rr.summary, code_changed=rr.code_changed,
-                    deployed=rr.deployed)
-            except Exception:
-                pass
-        return rr
-    except Exception as e:  # noqa: BLE001 - self-improvement must be best-effort
-        _log("error", status=result.outcome, error=f"{type(e).__name__}: {e}")
-        if fp is not None:
-            try:
-                incident_store.record_attempt(
-                    fp, action="error", summary=f"{type(e).__name__}: {e}")
-            except Exception:
-                pass
-        try:
-            send_alert(
-                "⚠️ Self-improvement agent failed",
-                f"The self-improvement agent crashed while handling {result.outcome}.\n\n"
-                f"{type(e).__name__}: {e}\n\n"
-                f"Listing: {listing.get('source_url') or '-'}",
-            )
-        except Exception:
-            pass
-        return SelfImprovementResult(action="error", summary=f"{type(e).__name__}: {e}")
+        fp = incident_store.fingerprint_poller_zero_yield(site_name)
+    except Exception as e:  # noqa: BLE001
+        _log("incident_store_error", status="poller_zero_yield",
+             error=f"{type(e).__name__}: {e}")
+
+    summary = (f"Poller site {site_name} yielded 0 listings for {streak} "
+               f"consecutive polls ({list_url}); its parser is likely broken.")
+
+    def _ctx(incident: dict) -> dict:
+        return {
+            "kind": "poller_zero_yield",
+            "result": {
+                "outcome": "poller_zero_yield", "rc": 0,
+                "summary": summary, "transcript_path": "",
+            },
+            "poller": {
+                "site_name": site_name, "list_url": list_url, "tier": tier,
+                "parser_desc": parser_desc, "sample_path": sample_path,
+                "streak": streak,
+            },
+            "trigger": "poller_zero_yield",
+            "msg_id": None,
+            "extra": {},
+            "incident": incident,
+        }
+
+    return _run_for_incident(
+        fp=fp, ctx_builder=_ctx, status_label="poller_zero_yield",
+        occurrence_summary=summary,
+        crash_detail=(f"The self-improvement agent crashed while handling a "
+                      f"zero-yield for poller site {site_name}."),
+    )
 
 
 def improve_exception(
@@ -525,6 +603,8 @@ _SHARED_CONSTRAINTS = """- Do not ask the user questions; make a decision. If us
 
 
 def _diagnosis_prompt(context: dict) -> str:
+    if context.get("kind") == "poller_zero_yield":
+        return _poller_diagnosis_prompt(context)
     result = context.get("result") or {}
     transcript = result.get("transcript_path") or ""
     log_paths = ", ".join(str(LOG_DIR / n) for n in
@@ -577,7 +657,103 @@ nothing after it:
 DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
 
 
+def _poller_diagnosis_prompt(context: dict) -> str:
+    p = context.get("poller") or {}
+    sample = p.get("sample_path") or ""
+    return f"""You are running because a POLLER SITE stopped yielding listings — it has
+returned zero parsed listings for {p.get('streak')} consecutive polls, which
+almost always means its parser silently broke (the site changed its listing
+URL scheme or markup, dropped its schema.org JSON-LD, or moved its listings
+behind a login). This is the DIAGNOSIS phase: find the cause and pick a
+verdict. You cannot edit files here; a patch phase runs afterwards with your
+diagnosis, so name exact files and the smallest change in fix_plan.
+
+SITE: {p.get('site_name')}  (tier {p.get('tier')})
+LIST URL: {p.get('list_url')}
+CURRENT PARSER: {p.get('parser_desc') or 'see the registry entry'}
+SAVED SAMPLE HTML (what the parser actually saw): {sample}
+
+1. Read the saved sample at the absolute path above (Read accepts absolute
+   paths). Read this site's entry in src/poller/registry.py and the parser it
+   uses in src/poller/parsers.py (usually `make_anchor_parser(<regex>)` keyed
+   on listing-detail link paths, or `parse_jsonld`). Read AGENTS.md's poller
+   section for conventions.
+2. FAILURE_CONTEXT.incident (when present) is cross-run memory: what earlier
+   self-improvement runs already concluded/tried for THIS site. Build on it —
+   if a prior fix didn't stick, do something different, don't repeat it.
+3. Decide which case this is:
+   - PARSER BROKEN: the sample clearly contains listings (detail links, cards,
+     JSON-LD) but the current parser/regex no longer matches them → verdict
+     fix. In fix_plan, give the corrected regex/parse approach, justified by
+     concrete strings you found in the sample.
+   - SITE NOW GATED/GONE: the sample is a login wall, a paywall, an empty
+     "no results" page that is clearly the site's real current state, a 404,
+     or a JS-only shell with no listings in the HTML → verdict fix to DISABLE
+     the site in registry.py (`enabled=False`) with a one-line comment saying
+     why and the date, OR email_user if it needs a credential/paid decision
+     only a human can make.
+   - GENUINELY EMPTY RIGHT NOW: the sample is a valid, working listings page
+     that simply has no offers at the moment → verdict noop.
+   Be decisive: a parser you can see is mis-matching the sample is a fix, not
+   a "temporary" noop.
+
+FAILURE_CONTEXT:
+{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
+
+Constraints:
+{_SHARED_CONSTRAINTS}
+
+When done, end your final message with exactly one line in this shape,
+nothing after it:
+DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
+
+
+def _poller_patch_prompt(context: dict, diagnosis: dict) -> str:
+    p = context.get("poller") or {}
+    return f"""You are the PATCH phase for a broken POLLER PARSER. A diagnosis phase
+already ran and concluded a code fix is warranted for site
+{p.get('site_name')}. Trust its verdict as your starting point; verify against
+the sample and the code before editing.
+
+DIAGNOSIS (from the diagnosis phase):
+{json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
+
+SAVED SAMPLE HTML: {p.get('sample_path')}
+LIST URL: {p.get('list_url')}
+
+Steps:
+1. Read the sample and the site's entry in src/poller/registry.py (+ the
+   parser in src/poller/parsers.py). Confirm the diagnosis at the code level;
+   if it is wrong, stop with action fix_failed rather than improvising.
+2. Make the SMALLEST change that fixes it — typically an updated
+   `make_anchor_parser(<regex>)` pattern on this site's registry entry, a
+   switch to `parse_jsonld`/a different parser, or `enabled=False` if the site
+   is genuinely no longer pollable. Match the surrounding style (note the
+   `# VALIDATED: <n>` comments other entries carry) and keep the change scoped
+   to this one site.
+3. VERIFY the parser actually extracts listings now: run the run_verification
+   tool (`just check` — the deploy gate), and additionally confirm your parser
+   matches the sample (e.g. a quick `uv run python -c` that runs the parser
+   over the saved sample file, or `just poll-once {p.get('site_name')}`).
+   Unit tests do NOT cover this site's live markup, so a green `just check`
+   alone is not proof the parser works — check the sample.
+4. Call commit_push_deploy with a conventional-commit message
+   (e.g. `fix(poller): repair {p.get('site_name')} parser`). Never run git
+   directly. After deploy the poller restarts and picks up the parser.
+5. If a tool refuses the change, email the user with the root cause instead of
+   working around it.
+
+Constraints:
+{_SHARED_CONSTRAINTS}
+
+When done, end your final message with exactly one line in this shape,
+nothing after it:
+SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
+
+
 def _patch_prompt(context: dict, diagnosis: dict) -> str:
+    if context.get("kind") == "poller_zero_yield":
+        return _poller_patch_prompt(context, diagnosis)
     result = context.get("result") or {}
     transcript = result.get("transcript_path") or ""
     return f"""You are the PATCH phase of the self-improvement agent. A diagnosis phase

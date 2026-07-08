@@ -403,20 +403,34 @@ async def _watch_site(site: SiteConfig, client: httpx.AsyncClient,
             zero_streak += 1
             if zero_streak == ZERO_YIELD_ALERT_POLLS:
                 # A broken parser and "no listings right now" are
-                # indistinguishable per poll; this streak-alert is the only
-                # thing that separates them. (mijndak polled total=0 for days
-                # unnoticed before this existed.)
+                # indistinguishable per poll; this streak is the only thing
+                # that separates them (mijndak polled total=0 for days unnoticed
+                # before it existed). Close the loop: hand the saved sample to
+                # the self-improvement agent, which diagnoses and patches the
+                # broken parser end-to-end (diagnose→fix registry/parsers→
+                # verify→deploy), instead of emailing a human to do it. Runs off
+                # the event loop (heavy: Claude SDK + git worktree) and is
+                # deduped per site by the incident store. Only if
+                # self-improvement is entirely disabled do we fall back to the
+                # old alert email so a broken parser is never fully silent.
                 diag_path = await _write_zero_yield_diagnostic(client, site)
-                await asyncio.to_thread(
-                    send_alert_dedup, f"zero_yield:{site.name}",
-                    f"🕳 Poller: {site.name} has yielded 0 listings for "
-                    f"{ZERO_YIELD_ALERT_POLLS} consecutive polls",
-                    f"{site.name} keeps answering with zero parsed listings "
-                    f"({site.list_url}). Its parser may be silently broken — "
-                    f"verify with: just poll-once {site.name}"
-                    + (f"\nSaved sample: {diag_path}" if diag_path else ""),
-                    min_interval_s=86400,
+                from ..self_improvement_agent import improve_poller_zero_yield
+                rr = await asyncio.to_thread(
+                    improve_poller_zero_yield,
+                    site_name=site.name, list_url=site.list_url, tier=site.tier,
+                    sample_path=diag_path, streak=zero_streak,
                 )
+                if rr is None:
+                    await asyncio.to_thread(
+                        send_alert_dedup, f"zero_yield:{site.name}",
+                        f"🕳 Poller: {site.name} has yielded 0 listings for "
+                        f"{ZERO_YIELD_ALERT_POLLS} consecutive polls",
+                        f"{site.name} keeps answering with zero parsed listings "
+                        f"({site.list_url}). Its parser may be silently broken — "
+                        f"verify with: just poll-once {site.name}"
+                        + (f"\nSaved sample: {diag_path}" if diag_path else ""),
+                        min_interval_s=86400,
+                    )
 
         new = [l for l in listings if seen.is_new(l.source_url)]
         _log("polled", site=site.name, total=len(listings), new=len(new))

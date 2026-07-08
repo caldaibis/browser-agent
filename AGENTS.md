@@ -164,7 +164,17 @@ form, uploads docs, submits).
   improved the pipeline without aggregating logs by hand.
 - `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
   (blocked/error/incomplete/timeout/not_available/…, see
-  `SELF_IMPROVEMENT_OUTCOMES`). Drives the **Claude Agent SDK**
+  `SELF_IMPROVEMENT_OUTCOMES`) **and** after a poller site goes silently
+  zero-yield (`improve_poller_zero_yield`, triggered from
+  `poller/watcher.py` at the `POLL_ZERO_YIELD_ALERT_POLLS` streak — instead
+  of emailing a human to run `just poll-once` and fix the parser, it hands
+  the saved sample HTML to the same two-phase engine, which diagnoses the
+  broken parser and patches `src/poller/parsers.py`/`registry.py` — or
+  disables a now-gated site — verifies and deploys; the old alert email only
+  fires if self-improvement is disabled entirely). Both triggers share
+  `_run_for_incident` (incident dedup + logging) and dispatch the
+  diagnosis/patch prompts on `context["kind"]` (`apply` vs
+  `poller_zero_yield`). Drives the **Claude Agent SDK**
   (`claude_agent_sdk.query()` — the same engine behind Claude Code: real
   `Read`/`Edit`/`Bash`/`Grep`/`Glob`). Each run creates a **throwaway git
   worktree** (`_create_worktree`, a sibling dir

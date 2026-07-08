@@ -80,6 +80,17 @@ def fingerprint_failure(listing: dict, outcome: str, summary: str) -> Fingerprin
                        outcome=(outcome or "unknown"))
 
 
+def fingerprint_poller_zero_yield(site_name: str) -> Fingerprint:
+    """Incident fingerprint for a poller site that has stopped yielding
+    listings (a silently-broken parser). Scoped to the site so one site's
+    broken parser dedups on its own, and repeated threshold hits within the
+    window don't re-diagnose it."""
+    domain = _domain(site_name) or (site_name or "").strip().lower()
+    return Fingerprint(key=f"poller-zero-yield@{domain}",
+                       signature="poller-zero-yield", domain=domain,
+                       outcome="zero_yield")
+
+
 def record_occurrence(fp: Fingerprint, *, listing: dict | None = None,
                       summary: str = "", ran: bool = False) -> None:
     _append({
