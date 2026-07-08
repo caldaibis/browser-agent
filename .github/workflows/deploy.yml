@@ -28,6 +28,7 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           REMOTE: /home/deploy/browser-agent
         run: |
+          set -euo pipefail
           if [ -z "$SSH_KEY" ] || [ -z "$VPS_HOST" ]; then
             echo "::error::Missing VPS_SSH_KEY or VPS_HOST secret — see deploy/README.md (Auto-deploy)"
             exit 1
@@ -35,14 +36,40 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          if ! ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts; then
-            echo "::error::ssh-keyscan could not reach $VPS_HOST — usually a transient network blip between the runner and the VPS; re-run this job"
+          SSH_HOST="${VPS_HOST#*@}"
+          SSH_TARGET="$VPS_HOST"
+          case "$SSH_TARGET" in
+            *@*) ;;
+            *) SSH_TARGET="root@$SSH_TARGET" ;;
+          esac
+          if ! ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts; then
+            echo "::error::ssh-keyscan could not reach $SSH_HOST — usually a transient network blip between the runner and the VPS; re-run this job"
             exit 1
           fi
-          ssh -i ~/.ssh/deploy_key "root@${VPS_HOST}" "\
-            sudo -u deploy git -C ${REMOTE} pull --ff-only && \
-            sudo -u deploy bash -lc 'cd ${REMOTE} && uv sync' && \
-            bash ${REMOTE}/deploy/ensure-self-improvement.sh && \
-            systemctl restart orchestrator dashboard && \
-            (systemctl is-active poller >/dev/null 2>&1 && systemctl restart poller || true) && \
-            echo deployed"
+          ssh -i ~/.ssh/deploy_key "$SSH_TARGET" "REMOTE='$REMOTE' bash -s" <<'REMOTE_DEPLOY'
+            set -euo pipefail
+            echo "deploying in $REMOTE on $(hostname)"
+            echo "::group::git fast-forward"
+            sudo -H -u deploy git -C "$REMOTE" status --short --branch
+            sudo -H -u deploy git -C "$REMOTE" fetch origin main
+            sudo -H -u deploy git -C "$REMOTE" merge --ff-only origin/main
+            sudo -H -u deploy git -C "$REMOTE" log --oneline -1
+            echo "::endgroup::"
+
+            echo "::group::dependencies and self-improvement runtime"
+            sudo -H -u deploy bash -lc "cd '$REMOTE' && uv sync"
+            bash "$REMOTE/deploy/ensure-self-improvement.sh"
+            echo "::endgroup::"
+
+            echo "::group::restart services"
+            systemctl restart orchestrator dashboard
+            if systemctl is-active poller >/dev/null 2>&1; then
+              systemctl restart poller
+            fi
+            systemctl is-active orchestrator dashboard
+            if systemctl is-active poller >/dev/null 2>&1; then
+              systemctl is-active poller
+            fi
+            echo "::endgroup::"
+            echo deployed
+          REMOTE_DEPLOY
