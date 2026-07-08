@@ -127,7 +127,8 @@ REGISTRY: list[SiteConfig] = [
     # /nl/aanbod/<uuid>-<slug> detail links.
     _tier3("rebogroep.nl", "https://www.rebogroep.nl/nl/aanbod",
            parse=make_anchor_parser(r"/nl/aanbod/[0-9a-f]{8}-[0-9a-f-]{27}[a-z0-9-]*")),
-    _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/woningaanbod/"),
+    _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/aanbod",
+           parse=make_anchor_parser(r"/appartement-te-huur/[a-zA-Z]+/[a-zA-Z0-9-]+/\d+/")),  # VALIDATED: 40
     _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",
            parse=make_anchor_parser(r"/woning/[0-9a-f]{16,}")),   # VALIDATED: 94, no login
     # eye-move.nl is NOT a rental site — it's a shared third-party auth provider
