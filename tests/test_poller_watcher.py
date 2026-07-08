@@ -168,5 +168,71 @@ class TestEnrich(unittest.IsolatedAsyncioTestCase):
         fetch_context.assert_not_called()
 
 
+class TestTier3RenderPriority(unittest.IsolatedAsyncioTestCase):
+    async def test_priority_pending_skips_before_spawning_renderer(self):
+        site = SiteConfig(
+            name="woningnetregioutrecht.nl",
+            tier=3,
+            list_url="https://utrecht.mijndak.nl/WoningOverzicht",
+        )
+        with patch.object(watcher, "priority_pending", return_value=True), \
+                patch.object(watcher, "_render_tier3_process") as render_process:
+            with self.assertRaises(TimeoutError):
+                await watcher._render_tier3(site)
+        render_process.assert_not_called()
+
+
+class TestTier3RenderProcess(unittest.TestCase):
+    def test_render_process_timeout_kills_child_and_raises_timeout(self):
+        events = []
+
+        class FakeProcess:
+            exitcode = None
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                events.append("start")
+
+            def join(self, timeout=None):
+                events.append(("join", timeout))
+
+            def is_alive(self):
+                return events.count("terminate") == 0
+
+            def terminate(self):
+                events.append("terminate")
+
+            def kill(self):
+                events.append("kill")
+
+        class FakeQueue:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_nowait(self):
+                raise AssertionError("timed-out child should not be read")
+
+            def close(self):
+                events.append("queue_close")
+
+            def join_thread(self):
+                events.append("queue_join")
+
+        class FakeContext:
+            Queue = FakeQueue
+            Process = FakeProcess
+
+        with patch.object(watcher, "priority_pending", return_value=False), \
+                patch.object(watcher.multiprocessing, "get_context",
+                             return_value=FakeContext()), \
+                patch.object(watcher, "TIER3_RENDER_TIMEOUT", 0.01):
+            with self.assertRaises(TimeoutError):
+                watcher._render_tier3_process("woningnetregioutrecht.nl", "https://x")
+        self.assertIn("start", events)
+        self.assertIn("terminate", events)
+
+
 if __name__ == "__main__":
     unittest.main()

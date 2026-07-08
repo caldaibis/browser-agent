@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
+import multiprocessing
 import os
+import queue as thread_queue
 import random
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -59,6 +63,16 @@ EXECUTOR_THREADS = int(os.environ.get("POLL_EXECUTOR_THREADS", "64"))
 # browser: skip the poll and try again next cadence (also frees its executor
 # thread quickly — see EXECUTOR_THREADS).
 TIER3_LOCK_TIMEOUT = float(os.environ.get("POLL_TIER3_LOCK_TIMEOUT", "120"))
+
+# Hard wall-clock cap for one shared-browser tier-3 render, including lock
+# acquisition and Playwright teardown. This intentionally sits well below the
+# browser-lock wait alert threshold (300s by default): if a speculative poll
+# wedges, kill it before any apply spends five minutes waiting behind it.
+TIER3_RENDER_TIMEOUT = float(os.environ.get("POLL_TIER3_RENDER_TIMEOUT", "120"))
+
+# Cleanup should never dominate the lock-hold time. The parent process still
+# has the hard TIER3_RENDER_TIMEOUT kill switch if Playwright ignores this.
+TIER3_CLOSE_TIMEOUT = float(os.environ.get("POLL_TIER3_CLOSE_TIMEOUT", "5"))
 
 # Consecutive zero-listing polls before suspecting a silently-broken parser:
 # a parser that matches nothing looks exactly like "no new listings", forever.
@@ -153,39 +167,120 @@ def _remember_processed(listing: RawListing, outcome: str, resolved_url: str = "
 async def _render_tier3(site: SiteConfig) -> str:
     """Tier 3: open a real tab over CDP (under the browser lock) and return its
     HTML. Used only for sites that defeat httpx (JS-gated / login-walled list)."""
+    if priority_pending():
+        raise TimeoutError("priority apply pending; skipping tier-3 render")
+    return await asyncio.to_thread(_render_tier3_process, site.name, site.list_url)
+
+
+async def _render_tier3_page(list_url: str) -> str:
+    """Render a tier-3 list page in the shared CDP browser.
+
+    Runs inside a disposable child process; keep all cleanup bounded because
+    the parent will terminate the process if this coroutine or Playwright's
+    teardown wedges while holding the browser flock.
+    """
     from playwright.async_api import async_playwright
     from ..config import CDP_URL
 
-    def _get_html() -> str:
-        import asyncio as _a
+    pw = await async_playwright().start()
+    browser = None
+    page = None
+    try:
+        # Explicit connect timeout: a hanging CDP connect during a network
+        # disruption was what wedged a tier-3 render inside the browser lock on
+        # 03-07-2026 (diagnosed on-box by the self-improvement agent).
+        browser = await pw.chromium.connect_over_cdp(CDP_URL, timeout=30000)
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        page = await ctx.new_page()
+        # domcontentloaded + a fixed settle beats "networkidle": many listing
+        # SPAs hold connections open and never go idle.
+        await page.goto(list_url, wait_until="domcontentloaded", timeout=45000)
+        await page.wait_for_timeout(SETTLE_MS)
+        return await page.content()
+    finally:
+        if page is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(page.close(), timeout=TIER3_CLOSE_TIMEOUT)
+        if browser is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(browser.close(), timeout=TIER3_CLOSE_TIMEOUT)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(pw.stop(), timeout=TIER3_CLOSE_TIMEOUT)
 
-        async def _run() -> str:
-            async with async_playwright() as p:
-                # Explicit connect timeout: a hanging CDP connect during a
-                # network disruption was what wedged a tier-3 render inside
-                # the browser lock on 03-07-2026 (diagnosed on-box by the
-                # self-improvement agent).
-                b = await p.chromium.connect_over_cdp(CDP_URL, timeout=30000)
-                ctx = b.contexts[0] if b.contexts else await b.new_context()
-                pg = await ctx.new_page()
-                try:
-                    # domcontentloaded + a fixed settle beats "networkidle":
-                    # many listing SPAs (funda) hold connections open and never
-                    # go idle, which would time the goto out.
-                    await pg.goto(site.list_url, wait_until="domcontentloaded",
-                                  timeout=45000)
-                    await pg.wait_for_timeout(SETTLE_MS)
-                    return await pg.content()
-                finally:
-                    await pg.close()
-                    await b.close()
-        return _a.run(_run())
 
-    def _locked() -> str:
-        with browser_lock(timeout=TIER3_LOCK_TIMEOUT, holder=f"tier3:{site.name}"):
-            return _get_html()
+def _render_tier3_child(site_name: str, list_url: str, output_path: str,
+                        result_queue) -> None:
+    try:
+        if priority_pending():
+            raise TimeoutError("priority apply pending; skipping tier-3 render")
+        async def _bounded() -> str:
+            async with asyncio.timeout(TIER3_RENDER_TIMEOUT):
+                return await _render_tier3_page(list_url)
 
-    return await asyncio.to_thread(_locked)
+        def _locked() -> str:
+            with browser_lock(timeout=TIER3_LOCK_TIMEOUT, holder=f"tier3:{site_name}"):
+                return asyncio.run(_bounded())
+
+        html = _locked()
+        Path(output_path).write_text(html, encoding="utf-8")
+        result_queue.put(("ok", "", ""))
+    except BaseException as e:  # noqa: BLE001 - report child failure to parent
+        result_queue.put(("err", type(e).__name__, str(e)))
+
+
+def _render_tier3_process(site_name: str, list_url: str) -> str:
+    """Run shared-browser tier-3 rendering in a killable child process.
+
+    A thread-level timeout cannot safely interrupt a wedged Playwright teardown
+    after it has acquired the browser flock. A child-process boundary can: if
+    the render exceeds TIER3_RENDER_TIMEOUT, terminating the process releases
+    the OS file lock and lets pending applies proceed.
+    """
+    if priority_pending():
+        raise TimeoutError("priority apply pending; skipping tier-3 render")
+
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f"tier3_{site_name.replace('.', '_')}_",
+        suffix=".html",
+        delete=False,
+    )
+    output_path = tmp.name
+    tmp.close()
+    proc = ctx.Process(
+        target=_render_tier3_child,
+        args=(site_name, list_url, output_path, result_queue),
+        name=f"tier3-render:{site_name}",
+    )
+    proc.start()
+    try:
+        proc.join(TIER3_RENDER_TIMEOUT)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(5)
+            raise TimeoutError(
+                f"tier-3 render for {site_name} exceeded "
+                f"{TIER3_RENDER_TIMEOUT:.0f}s")
+        try:
+            status, kind, message = result_queue.get_nowait()
+        except thread_queue.Empty:
+            raise RuntimeError(
+                f"tier-3 render for {site_name} exited without a result "
+                f"(exitcode={proc.exitcode})") from None
+        if status == "ok":
+            return Path(output_path).read_text(encoding="utf-8")
+        if kind == "TimeoutError":
+            raise TimeoutError(message)
+        raise RuntimeError(f"{kind}: {message}")
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+        with contextlib.suppress(FileNotFoundError):
+            Path(output_path).unlink()
 
 
 _OWN_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

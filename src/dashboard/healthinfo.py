@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime
 
 from ..config import LOG_DIR, PROJECT_ROOT
@@ -31,6 +33,11 @@ _SI_FAILURE_ACTIONS = {"error", "fix_failed", "timeout", "incomplete"}
 # A held browser lock older than this is almost certainly wedged (a normal
 # apply finishes well under 15 min; the watchdog SIGKILLs at ~timeout+grace).
 BROWSER_LOCK_STUCK_SECONDS = 35 * 60
+CREDIT_CACHE_SECONDS = 20.0
+
+_credit_lock = threading.Lock()
+_credit_value: tuple[float, str] | None = None
+_credit_checked_monotonic = 0.0
 
 
 def service_status() -> dict[str, str]:
@@ -63,9 +70,32 @@ def login_health() -> dict:
     }
 
 
-def health() -> dict:
+def _cached_credit(fresh_only: bool) -> tuple[float, str] | None:
+    with _credit_lock:
+        if not _credit_checked_monotonic:
+            return None
+        if not fresh_only or time.monotonic() - _credit_checked_monotonic <= CREDIT_CACHE_SECONDS:
+            return _credit_value
+    return None
+
+
+def refresh_credit() -> tuple[float, str] | None:
+    """Refresh DeepSeek credit off the request path."""
+    global _credit_value, _credit_checked_monotonic
+    credit = remaining_credit()
+    with _credit_lock:
+        _credit_value = credit
+        _credit_checked_monotonic = time.monotonic()
+    return credit
+
+
+def health(refresh_credit_if_stale: bool = True) -> dict:
+    key = "health" if refresh_credit_if_stale else "health:cached_credit"
+
     def _build() -> dict:
-        credit_info = remaining_credit()
+        credit_info = _cached_credit(fresh_only=refresh_credit_if_stale)
+        if credit_info is None and refresh_credit_if_stale:
+            credit_info = refresh_credit()
         credit = credit_info[0] if credit_info is not None else None
         credit_currency = credit_info[1] if credit_info is not None else None
         return {
@@ -78,7 +108,7 @@ def health() -> dict:
         }
     # remaining_credit() hits the DeepSeek API; cache a little longer than the
     # 30s health poll so repeated polls don't each make a network call.
-    return cache.memo("health", 20.0, _build)
+    return cache.memo(key, 20.0, _build)
 
 
 def recent_activity(n: int = 25) -> list[str]:
@@ -130,7 +160,7 @@ def attention_items() -> list[dict]:
         from ..known_gates import load_gates
 
         items: list[dict] = []
-        h = health()
+        h = health(refresh_credit_if_stale=False)
 
         for svc, st in h["services"].items():
             if st in ("failed", "inactive"):
@@ -213,3 +243,19 @@ def attention_items() -> list[dict]:
         items.sort(key=lambda it: order.get(it["severity"], 9))
         return items
     return cache.memo("attention", 15.0, _build)
+
+
+def warm_dashboard_caches() -> None:
+    """Populate expensive health/attention values off the request path."""
+    try:
+        refresh_credit()
+    except Exception:
+        pass
+    try:
+        health(refresh_credit_if_stale=False)
+    except Exception:
+        pass
+    try:
+        attention_items()
+    except Exception:
+        pass

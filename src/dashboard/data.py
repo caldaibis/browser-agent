@@ -458,13 +458,13 @@ def _write_mail_events_cache(events: list[dict]) -> None:
 
 
 def load_mail_events(days: int = 30, max_age_minutes: int = 15,
-                     force: bool = False) -> list[MailEvent]:
+                     force: bool = False, refresh_stale: bool = True) -> list[MailEvent]:
     raw = _read_mail_events_cache()
     stale = True
     if MAIL_EVENTS_CACHE.exists():
         age = datetime.now() - datetime.fromtimestamp(MAIL_EVENTS_CACHE.stat().st_mtime)
         stale = age > timedelta(minutes=max_age_minutes)
-    if force or stale:
+    if force or (stale and refresh_stale):
         try:
             raw = recent_mail_events(days=days)
             _write_mail_events_cache(raw)
@@ -646,14 +646,43 @@ def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
     }
 
 
-def cached_race_report() -> dict:
+def cached_race_report(refresh_mail: bool = True) -> dict:
     """race_report over the memoized submissions + mail events, itself memoized
     so the overview/detail/submissions routes and their internal reuse share
     one computation per few seconds."""
+    key = "race_report" if refresh_mail else "race_report:stale_mail_ok"
     return cache.memo(
-        "race_report", _CACHE_TTL,
-        lambda: race_report(load_submissions(), load_mail_events()),
+        key, _CACHE_TTL,
+        lambda: race_report(
+            load_submissions(),
+            load_mail_events(refresh_stale=refresh_mail),
+        ),
     )
+
+
+def warm_dashboard_caches() -> None:
+    """Populate expensive dashboard caches off the request path.
+
+    This intentionally performs the live mail refresh that normal page loads
+    avoid. Every call is fail-open so a warmup failure never takes the
+    dashboard down.
+    """
+    try:
+        load_submissions()
+    except Exception:
+        pass
+    try:
+        load_mail_events(refresh_stale=True)
+    except Exception:
+        pass
+    try:
+        cached_race_report(refresh_mail=False)
+    except Exception:
+        pass
+    try:
+        poller_site_health()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -779,7 +808,7 @@ def _poll_log_events_by_site() -> dict[str, list[dict]]:
     return by_site
 
 
-def poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
+def _build_poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
     """Per-site poller status derived from poller.jsonl, cross-referenced
     against the registry (so a site that's stopped logging entirely --
     e.g. an exception outside the try/except in _watch_site, or the whole
@@ -835,6 +864,14 @@ def poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
     order = {"blocked": 0, "stale": 1, "erroring": 2, "never_polled": 3, "ok": 4, "disabled": 5}
     results.sort(key=lambda s: (order.get(s.status, 9), s.name))
     return results
+
+
+def poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
+    return cache.memo(
+        f"poller_site_health:{window_hours}",
+        15.0,
+        lambda: _build_poller_site_health(window_hours),
+    )
 
 
 def poller_site_summary(sites: list[SiteHealth]) -> dict:

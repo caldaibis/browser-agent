@@ -12,6 +12,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -33,6 +35,51 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 if data.SCREENSHOTS_DIR.exists():
     app.mount("/screenshots", StaticFiles(directory=str(data.SCREENSHOTS_DIR)), name="screenshots")
+
+DASHBOARD_WARM_INTERVAL_SECONDS = float(os.environ.get("DASHBOARD_WARM_INTERVAL_SECONDS", "300"))
+_warm_thread_started = False
+_warm_thread_lock = threading.Lock()
+
+
+def _warm_dashboard_once() -> None:
+    try:
+        data.warm_dashboard_caches()
+    except Exception:
+        pass
+    try:
+        costs.spend_rollup(days=7)
+    except Exception:
+        pass
+    try:
+        healthinfo.warm_dashboard_caches()
+    except Exception:
+        pass
+    try:
+        funnel.funnel_by_domain(days=7)
+    except Exception:
+        pass
+
+
+def _dashboard_warm_loop() -> None:
+    # First pass runs immediately after startup, then periodically refreshes
+    # values that page renders are allowed to serve stale.
+    while True:
+        _warm_dashboard_once()
+        time.sleep(max(60.0, DASHBOARD_WARM_INTERVAL_SECONDS))
+
+
+@app.on_event("startup")
+def start_dashboard_warmer() -> None:
+    global _warm_thread_started
+    with _warm_thread_lock:
+        if _warm_thread_started:
+            return
+        _warm_thread_started = True
+    threading.Thread(
+        target=_dashboard_warm_loop,
+        name="dashboard-cache-warmer",
+        daemon=True,
+    ).start()
 
 
 def _action(request: Request, ok: bool, msg: str):
@@ -62,15 +109,16 @@ templates.env.globals["fmt_count"] = data.format_count
 @app.get("/", response_class=HTMLResponse)
 def overview(request: Request):
     subs = list(reversed(data.load_submissions()))
-    mail_events = data.load_mail_events()
+    mail_events = data.load_mail_events(refresh_stale=False)
     stats = data.compute_stats(subs)
-    race = data.cached_race_report()
+    race = data.cached_race_report(refresh_mail=False)
     poller_sites = data.poller_site_health()
     spend = costs.spend_rollup(days=7)
     return templates.TemplateResponse(request, "index.html", {
         "stats": stats, "recent": subs[:12], "race": race,
         "mail_events": mail_events[:10],
-        "health": healthinfo.health(), "stats_json": json.dumps(stats),
+        "health": healthinfo.health(refresh_credit_if_stale=False),
+        "stats_json": json.dumps(stats),
         "sites": poller_sites, "summary": data.poller_site_summary(poller_sites),
         "attention": healthinfo.attention_items(), "spend": spend,
         "kpis": data.mission_kpis(subs, race, spend), "active_page": "overview",
@@ -97,7 +145,7 @@ def submissions(request: Request, status: str = "", source: str = "",
     page = max(1, min(page, pages))
     start = (page - 1) * per
     page_subs = subs[start:start + per]
-    race = data.cached_race_report()
+    race = data.cached_race_report(refresh_mail=False)
     return templates.TemplateResponse(request, "submissions.html", {
         "subs": page_subs, "total": total, "page": page, "pages": pages, "per": per,
         "statuses": sorted({s.status for s in all_subs}),
@@ -114,7 +162,7 @@ def submission_detail(request: Request, key: str):
     sub = data.get_submission(key)
     if not sub:
         return HTMLResponse("Not found", status_code=404)
-    race = data.cached_race_report()
+    race = data.cached_race_report(refresh_mail=False)
     race_by_url = {r.source_url: r for r in race["rows"]}
     return templates.TemplateResponse(request, "detail.html", {
         "sub": sub, "transcript": data.load_transcript(sub),
@@ -128,7 +176,7 @@ def submission_detail(request: Request, key: str):
 @app.get("/health", response_class=HTMLResponse)
 def health_panel(request: Request):
     return templates.TemplateResponse(request, "_health.html", {
-        "health": healthinfo.health(),
+        "health": healthinfo.health(refresh_credit_if_stale=False),
     })
 
 
@@ -148,7 +196,7 @@ def api_stats():
 @app.get("/funnel", response_class=HTMLResponse)
 def funnel_page(request: Request, days: int = 7):
     days = days if days in (7, 30) else 7
-    race = data.cached_race_report()
+    race = data.cached_race_report(refresh_mail=False)
     return templates.TemplateResponse(request, "funnel.html", {
         "days": days,
         "rows": funnel.funnel_by_domain(days),
@@ -296,6 +344,7 @@ def action_healthcheck(request: Request):
 def action_refresh_mail_index(request: Request):
     try:
         events = data.load_mail_events(force=True)
+        data_cache_bust()
         return _action(request, True, f"indexed {len(events)} mail signals")
     except Exception as e:
         return _action(request, False, str(e))

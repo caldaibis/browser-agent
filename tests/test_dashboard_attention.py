@@ -117,5 +117,61 @@ class TestAttentionItems(unittest.TestCase):
         self.assertTrue(any("blocked" in it["title"] for it in items))
 
 
+class TestHealthCreditCache(unittest.TestCase):
+    def setUp(self):
+        cache.clear()
+        healthinfo._credit_value = None
+        healthinfo._credit_checked_monotonic = 0.0
+
+    def tearDown(self):
+        cache.clear()
+        healthinfo._credit_value = None
+        healthinfo._credit_checked_monotonic = 0.0
+
+    def test_non_blocking_health_does_not_refresh_credit(self):
+        with patch.object(healthinfo, "service_status", return_value={"dashboard": "active"}), \
+             patch.object(healthinfo, "remaining_credit", return_value=(9.0, "USD")) as remaining, \
+             patch.object(healthinfo, "login_health", return_value={
+                 "stekkies_logged_in": True,
+                 "low_credit": False,
+                 "last_health_check": None,
+             }):
+            h = healthinfo.health(refresh_credit_if_stale=False)
+        remaining.assert_not_called()
+        self.assertIsNone(h["credit"])
+
+    def test_warmed_credit_is_used_without_refreshing(self):
+        with patch.object(healthinfo, "remaining_credit", return_value=(9.0, "USD")):
+            healthinfo.refresh_credit()
+        cache.clear()
+        with patch.object(healthinfo, "service_status", return_value={"dashboard": "active"}), \
+             patch.object(healthinfo, "remaining_credit") as remaining, \
+             patch.object(healthinfo, "login_health", return_value={
+                 "stekkies_logged_in": True,
+                 "low_credit": False,
+                 "last_health_check": None,
+             }):
+            h = healthinfo.health(refresh_credit_if_stale=False)
+        remaining.assert_not_called()
+        self.assertEqual(h["credit"], 9.0)
+        self.assertEqual(h["credit_currency"], "USD")
+
+    def test_non_blocking_health_uses_stale_credit(self):
+        healthinfo._credit_value = (7.0, "USD")
+        healthinfo._credit_checked_monotonic = (
+            time.monotonic() - healthinfo.CREDIT_CACHE_SECONDS - 60
+        )
+        with patch.object(healthinfo, "service_status", return_value={"dashboard": "active"}), \
+             patch.object(healthinfo, "remaining_credit") as remaining, \
+             patch.object(healthinfo, "login_health", return_value={
+                 "stekkies_logged_in": True,
+                 "low_credit": False,
+                 "last_health_check": None,
+             }):
+            h = healthinfo.health(refresh_credit_if_stale=False)
+        remaining.assert_not_called()
+        self.assertEqual(h["credit"], 7.0)
+
+
 if __name__ == "__main__":
     unittest.main()

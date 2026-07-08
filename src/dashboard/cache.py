@@ -89,17 +89,30 @@ _memo: dict[str, tuple[float, Any]] = {}
 _memo_lock = threading.Lock()
 
 
-def memo(key: str, ttl: float, fn: Callable[[], Any]) -> Any:
-    """Return `fn()`'s value, cached under `key` for `ttl` seconds."""
+def memo_get(key: str) -> Any | None:
+    """Return a still-valid memoized value, or None if absent/expired."""
     now = time.monotonic()
     with _memo_lock:
         hit = _memo.get(key)
         if hit is not None and hit[0] > now:
             return hit[1]
-    value = fn()
+    return None
+
+
+def memo_set(key: str, ttl: float, value: Any) -> Any:
+    """Store a memoized value and return it."""
     with _memo_lock:
-        _memo[key] = (now + ttl, value)
+        _memo[key] = (time.monotonic() + ttl, value)
     return value
+
+
+def memo(key: str, ttl: float, fn: Callable[[], Any]) -> Any:
+    """Return `fn()`'s value, cached under `key` for `ttl` seconds."""
+    hit = memo_get(key)
+    if hit is not None:
+        return hit
+    value = fn()
+    return memo_set(key, ttl, value)
 
 
 def clear() -> None:
