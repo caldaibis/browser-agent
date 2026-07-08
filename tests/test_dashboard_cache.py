@@ -138,6 +138,24 @@ class TestTrajectoryFirstCost(unittest.TestCase):
         )
         cache.clear()
 
+    def test_redacted_token_counts_fall_back_to_none(self):
+        # Older trajectory files had token counts redacted to '***'; the parser
+        # must not crash and must report unknown so the transcript path is used.
+        cache.clear()
+        with tempfile.TemporaryDirectory() as td:
+            traj = Path(td) / "trajectories"
+            traj.mkdir()
+            stem = "20260708_redacted"
+            rows = [
+                {"event": "turn_usage", "payload": {
+                    "turn": 1, "prompt_tokens": "***", "completion_tokens": "***"}},
+            ]
+            (traj / f"{stem}.jsonl").write_text(
+                "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            with patch.object(costs, "TRAJECTORY_DIR", traj):
+                self.assertIsNone(costs.usage_from_trajectory(stem))
+        cache.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,18 @@ class TestHarnessRedaction(unittest.TestCase):
             self.assertNotIn("key-123", text)
             self.assertIn('"password": "***"', text)
 
+    def test_token_count_keys_are_not_redacted(self):
+        # Telemetry counters like prompt_tokens/completion_tokens must survive
+        # redaction (a bare "token" key match used to blank them to "***").
+        out = harness.redact_value({
+            "prompt_tokens": 1234, "completion_tokens": 56,
+            "cache_hit_tokens": 7, "access_token": "sk-secret",
+        })
+        self.assertEqual(out["prompt_tokens"], 1234)
+        self.assertEqual(out["completion_tokens"], 56)
+        self.assertEqual(out["cache_hit_tokens"], 7)
+        self.assertEqual(out["access_token"], "***")
+
     def test_redact_value_clamps_long_strings(self):
         value = harness.redact_value({"text": "x" * 5000}, max_string=100)
         self.assertIn("truncated at 100 chars", value["text"])

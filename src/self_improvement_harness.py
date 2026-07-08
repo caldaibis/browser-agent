@@ -52,8 +52,15 @@ HARNESS_SURFACES = {
     "evaluator",
 }
 
+# Keys whose VALUES are secrets and must be redacted. NB: a bare "token" was
+# deliberately dropped — it matched the per-turn telemetry counters
+# (`prompt_tokens`, `completion_tokens`, `cache_hit_tokens`, …), redacting the
+# token *counts* to "***" and destroying the trajectory cost/timeline data
+# (and crashing the dashboard's int() parse). Real auth secrets are matched by
+# their compound names instead.
 SECRET_KEY_RE = re.compile(
-    r"(password|passwd|secret|token|api[_-]?key|authorization|cookie)",
+    r"(password|passwd|secret|api[_-]?key|authorization|cookie"
+    r"|access[_-]?token|refresh[_-]?token|auth[_-]?token|bearer)",
     re.IGNORECASE,
 )
 OUTCOME_RE = re.compile(r"OUTCOME:\s*([a-z_]+)", re.IGNORECASE)

@@ -39,26 +39,42 @@ def usage_from_trajectory(stem: str) -> data.TokenUsage | None:
     return _usage_from_trajectory_file(str(path), mtime_ns)
 
 
+def _num(value) -> int | None:
+    """Token counts in older trajectory files were redacted to '***' (a since-
+    fixed over-broad key match). Treat any non-numeric value as unknown."""
+    try:
+        if value is None or value == "None":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @lru_cache(maxsize=512)
 def _usage_from_trajectory_file(path: str, mtime_ns: int) -> data.TokenUsage | None:
     model = ""
     input_tokens = output_tokens = total_tokens = 0
     reasoning = cache_hit = cache_miss = 0
-    saw = False
+    saw_real = False
     for rec in cache.jsonl_records(Path(path)):
         payload = rec.get("payload") or {}
         if rec.get("event") == "run_start" and payload.get("model"):
             model = str(payload["model"])
         if rec.get("event") != "turn_usage":
             continue
-        saw = True
-        input_tokens += int(payload.get("prompt_tokens") or 0)
-        output_tokens += int(payload.get("completion_tokens") or 0)
-        total_tokens += int(payload.get("total_tokens") or 0)
-        reasoning += int(payload.get("reasoning_tokens") or 0)
-        cache_hit += int(payload.get("cache_hit_tokens") or 0)
-        cache_miss += int(payload.get("cache_miss_tokens") or 0)
-    if not saw:
+        completion = _num(payload.get("completion_tokens"))
+        if completion is None:
+            # Redacted/unusable turn counts -> let the caller fall back to the
+            # transcript parser instead of reporting a bogus 0-token run.
+            continue
+        saw_real = True
+        input_tokens += _num(payload.get("prompt_tokens")) or 0
+        output_tokens += completion
+        total_tokens += _num(payload.get("total_tokens")) or 0
+        reasoning += _num(payload.get("reasoning_tokens")) or 0
+        cache_hit += _num(payload.get("cache_hit_tokens")) or 0
+        cache_miss += _num(payload.get("cache_miss_tokens")) or 0
+    if not saw_real:
         return None
     model = model or DEFAULT_APPLY_MODEL
     cost, partial = data._estimate_cost(
