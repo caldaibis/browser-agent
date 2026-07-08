@@ -244,8 +244,32 @@ form, uploads docs, submits).
   blind on them) and by `apply.build_prompt` (description + aggregator
   warning in the prompt up front). Strictly fail-open; tier-3 pages just
   fail the fetch and nothing changes.
-- `src/dashboard/` — FastAPI + htmx/Chart.js read-only dashboard (stats, per-run
-  redacted transcripts, health, safe actions) behind Caddy (HTTPS + Basic Auth).
+- `src/dashboard/` — FastAPI + htmx/Chart.js read-mostly dashboard behind Caddy
+  (HTTPS + Basic Auth), organized around four decision questions. **Overview**
+  (`/`): an action-needed strip (`healthinfo.attention_items` — service down,
+  low credit, logged-out session, unlanded pending patches, active paid gates,
+  self-improvement failing streak, stuck browser lock, blocked poller sites)
+  plus mission KPIs (submissions, success rate, detection→submitted latency,
+  race wins, weekly spend + cost/submission). **Funnel** (`/funnel`,
+  `src/dashboard/funnel.py`): per-source seen→filtered→judged→qualified→
+  attempted→submitted (leak rows flagged), failure + incident Paretos, filter/
+  judge veto-reason breakdown, and the mail race (moved here). **Self-
+  improvement** (`/self-improvement`, `src/dashboard/si.py`): SI runs with
+  per-run cost, incidents, editable known-gates table (delete a wrongly-gated
+  site via `known_gates.remove_gate`), pending patches (read-only, copyable
+  `git am`), guard-fire trend, playbooks. **Forensics** (`/submission/{key}`):
+  a per-turn trajectory timeline (`src/dashboard/trajectories.py`, from
+  `logs/trajectories/*.jsonl` with a transcript-regex fallback) + token-per-turn
+  chart + collapsed redacted transcript. Data layer: `src/dashboard/cache.py`
+  (`JsonlTail` incremental append-only parse + `memo` TTL cache — the overview
+  used to trigger 5+ full re-reads/request), `costs.py` (trajectory-first per-run
+  cost + weekly rollups, rates from `src/llm_pricing.py` shared with the
+  self-improvement agent). Stable content-hash permalinks (`Submission.permalink`;
+  legacy `/submission/<int>` still resolves). Never serves `*.prompt.txt`;
+  everything user-visible goes through `data.redact()`. Static assets in
+  `static/` (theme-aware light/dark). Safe POST actions return an htmx toast;
+  poller pause/resume needs the `deploy/stekkies-dashboard.sudoers` entries
+  (re-synced every deploy by `ensure-self-improvement.sh`).
 - `justfile` — every workflow as a `just` command (local + VPS ops + secret push).
 
 ## Conventions

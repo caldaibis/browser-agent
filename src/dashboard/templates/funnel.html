@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% from "_macros.html" import race_delta %}
+{% block title %}Funnel{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:baseline;gap:1rem;">
+  <h3 style="margin:0;">Funnel &amp; race</h3>
+  <span class="muted-txt">window:</span>
+  <a href="/funnel?days=7" class="{{ 'active' if days == 7 }}">7d</a>
+  <a href="/funnel?days=30" class="{{ 'active' if days == 30 }}">30d</a>
+</div>
+
+<article style="margin-top:1rem;">
+  <header><strong>Per-source funnel</strong>
+    <span class="muted-txt" style="font-size:.8rem;">· seen → filtered → judged → qualified → attempted → submitted. Rows that qualify but never submit are highlighted.</span>
+  </header>
+  <table>
+    <thead>
+      <tr><th>Source</th><th>Seen</th><th>Filtered</th><th>Judged</th><th>Qualified</th><th>Attempted</th><th>Submitted</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr {% if r.leak %}style="background:var(--badge-warn-bg);"{% endif %}>
+        <td>{{ r.domain }}{% if r.leak %} <span class="badge warn">leak</span>{% endif %}</td>
+        <td class="muted-txt">{{ r.seen }}</td>
+        <td class="muted-txt">{{ r.filtered }}</td>
+        <td class="muted-txt">{{ r.judged }}</td>
+        <td>{{ r.qualified }}</td>
+        <td>{{ r.attempted }}</td>
+        <td><strong>{{ r.submitted }}</strong></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted-txt">No poller funnel data in this window.</td></tr>
+      {% endfor %}
+      {% for m in mail_rows %}
+      <tr>
+        <td><span class="badge origin">{{ m.trigger }}</span></td>
+        <td class="muted-txt">—</td><td class="muted-txt">—</td>
+        <td class="muted-txt">—</td><td class="muted-txt">—</td>
+        <td>{{ m.attempted }}</td><td><strong>{{ m.submitted }}</strong></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+
+<div class="grid2">
+  <article>
+    <header><strong>Failure Pareto</strong> <span class="muted-txt" style="font-size:.8rem;">· non-submitted outcomes, {{ days }}d</span></header>
+    <canvas id="failChart" height="160"></canvas>
+  </article>
+  <article>
+    <header><strong>Incident Pareto</strong> <span class="muted-txt" style="font-size:.8rem;">· fingerprints, 30d</span></header>
+    <canvas id="incChart" height="160"></canvas>
+  </article>
+</div>
+
+<div class="grid2">
+  <article>
+    <header><strong>Filter vetoes</strong> <span class="muted-txt" style="font-size:.8rem;">· deterministic pre-filter</span></header>
+    <table><tbody>
+      {% for reason, n in reasons.filtered %}
+      <tr><td>{{ n }}</td><td><div class="truncate">{{ reason }}</div></td></tr>
+      {% else %}<tr><td class="muted-txt">None.</td></tr>{% endfor %}
+    </tbody></table>
+  </article>
+  <article>
+    <header><strong>Judge vetoes</strong> <span class="muted-txt" style="font-size:.8rem;">· cheap-LLM judgment</span></header>
+    <table><tbody>
+      {% for reason, n in reasons.judged %}
+      <tr><td>{{ n }}</td><td><div class="truncate">{{ reason }}</div></td></tr>
+      {% else %}<tr><td class="muted-txt">None.</td></tr>{% endfor %}
+    </tbody></table>
+  </article>
+</div>
+
+<article>
+  <header><strong>Mail race</strong>
+    <span class="muted-txt" style="font-size:.8rem;">· did the poller beat the Stekkies/Huurwoningen alert mail?</span>
+    <button class="secondary" style="float:right;padding:.1rem .5rem;font-size:.75rem;margin:0;"
+            hx-post="/action/refresh-mail-index" hx-target="#action-status" hx-swap="innerHTML">Refresh mail index</button>
+  </header>
+  <div style="padding:.5rem .9rem;">
+    <span class="badge origin">Stekkies</span>
+    <span class="delta-win">{{ race.stekkies.poller_wins }} poller wins</span> ·
+    <span class="delta-loss">{{ race.stekkies.mail_wins }} mail wins</span> ·
+    <span class="muted-txt">{{ race.stekkies.no_mail }} unmatched</span>
+    &nbsp;&nbsp;
+    <span class="badge origin">Huurwoningen</span>
+    <span class="delta-win">{{ race.huurwoningen.poller_wins }} poller wins</span> ·
+    <span class="delta-loss">{{ race.huurwoningen.mail_wins }} mail wins</span> ·
+    <span class="muted-txt">{{ race.huurwoningen.no_mail }} unmatched</span>
+  </div>
+  <table>
+    <thead><tr><th>Poller</th><th>Listing</th><th>Status</th><th>vs Stekkies</th><th>vs Huurwoningen</th></tr></thead>
+    <tbody>
+      {% for r in race.rows[:15] %}
+      <tr data-href="/submission/{{ r.permalink }}">
+        <td class="muted-txt nowrap">{{ r.poller_ts[:16].replace('T',' ') }}</td>
+        <td>
+          <div class="truncate">{{ r.address or r.source_url }}</div>
+          <div class="muted-txt">{{ r.detected_by or r.source or 'unknown' }}</div>
+        </td>
+        <td><span class="badge {{ status_class(r.status) }}">{{ r.status }}</span></td>
+        <td>{{ race_delta(r.stekkies_lead_s, r.poller_won_stekkies) }}</td>
+        <td>{{ race_delta(r.huurwoningen_lead_s, r.poller_won_huurwoningen) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted-txt">No poller race rows yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const failures = {{ failures|tojson }};
+  const incidents = {{ incidents|tojson }};
+  let charts = [];
+  function hbar(id, pairs) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const palette = window.chartPalette();
+    const grid = getComputedStyle(document.documentElement).getPropertyValue('--line').trim();
+    return new Chart(el, {
+      type: 'bar',
+      data: { labels: pairs.map(p => p[0]),
+        datasets: [{ data: pairs.map(p => p[1]), backgroundColor: palette[3] }] },
+      options: { indexAxis: 'y', plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: grid } }, y: { grid: { color: grid } } } }
+    });
+  }
+  function draw() {
+    charts.forEach(c => c && c.destroy());
+    charts = [hbar('failChart', failures), hbar('incChart', incidents)];
+  }
+  draw();
+  document.addEventListener('themechange', draw);
+</script>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Playbook · {{ domain }}{% endblock %}
+{% block content %}
+<p><a href="/self-improvement">← self-improvement</a></p>
+<h3>Site playbook <span class="muted-txt">{{ domain }}</span></h3>
+<article>
+  <header><strong>Distilled site know-how</strong>
+    <span class="muted-txt">(secrets redacted)</span>
+  </header>
+  <pre class="transcript">{{ content }}</pre>
+</article>
+{% endblock %}

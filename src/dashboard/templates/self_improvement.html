@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Self-improvement{% endblock %}
+{% block content %}
+<h3>Self-improvement loop</h3>
+
+<div class="metric-grid">
+  <div class="metric">
+    <div class="big">{{ kpis.runs }}</div>
+    <div class="lbl">Runs · 7d</div>
+    <div class="hint">diagnose/patch attempts</div>
+  </div>
+  <div class="metric">
+    <div class="big">{{ kpis.deployed }}</div>
+    <div class="lbl">Deployed</div>
+    <div class="hint">fixes that landed</div>
+  </div>
+  <div class="metric">
+    <div class="big">{{ kpis.landing_rate if kpis.landing_rate is not none else '—' }}{% if kpis.landing_rate is not none %}%{% endif %}</div>
+    <div class="lbl">Landing rate</div>
+    <div class="hint">deployed / fix attempts</div>
+  </div>
+  <div class="metric">
+    <div class="big">{{ kpis.skipped_duplicates }}</div>
+    <div class="lbl">Dupes skipped</div>
+    <div class="hint">prevented re-diagnosis</div>
+  </div>
+  <div class="metric">
+    <div class="big">{{ fmt_usd(kpis.spend_usd) }}</div>
+    <div class="lbl">SI spend · 7d</div>
+    <div class="hint">diagnosis + patch</div>
+  </div>
+  <div class="metric">
+    <div class="big">
+      {% if lineage.eval %}{{ lineage.eval.payload.passed }}✓ / {{ lineage.eval.payload.failed }}✗{% else %}—{% endif %}
+    </div>
+    <div class="lbl">Last eval</div>
+    <div class="hint">fixture regressions</div>
+  </div>
+</div>
+
+{% if patches %}
+<article style="margin-top:1rem;border-left:4px solid var(--warn);">
+  <header><strong>⚠️ Unlanded verified fixes ({{ patches|length }})</strong>
+    <span class="muted-txt" style="font-size:.8rem;">· passed verification but not pushed — apply by hand so they aren't lost</span>
+  </header>
+  <table>
+    <thead><tr><th>Patch</th><th>Subject</th><th>Age</th><th>Apply</th></tr></thead>
+    <tbody>
+      {% for p in patches %}
+      <tr>
+        <td><a href="/self-improvement/patch/{{ p.name }}">{{ p.name }}</a></td>
+        <td class="truncate">{{ p.subject }}</td>
+        <td class="muted-txt nowrap">{{ p.age }}</td>
+        <td><code>{{ p.git_am }}</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+{% endif %}
+
+<article style="margin-top:1rem;">
+  <header><strong>Recent runs</strong></header>
+  <table>
+    <thead><tr><th>When</th><th>Trigger</th><th>Action</th><th>Cost</th><th>Root cause</th></tr></thead>
+    <tbody>
+      {% for r in runs %}
+      <tr {% if r.log_name %}data-href="/self-improvement/run/{{ r.log_name }}"{% endif %}>
+        <td class="muted-txt nowrap">{{ r.ts[:16].replace('T',' ') }}</td>
+        <td><span class="badge {{ status_class(r.trigger_outcome) }}">{{ r.trigger_outcome or '—' }}</span></td>
+        <td>
+          <span class="badge {{ 'bad' if r.failed else 'ok' if r.deployed else 'muted' }}">{{ r.action }}</span>
+          {% if r.deployed %}<span class="badge ok">deployed</span>{% endif %}
+        </td>
+        <td class="muted-txt nowrap">{{ fmt_usd(r.cost_usd) if r.cost_usd is not none else '—' }}</td>
+        <td class="truncate">{{ r.root_cause or r.summary }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted-txt">No self-improvement runs recorded yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
+
+<div class="grid2">
+  <article>
+    <header><strong>Incidents · 30d</strong>
+      <span class="muted-txt" style="font-size:.8rem;">· occurrences vs attempts vs dedup skips</span>
+    </header>
+    <table>
+      <thead><tr><th>Fingerprint</th><th>Seen</th><th>Tried</th><th>Skipped</th><th>Last action</th></tr></thead>
+      <tbody>
+        {% for i in incidents %}
+        <tr>
+          <td><div class="truncate" style="max-width:22rem;">{{ i.fingerprint }}</div></td>
+          <td>{{ i.occurrences }}</td>
+          <td>{{ i.attempts }}</td>
+          <td class="muted-txt">{{ i.skipped }}</td>
+          <td class="muted-txt">{{ i.last_action or '—' }}{% if i.deployed %} <span class="badge ok">deployed</span>{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted-txt">No incidents recorded yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article>
+    <header><strong>Guard fires · 7d</strong>
+      <span class="muted-txt" style="font-size:.8rem;">· rising counts are an early smell</span>
+    </header>
+    <table>
+      <tbody>
+        {% for name, count in guards.items() %}
+        <tr><th>{{ name }}</th><td>{{ count }}</td></tr>
+        {% else %}
+        <tr><td class="muted-txt">No guard fires recorded (needs trajectories).</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</div>
+
+<div class="grid2">
+  <article>
+    <header><strong>Known gates</strong>
+      <span class="muted-txt" style="font-size:.8rem;">· sites the agent auto-skips/warns on</span>
+    </header>
+    <table>
+      <thead><tr><th>Domain</th><th>Kind</th><th>Note</th><th></th></tr></thead>
+      <tbody>
+        {% for g in gates %}
+        <tr {{ 'style=opacity:.5' if g.expired }}>
+          <td>{{ g.domain }}{% if g.expired %} <span class="badge muted">expired</span>{% endif %}</td>
+          <td><span class="badge {{ 'bad' if g.kind == 'paid_registration' else 'warn' }}">{{ g.kind }}</span></td>
+          <td><div class="truncate" style="max-width:18rem;" title="{{ g.note }}">{{ g.note }}</div></td>
+          <td>
+            <button class="secondary outline" style="padding:.1rem .5rem;font-size:.75rem;margin:0;"
+                    hx-post="/action/gate-delete?domain={{ g.domain|urlencode }}&kind={{ g.kind|urlencode }}"
+                    hx-target="#action-status" hx-swap="innerHTML"
+                    hx-confirm="Remove the {{ g.kind }} gate for {{ g.domain }}? The bot will stop skipping/warning on it.">remove</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted-txt">No gates recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article>
+    <header><strong>Site playbooks</strong>
+      <span class="muted-txt" style="font-size:.8rem;">· durable per-site know-how</span>
+    </header>
+    <table>
+      <thead><tr><th>Domain</th><th>Size</th><th>Updated</th></tr></thead>
+      <tbody>
+        {% for p in playbooks %}
+        <tr>
+          <td><a href="/playbook/{{ p.domain }}">{{ p.domain }}</a></td>
+          <td class="muted-txt">{{ fmt_count(p.chars) }} ch</td>
+          <td class="muted-txt nowrap">{{ p.age }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="muted-txt">No playbooks written yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</div>
+{% endblock %}

@@ -37,6 +37,7 @@ from claude_agent_sdk import (
 )
 
 from . import incident_store, known_gates
+from . import llm_pricing as _pricing
 from .browser_agent import AgentResult
 from .browser_dom_tools import compact, current_page, evaluate_controls, evaluate_fields
 from .config import CDP_URL, LOG_DIR, PROJECT_ROOT, SCREENSHOT_DIR
@@ -135,6 +136,7 @@ class SelfImprovementResult:
     email_sent: bool = False
     code_changed: bool = False
     deployed: bool = False
+    log_path: str = ""  # per-run text log, so the dashboard can link to it
 
 
 def should_recover(status: str | None) -> bool:
@@ -206,7 +208,7 @@ def improve_after_apply(
         _log("done", status=result.outcome, action=rr.action,
              code_changed=rr.code_changed, deployed=rr.deployed,
              email_sent=rr.email_sent, root_cause=rr.root_cause,
-             summary=rr.summary)
+             summary=rr.summary, log_path=rr.log_path)
         if fp is not None:
             try:
                 incident_store.record_attempt(
@@ -267,9 +269,12 @@ def run_self_improvement(context: dict) -> SelfImprovementResult:
             _execute(context, logger),
             timeout=SELF_IMPROVEMENT_TIMEOUT_SECONDS,
         ))
+        rr.log_path = str(log_path)
         return rr
     except asyncio.TimeoutError:
-        return SelfImprovementResult(action="timeout", summary="Self-improvement agent timed out.")
+        return SelfImprovementResult(action="timeout",
+                                     summary="Self-improvement agent timed out.",
+                                     log_path=str(log_path))
     finally:
         logger.close()
 
@@ -461,14 +466,10 @@ async def _query_once(prompt: str, options: ClaudeAgentOptions,
     return result_msg
 
 
-# deepseek-v4-pro per-token rates (USD), cross-checked directly against
-# litellm.model_cost["deepseek/deepseek-v4-pro"] and DeepSeek's own pricing
-# docs -- not guessed. Update if DeepSeek repricing changes these.
-_DEEPSEEK_V4_PRO_RATES = {
-    "input_miss": 4.35e-7,
-    "input_hit": 3.625e-9,
-    "output": 8.7e-7,
-}
+# deepseek-v4-pro per-token rates (USD). Single-sourced from src/llm_pricing.py
+# (the same table the dashboard cost estimator uses) so the two can't drift;
+# input_miss/input_hit/output = input/cached_input/output per token.
+_DEEPSEEK_V4_PRO_RATES = _pricing.rates_per_token("deepseek-v4-pro")
 
 
 def _estimate_deepseek_cost_usd(usage: dict) -> float:

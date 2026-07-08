@@ -1,7 +1,8 @@
 {% extends "base.html" %}
+{% from "_macros.html" import race_delta %}
 {% block title %}{{ sub.address or 'Submission' }}{% endblock %}
 {% block content %}
-<p><a href="/submissions">submissions</a></p>
+<p><a href="/submissions">← submissions</a></p>
 <h3>{{ sub.address or 'Listing' }}
   <span class="badge {{ status_class(sub.status) }}">{{ sub.status }}</span>
   <span class="badge origin">{{ sub.origin_label }}</span>
@@ -19,18 +20,17 @@
         {% if sub.origin == 'poller' %}
         <tr><th>Poller detected by</th><td>{{ sub.detected_by_label or '—' }}</td></tr>
         {% endif %}
-        <tr><th>Duration</th><td>{{ (sub.seconds|round(1))|string + 's' if sub.seconds else '—' }}</td></tr>
-        <tr><th>LLM cost</th><td>{{ sub.token_usage.display_cost if sub.token_usage else '—' }}</td></tr>
-        {% if sub.token_usage %}
+        <tr><th>Duration</th><td>{{ fmt_dur(sub.seconds) }}</td></tr>
+        <tr><th>LLM cost</th><td>{{ usage.display_cost if usage else '—' }}</td></tr>
+        {% if usage %}
         <tr><th>LLM tokens</th><td>
-          {{ sub.token_usage.display_tokens }}
+          {{ usage.display_tokens }}
           <span class="muted-txt">
-            (input {{ sub.token_usage.input_tokens if sub.token_usage.input_tokens is not none else 'unknown' }},
-            output {{ sub.token_usage.output_tokens }},
-            reasoning {{ sub.token_usage.reasoning_tokens }})
+            (input {{ usage.input_tokens if usage.input_tokens is not none else 'unknown' }},
+            output {{ usage.output_tokens }}, reasoning {{ usage.reasoning_tokens }})
           </span>
         </td></tr>
-        <tr><th>LLM model</th><td>{{ sub.token_usage.model or 'unknown' }}{% if sub.token_usage.cost_is_partial %} <span class="muted-txt">(cost is output-only lower bound; older transcript lacks input tokens)</span>{% endif %}</td></tr>
+        <tr><th>LLM model</th><td>{{ usage.model or 'unknown' }}{% if usage.cost_is_partial %} <span class="muted-txt">(output-only lower bound; older transcript)</span>{% endif %}</td></tr>
         {% endif %}
         <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
       </tbody>
@@ -44,20 +44,14 @@
       <tbody>
         <tr><th>Detected by</th><td>{{ race.detected_by or '—' }}</td></tr>
         <tr><th>Poller detected</th><td>{{ race.poller_ts.replace('T',' ') }}</td></tr>
-        <tr>
-          <th>Stekkies mail</th>
-          <td class="{{ 'delta-win' if race.poller_won_stekkies else 'delta-loss' if race.stekkies_lead_s is not none else 'delta-none' }}">
-            {{ race.stekkies_ts.replace('T',' ') if race.stekkies_ts else 'not seen' }}
-            <span class="nowrap">({{ fmt_delta(race.stekkies_lead_s) }})</span>
-          </td>
-        </tr>
-        <tr>
-          <th>Huurwoningen mail</th>
-          <td class="{{ 'delta-win' if race.poller_won_huurwoningen else 'delta-loss' if race.huurwoningen_lead_s is not none else 'delta-none' }}">
-            {{ race.huurwoningen_ts.replace('T',' ') if race.huurwoningen_ts else 'not seen' }}
-            <span class="nowrap">({{ fmt_delta(race.huurwoningen_lead_s) }})</span>
-          </td>
-        </tr>
+        <tr><th>Stekkies mail</th><td>
+          {{ race.stekkies_ts.replace('T',' ') if race.stekkies_ts else 'not seen' }}
+          {{ race_delta(race.stekkies_lead_s, race.poller_won_stekkies) }}
+        </td></tr>
+        <tr><th>Huurwoningen mail</th><td>
+          {{ race.huurwoningen_ts.replace('T',' ') if race.huurwoningen_ts else 'not seen' }}
+          {{ race_delta(race.huurwoningen_lead_s, race.poller_won_huurwoningen) }}
+        </td></tr>
       </tbody>
     </table>
     {% else %}
@@ -82,16 +76,61 @@
 </article>
 
 {% if sub.status not in ['submitted','already_applied','skipped_duplicate'] and sub.stekkies_url %}
-<form hx-post="/action/retry?url={{ sub.stekkies_url|urlencode }}" hx-swap="none"
-      onsubmit="this.querySelector('button').setAttribute('aria-busy','true')">
+<form hx-post="/action/retry?url={{ sub.stekkies_url|urlencode }}"
+      hx-target="#action-status" hx-swap="innerHTML">
   <button class="contrast">Retry this listing</button>
   <small class="muted-txt">Re-runs the Stekkies flow now.</small>
 </form>
 {% endif %}
 
+{% if timeline and timeline.turns %}
+<article>
+  <header><strong>Run timeline</strong>
+    <span class="muted-txt" style="font-size:.8rem;">· {{ timeline.turns|length }} turns
+    {% if timeline.model %}· {{ timeline.model }}{% endif %}</span>
+  </header>
+  {% if timeline.has_tokens %}<div style="padding:.6rem .9rem;"><canvas id="turnTokens" height="70"></canvas></div>{% endif %}
+  <div style="padding:0 .9rem .9rem;">{% include "_timeline.html" %}</div>
+</article>
+{% endif %}
+
 <article>
   <header><strong>Agent Transcript</strong> <span class="muted-txt">(secrets redacted)</span></header>
-  {% if transcript %}<pre class="transcript">{{ transcript }}</pre>
+  {% if transcript %}
+  <details {% if not (timeline and timeline.turns) %}open{% endif %}>
+    <summary class="muted-txt" style="padding:.6rem .9rem;cursor:pointer;">Show raw transcript</summary>
+    <pre class="transcript">{{ transcript }}</pre>
+  </details>
   {% else %}<p class="muted-txt">No transcript for this listing.</p>{% endif %}
 </article>
+{% endblock %}
+
+{% block scripts %}
+{% if timeline and timeline.has_tokens %}
+<script>
+  const labels = [{% for t in timeline.turns %}{{ t.turn }},{% endfor %}];
+  const prompt = [{% for t in timeline.turns %}{{ t.prompt_tokens or 0 }},{% endfor %}];
+  const completion = [{% for t in timeline.turns %}{{ t.completion_tokens or 0 }},{% endfor %}];
+  let chart;
+  function draw() {
+    if (chart) chart.destroy();
+    const palette = window.chartPalette();
+    const grid = getComputedStyle(document.documentElement).getPropertyValue('--line').trim();
+    chart = new Chart(document.getElementById('turnTokens'), {
+      data: {
+        labels,
+        datasets: [
+          { type: 'bar', label: 'completion', data: completion, backgroundColor: palette[0], yAxisID: 'y' },
+          { type: 'line', label: 'prompt (context)', data: prompt, borderColor: palette[3], tension: .2, yAxisID: 'y' },
+        ]
+      },
+      options: { plugins: { legend: { position: 'bottom' } },
+        scales: { x: { title: { display: true, text: 'turn' }, grid: { color: grid } },
+                  y: { beginAtZero: true, grid: { color: grid } } } }
+    });
+  }
+  draw();
+  document.addEventListener('themechange', draw);
+</script>
+{% endif %}
 {% endblock %}

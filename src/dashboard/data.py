@@ -7,10 +7,9 @@ through redact(), and *.prompt.txt is never read here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import re
-import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -19,14 +18,13 @@ from pathlib import Path
 
 from ..config import LOG_DIR, PROJECT_ROOT
 from ..gmail_watch import recent_mail_events
-from ..healthcheck import remaining_credit, CREDIT_THRESHOLD
+from ..llm_pricing import pricing_table
 from ..poller.dedup import canonical_url
+from . import cache
 
 MAIL_SUMMARY = LOG_DIR / "mail_summary.jsonl"
-ACTIVITY_LOG = LOG_DIR / "activity.log"
 TRANSCRIPTS_DIR = LOG_DIR / "transcripts"
 SCREENSHOTS_DIR = LOG_DIR / "screenshots"
-ALERTS_FILE = PROJECT_ROOT / "state" / "alerts.json"
 CREDS_FILE = PROJECT_ROOT / "state" / "sources_credentials.json"
 MAIL_EVENTS_CACHE = PROJECT_ROOT / "state" / "dashboard_mail_events.json"
 
@@ -35,20 +33,6 @@ ATTEMPT_STATUSES = {
     "submitted", "applied", "already_applied", "not_available", "not_eligible",
     "login_required", "blocked", "timeout", "incomplete", "error",
 }
-SERVICES = ["orchestrator", "poller", "browser-host", "xvfb", "dashboard", "healthcheck.timer"]
-
-# DeepSeek publishes model prices per 1M tokens. These defaults match the
-# official DeepSeek pricing page checked on 2026-07-01; override with
-# LLM_MODEL_PRICES_JSON or the global LLM_*_USD_PER_1M env vars if pricing
-# changes before the next code update.
-DEFAULT_MODEL_PRICES = {
-    "deepseek-v4-pro": {"input": 0.435, "cached_input": 0.003625, "output": 0.87},
-    "deepseek-v4-flash": {"input": 0.14, "cached_input": 0.0028, "output": 0.28},
-    "deepseek-chat": {"input": 0.14, "cached_input": 0.0028, "output": 0.28},
-    "deepseek-reasoner": {"input": 0.14, "cached_input": 0.0028, "output": 0.28},
-}
-
-
 def _slug(text: str) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "-", (text or "").strip()).strip("-").lower()
     return (s or "listing")[:50]
@@ -110,7 +94,26 @@ class Submission:
 
     @property
     def key(self) -> str:
+        """Canonical listing key — used to group a listing's records together
+        (race pairing). NOT a stable per-record id; several records share it."""
         return canonical_url(self.source_url) if self.source_url else ""
+
+    @property
+    def permalink(self) -> str:
+        """Stable per-record id for URLs. Derived from content (timestamp +
+        hash of source_url/msg_id), so it survives log edits/rotation that
+        would shift the line-index `id`. `/submission/<int>` still resolves
+        the legacy line index for old bookmarks/push links."""
+        ts_compact = re.sub(r"[^0-9]", "", self.ts)[:14] or "0"
+        seed = self.source_url or self.stekkies_url or self.msg_id or f"line{self.id}"
+        return f"{ts_compact}-{hashlib.sha1(seed.encode()).hexdigest()[:8]}"
+
+    @property
+    def transcript_stem(self) -> str:
+        """Filename stem shared by this run's transcript and trajectory:
+        `{ts}_{slug(source-address)}` (see apply.apply / browser_agent)."""
+        p = find_transcript(self)
+        return p.stem if p else ""
 
 
 @dataclass
@@ -173,6 +176,7 @@ class RaceInfo:
     detected_by: str
     address: str
     status: str
+    permalink: str = ""
     poller_ts: str = ""
     stekkies_ts: str = ""
     huurwoningen_ts: str = ""
@@ -230,6 +234,21 @@ def format_age(seconds: float | None) -> str:
     return f"{hours // 24}d {hours % 24}h ago"
 
 
+def format_duration(seconds: float | None) -> str:
+    """A plain elapsed-time duration ('3m 20s', '1h 5m'), distinct from
+    format_age's '... ago' and format_delta's poller-vs-mail sign."""
+    if seconds is None:
+        return "—"
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    mins, secs = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins}m {secs}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins}m"
+
+
 def format_count(value: int | None) -> str:
     if value is None:
         return "—"
@@ -261,33 +280,6 @@ def _int_or_none(value: str | None) -> int | None:
         return None
 
 
-def _pricing_table() -> dict[str, dict[str, float]]:
-    prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
-    raw = os.environ.get("LLM_MODEL_PRICES_JSON", "")
-    if raw:
-        try:
-            for model, vals in json.loads(raw).items():
-                prices[str(model).lower()] = {
-                    "input": float(vals["input"]),
-                    "cached_input": float(vals.get("cached_input", vals["input"])),
-                    "output": float(vals["output"]),
-                }
-        except Exception:
-            pass
-    global_input = os.environ.get("LLM_INPUT_USD_PER_1M")
-    global_cached = os.environ.get("LLM_CACHED_INPUT_USD_PER_1M")
-    global_output = os.environ.get("LLM_OUTPUT_USD_PER_1M")
-    if global_input and global_output:
-        try:
-            for vals in prices.values():
-                vals["input"] = float(global_input)
-                vals["cached_input"] = float(global_cached or global_input)
-                vals["output"] = float(global_output)
-        except ValueError:
-            pass
-    return prices
-
-
 def _estimate_cost(
     *,
     model: str,
@@ -296,7 +288,7 @@ def _estimate_cost(
     cache_hit_tokens: int,
     cache_miss_tokens: int | None,
 ) -> tuple[float | None, bool]:
-    prices = _pricing_table().get((model or "").lower())
+    prices = pricing_table().get((model or "").lower())
     if not prices:
         return None, False
     output_cost = output_tokens * prices["output"] / 1_000_000
@@ -409,18 +401,15 @@ def token_usage_for_submission(sub: Submission) -> TokenUsage | None:
         return None
 
 
-def load_submissions() -> list[Submission]:
+# Derived views are memoized for a few seconds so the several internal
+# callers within one request (and the 30s/45s htmx polls) collapse onto one
+# computation. jsonl_records() underneath is already an incremental tail read.
+_CACHE_TTL = 5.0
+
+
+def _build_submissions() -> list[Submission]:
     out: list[Submission] = []
-    if not MAIL_SUMMARY.exists():
-        return out
-    for i, line in enumerate(MAIL_SUMMARY.read_text(encoding="utf-8").splitlines()):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for i, r in enumerate(cache.jsonl_records(MAIL_SUMMARY)):
         sub = Submission(
             id=i,
             ts=r.get("ts", ""),
@@ -440,6 +429,20 @@ def load_submissions() -> list[Submission]:
         sub.token_usage = token_usage_for_submission(sub)
         out.append(sub)
     return out
+
+
+def load_submissions() -> list[Submission]:
+    return cache.memo("submissions", _CACHE_TTL, _build_submissions)
+
+
+def _submission_index() -> dict[str, Submission]:
+    def _build() -> dict[str, Submission]:
+        idx: dict[str, Submission] = {}
+        for s in load_submissions():
+            idx[str(s.id)] = s          # legacy line-index permalinks
+            idx[s.permalink] = s        # stable content-hash permalinks
+        return idx
+    return cache.memo("submission_index", _CACHE_TTL, _build)
 
 
 def _read_mail_events_cache() -> list[dict]:
@@ -471,10 +474,11 @@ def load_mail_events(days: int = 30, max_age_minutes: int = 15,
     # Stekkies source URLs are only known after the orchestrator extracts the
     # listing. Fill them from mail_summary records with the same Gmail msg_id or
     # Stekkies redirect URL.
-    by_msg = {s.msg_id: s.source_url for s in load_submissions() if s.msg_id and s.source_url}
+    subs = load_submissions()
+    by_msg = {s.msg_id: s.source_url for s in subs if s.msg_id and s.source_url}
     by_stekkies = {
         s.stekkies_url: s.source_url
-        for s in load_submissions()
+        for s in subs
         if s.stekkies_url and s.source_url
     }
     events: list[MailEvent] = []
@@ -494,11 +498,9 @@ def load_mail_events(days: int = 30, max_age_minutes: int = 15,
     return events
 
 
-def get_submission(sub_id: int) -> Submission | None:
-    for s in load_submissions():
-        if s.id == sub_id:
-            return s
-    return None
+def get_submission(key: str | int) -> Submission | None:
+    """Look up by stable permalink or legacy line-index id (as str or int)."""
+    return _submission_index().get(str(key))
 
 
 # --------------------------------------------------------------------------- #
@@ -526,6 +528,46 @@ def compute_stats(subs: list[Submission]) -> dict:
         "by_origin": dict(by_origin.most_common()),
         "per_day": dict(sorted(per_day.items())),
         "avg_seconds": round(sum(durations) / len(durations), 1) if durations else 0.0,
+    }
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def mission_kpis(subs: list[Submission], race: dict, spend: dict) -> dict:
+    """The "is the mission on track" tiles for the overview: submissions,
+    success rate, detection→submitted latency, race wins, spend."""
+    now = datetime.now()
+    week_cutoff = now - timedelta(days=7)
+    attempts = [s for s in subs if s.status in ATTEMPT_STATUSES]
+    submitted = [s for s in subs if s.status in ("submitted", "applied")]
+    submitted_week = sum(1 for s in submitted if (s.when or datetime.min) >= week_cutoff)
+
+    # detection → submitted latency: from when we first saw the listing
+    # (poller detected_ts / mail received_ts) to the submitted record time.
+    latencies: list[float] = []
+    for s in submitted:
+        start = s.event_time
+        end = s.when
+        if start and end and end >= start:
+            latencies.append((end - start).total_seconds())
+    median_latency = _median(latencies)
+
+    return {
+        "submitted_total": len(submitted),
+        "submitted_week": submitted_week,
+        "attempts_total": len(attempts),
+        "success_rate": round(100 * len(submitted) / len(attempts), 1) if attempts else 0.0,
+        "median_latency_s": median_latency,
+        "poller_wins_stekkies": race["stekkies"]["poller_wins"],
+        "poller_wins_huurwoningen": race["huurwoningen"]["poller_wins"],
+        "spend_week_usd": spend.get("total_usd"),
+        "cost_per_submission": spend.get("cost_per_submission"),
     }
 
 
@@ -575,6 +617,7 @@ def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
             detected_by=p.detected_by_label,
             address=p.address,
             status=p.status,
+            permalink=p.permalink,
             poller_ts=p.event_time.isoformat(timespec="seconds") if p.event_time else "",
             stekkies_ts=st.isoformat(timespec="seconds") if st else "",
             huurwoningen_ts=hw.isoformat(timespec="seconds") if hw else "",
@@ -601,6 +644,16 @@ def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
         "stekkies": _summary("stekkies"),
         "huurwoningen": _summary("huurwoningen"),
     }
+
+
+def cached_race_report() -> dict:
+    """race_report over the memoized submissions + mail events, itself memoized
+    so the overview/detail/submissions routes and their internal reuse share
+    one computation per few seconds."""
+    return cache.memo(
+        "race_report", _CACHE_TTL,
+        lambda: race_report(load_submissions(), load_mail_events()),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -667,60 +720,6 @@ def load_transcript(sub: Submission) -> str | None:
         return redact(p.read_text(encoding="utf-8"))
     except Exception:
         return None
-
-
-# --------------------------------------------------------------------------- #
-# Health
-# --------------------------------------------------------------------------- #
-def service_status() -> dict[str, str]:
-    out: dict[str, str] = {}
-    for svc in SERVICES:
-        try:
-            r = subprocess.run(["systemctl", "is-active", svc],
-                               capture_output=True, text=True, timeout=5)
-            text = (r.stdout or r.stderr or "unknown").strip()
-            first = text.splitlines()[0] if text else "unknown"
-            if "System has not been booted with systemd" in text:
-                first = "unavailable"
-            out[svc] = first[:80]
-        except Exception:
-            out[svc] = "unknown"
-    return out
-
-
-def login_health() -> dict:
-    alerts, last_check = {}, None
-    try:
-        alerts = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
-        last_check = datetime.fromtimestamp(ALERTS_FILE.stat().st_mtime).isoformat(timespec="seconds")
-    except Exception:
-        pass
-    return {
-        "stekkies_logged_in": not alerts.get("stekkies_logout_sent", False),
-        "low_credit": alerts.get("low_credit_sent", False),
-        "last_health_check": last_check,
-    }
-
-
-def health() -> dict:
-    credit_info = remaining_credit()
-    credit = credit_info[0] if credit_info is not None else None
-    credit_currency = credit_info[1] if credit_info is not None else None
-    return {
-        "services": service_status(),
-        "credit": credit,
-        "credit_currency": credit_currency,
-        "credit_low": (credit is not None and credit < CREDIT_THRESHOLD),
-        "credit_threshold": CREDIT_THRESHOLD,
-        **login_health(),
-    }
-
-
-def recent_activity(n: int = 25) -> list[str]:
-    if not ACTIVITY_LOG.exists():
-        return []
-    lines = ACTIVITY_LOG.read_text(encoding="utf-8").splitlines()
-    return lines[-n:][::-1]
 
 
 # --------------------------------------------------------------------------- #

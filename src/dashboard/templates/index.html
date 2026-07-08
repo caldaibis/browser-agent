@@ -1,74 +1,51 @@
 {% extends "base.html" %}
 {% block content %}
+{% include "_attention.html" %}
+
 <div class="metric-grid">
   <div class="metric">
-    <div class="big">{{ stats.submitted }}</div>
-    <div class="lbl">Submitted</div>
-    <div class="hint">{{ stats.success_rate }}% success</div>
+    <div class="big">{{ kpis.submitted_week }}</div>
+    <div class="lbl">Submitted · 7d</div>
+    <div class="hint">{{ kpis.submitted_total }} all-time</div>
   </div>
   <div class="metric">
-    <div class="big">{{ stats.attempts }}</div>
-    <div class="lbl">Apply attempts</div>
-    <div class="hint">{{ stats.total_handled }} handled</div>
+    <div class="big">{{ kpis.success_rate }}%</div>
+    <div class="lbl">Success rate</div>
+    <div class="hint">{{ kpis.attempts_total }} real attempts</div>
   </div>
   <div class="metric">
-    <div class="big">{{ stats.by_origin.get('poller', 0) }}</div>
-    <div class="lbl">Poller-origin</div>
-    <div class="hint">direct source watch</div>
+    <div class="big">{{ fmt_dur(kpis.median_latency_s) }}</div>
+    <div class="lbl">Median latency</div>
+    <div class="hint">detected → submitted</div>
   </div>
   <div class="metric">
-    <div class="big">{{ stats.by_origin.get('stekkies_mail', 0) }}</div>
-    <div class="lbl">Stekkies-origin</div>
-    <div class="hint">Gmail trigger</div>
+    <div class="big">{{ kpis.poller_wins_stekkies }} / {{ kpis.poller_wins_huurwoningen }}</div>
+    <div class="lbl">Race wins</div>
+    <div class="hint">beat Stekkies / Huurwoningen mail</div>
   </div>
   <div class="metric">
-    <div class="big">{{ race.stekkies.poller_wins }}</div>
-    <div class="lbl">Beat Stekkies</div>
-    <div class="hint">{{ fmt_delta(race.stekkies.avg_lead_s) if race.stekkies.avg_lead_s else 'no matched mail yet' }}</div>
+    <div class="big">{{ fmt_usd(kpis.spend_week_usd) }}</div>
+    <div class="lbl">Spend · 7d</div>
+    <div class="hint">{{ fmt_usd(kpis.cost_per_submission) }} / submission</div>
   </div>
   <div class="metric">
-    <div class="big">{{ race.huurwoningen.poller_wins }}</div>
-    <div class="lbl">Beat Huurwoningen</div>
-    <div class="hint">{{ fmt_delta(race.huurwoningen.avg_lead_s) if race.huurwoningen.avg_lead_s else 'no matched mail yet' }}</div>
+    <div class="big">
+      {% if health.credit is not none %}{{ health.credit_currency }} {{ '%.0f'|format(health.credit) }}{% else %}—{% endif %}
+    </div>
+    <div class="lbl">Credit left</div>
+    <div class="hint">{% if health.credit_low %}<span class="badge bad">LOW</span>{% else %}DeepSeek{% endif %}</div>
   </div>
 </div>
 
 <div class="grid3" style="margin-top:1rem;">
   <article>
-    <header><strong>Mail Race</strong></header>
-    <table>
-      <tbody>
-        <tr>
-          <th>Stekkies matches</th>
-          <td>{{ race.stekkies.matched }}</td>
-          <td><span class="delta-win">{{ race.stekkies.poller_wins }} poller wins</span></td>
-          <td><span class="delta-loss">{{ race.stekkies.mail_wins }} mail wins</span></td>
-        </tr>
-        <tr>
-          <th>Huurwoningen matches</th>
-          <td>{{ race.huurwoningen.matched }}</td>
-          <td><span class="delta-win">{{ race.huurwoningen.poller_wins }} poller wins</span></td>
-          <td><span class="delta-loss">{{ race.huurwoningen.mail_wins }} mail wins</span></td>
-        </tr>
-        <tr>
-          <th>No matching mail yet</th>
-          <td>Stekkies {{ race.stekkies.no_mail }}</td>
-          <td>Huurwoningen {{ race.huurwoningen.no_mail }}</td>
-          <td></td>
-        </tr>
-      </tbody>
-    </table>
-    <footer>
-      <button class="secondary" hx-post="/action/refresh-mail-index" hx-swap="none"
-              onclick="this.setAttribute('aria-busy','true')">Refresh mail index</button>
-    </footer>
+    <header><strong>Spend / day</strong> · <span class="muted-txt">apply agent, 7d</span></header>
+    <canvas id="spendDay" height="150"></canvas>
   </article>
-
   <article>
     <header><strong>Origins</strong></header>
     <canvas id="byOrigin" height="150"></canvas>
   </article>
-
   <article>
     <header><strong>Outcomes</strong></header>
     <canvas id="byStatus" height="150"></canvas>
@@ -79,56 +56,17 @@
 
 {% include "_poller_sites.html" %}
 
-<article>
-  <header><strong>Recent Poller Race</strong> · <a href="/submissions?origin=poller">poller submissions</a></header>
-  <table>
-    <thead>
-      <tr>
-        <th>Poller</th>
-        <th>Listing</th>
-        <th>Status</th>
-        <th>vs Stekkies</th>
-        <th>vs Huurwoningen</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in race.rows[:12] %}
-      <tr data-href="/submission/{{ r.id }}">
-        <td class="muted-txt nowrap">{{ r.poller_ts[:16].replace('T',' ') }}</td>
-        <td>
-          <div class="truncate">
-            {{ r.address or r.source_url }}
-            <a href="{{ r.source_url }}" target="_blank" rel="noopener" class="muted-txt">↗</a>
-          </div>
-          <div class="muted-txt">{{ r.source or 'unknown source' }}</div>
-          <div class="muted-txt">Detected by {{ r.detected_by or 'unknown site' }}</div>
-        </td>
-        <td><span class="badge {{ status_class(r.status) }}">{{ r.status }}</span></td>
-        <td class="{{ 'delta-win' if r.poller_won_stekkies else 'delta-loss' if r.stekkies_lead_s is not none else 'delta-none' }}">
-          {{ fmt_delta(r.stekkies_lead_s) }}
-        </td>
-        <td class="{{ 'delta-win' if r.poller_won_huurwoningen else 'delta-loss' if r.huurwoningen_lead_s is not none else 'delta-none' }}">
-          {{ fmt_delta(r.huurwoningen_lead_s) }}
-        </td>
-      </tr>
-      {% else %}
-      <tr><td colspan="5" class="muted-txt">No poller submissions in the summary log yet.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</article>
-
 <div class="grid2">
   <article>
-    <header><strong>Recent Submissions</strong> · <a href="/submissions">all submissions</a></header>
+    <header><strong>Recent Submissions</strong> · <a href="/submissions">all</a></header>
     <table>
       <thead><tr><th>When</th><th>Listing</th><th>Origin</th><th>Status</th><th>LLM</th></tr></thead>
       <tbody>
         {% for s in recent %}
-        <tr data-href="/submission/{{ s.id }}">
+        <tr data-href="/submission/{{ s.permalink }}">
           <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
           <td>
-            <a href="/submission/{{ s.id }}">{{ s.address or s.source_url or 'Listing' }}</a>
+            <a href="/submission/{{ s.permalink }}">{{ s.address or s.source_url or 'Listing' }}</a>
             <div class="muted-txt">{{ s.source or 'unknown source' }}</div>
             {% if s.origin == 'poller' %}
             <div class="muted-txt">Detected by {{ s.detected_by_label or 'unknown site' }}</div>
@@ -138,13 +76,15 @@
           <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
           <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
         </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted-txt">No submissions yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </article>
 
   <article>
-    <header><strong>Recent Mail Signals</strong></header>
+    <header><strong>Recent Mail Signals</strong> · <a href="/funnel">funnel &amp; race</a></header>
     <table>
       <thead><tr><th>Received</th><th>Provider</th><th>Subject</th></tr></thead>
       <tbody>
@@ -161,30 +101,36 @@
     </table>
   </article>
 </div>
+{% endblock %}
 
-<article>
-  <header><strong>Applies Per Day</strong></header>
-  <canvas id="perDay" height="80"></canvas>
-</article>
-
+{% block scripts %}
 <script>
   const stats = {{ stats_json|safe }};
-  const palette = ['#1769aa','#16794a','#946200','#b3261e','#5b6270','#7b4fa0','#00806f','#c45500'];
-  new Chart(document.getElementById('byOrigin'), {
-    type: 'doughnut',
-    data: { labels: Object.keys(stats.by_origin), datasets: [{ data: Object.values(stats.by_origin), backgroundColor: palette }] },
-    options: { plugins: { legend: { position: 'bottom' } } }
-  });
-  new Chart(document.getElementById('byStatus'), {
-    type: 'doughnut',
-    data: { labels: Object.keys(stats.by_status), datasets: [{ data: Object.values(stats.by_status), backgroundColor: palette }] },
-    options: { plugins: { legend: { position: 'bottom' } } }
-  });
-  new Chart(document.getElementById('perDay'), {
-    type: 'line',
-    data: { labels: Object.keys(stats.per_day),
-      datasets: [{ label: 'applies', data: Object.values(stats.per_day), borderColor: '#1769aa', tension: .25, fill: false }] },
-    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
-  });
+  const spend = {{ spend.per_day|tojson }};
+  let charts = [];
+  function draw() {
+    charts.forEach(c => c.destroy());
+    charts = [];
+    const palette = window.chartPalette();
+    const grid = getComputedStyle(document.documentElement).getPropertyValue('--line').trim();
+    const common = { plugins: { legend: { position: 'bottom' } } };
+    charts.push(new Chart(document.getElementById('byOrigin'), {
+      type: 'doughnut',
+      data: { labels: Object.keys(stats.by_origin), datasets: [{ data: Object.values(stats.by_origin), backgroundColor: palette }] },
+      options: common
+    }));
+    charts.push(new Chart(document.getElementById('byStatus'), {
+      type: 'doughnut',
+      data: { labels: Object.keys(stats.by_status), datasets: [{ data: Object.values(stats.by_status), backgroundColor: palette }] },
+      options: common
+    }));
+    charts.push(new Chart(document.getElementById('spendDay'), {
+      type: 'bar',
+      data: { labels: Object.keys(spend), datasets: [{ label: 'USD', data: Object.values(spend), backgroundColor: palette[0] }] },
+      options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: grid } }, x: { grid: { color: grid } } } }
+    }));
+  }
+  draw();
+  document.addEventListener('themechange', draw);
 </script>
 {% endblock %}

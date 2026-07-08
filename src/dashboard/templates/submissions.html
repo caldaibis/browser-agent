@@ -1,7 +1,8 @@
 {% extends "base.html" %}
+{% from "_macros.html" import race_delta %}
 {% block title %}Submissions{% endblock %}
 {% block content %}
-<h3>Submissions <span class="muted-txt">({{ subs|length }})</span></h3>
+<h3>Submissions <span class="muted-txt">({{ total }})</span></h3>
 
 <form method="get" action="/submissions" class="toolbar">
   <label>Status
@@ -22,6 +23,13 @@
       {% for s in origins %}<option value="{{ s }}" {{ 'selected' if s==f_origin }}>{{ s.replace('_',' ') }}</option>{% endfor %}
     </select>
   </label>
+  <label>Window
+    <select name="days" onchange="this.form.submit()">
+      <option value="0" {{ 'selected' if f_days==0 }}>all time</option>
+      <option value="7" {{ 'selected' if f_days==7 }}>last 7d</option>
+      <option value="30" {{ 'selected' if f_days==30 }}>last 30d</option>
+    </select>
+  </label>
   <div class="actions">
     <a href="/submissions" role="button" class="secondary">Reset</a>
   </div>
@@ -31,23 +39,17 @@
   <table>
     <thead>
       <tr>
-        <th>When</th>
-        <th>Listing</th>
-        <th>Origin</th>
-        <th>Status</th>
-        <th>Took</th>
-        <th>LLM</th>
-        <th>vs Stekkies</th>
-        <th>vs Huurwoningen</th>
+        <th>When</th><th>Listing</th><th>Origin</th><th>Status</th>
+        <th>Took</th><th>LLM</th><th>vs Stekkies</th><th>vs Huurwoningen</th>
       </tr>
     </thead>
     <tbody>
       {% for s in subs %}
       {% set r = race_by_url.get(s.source_url) %}
-      <tr data-href="/submission/{{ s.id }}">
+      <tr data-href="/submission/{{ s.permalink }}">
         <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
         <td>
-          <a href="/submission/{{ s.id }}">{{ s.address or s.source_url or 'Listing' }}</a>
+          <a href="/submission/{{ s.permalink }}">{{ s.address or s.source_url or 'Listing' }}</a>
           <div class="muted-txt">{{ s.source or 'unknown source' }}</div>
           {% if s.origin == 'poller' %}
           <div class="muted-txt">Detected by {{ s.detected_by_label or 'unknown site' }}</div>
@@ -55,20 +57,10 @@
         </td>
         <td><span class="badge origin">{{ s.origin_label }}</span></td>
         <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
-        <td class="muted-txt nowrap">{{ (s.seconds|round(0)|int)|string + 's' if s.seconds else '—' }}</td>
-        <td class="muted-txt nowrap">
-          {% if s.token_usage %}
-          {{ s.token_usage.display_summary }}
-          {% else %}
-          —
-          {% endif %}
-        </td>
-        <td class="{{ 'delta-win' if r and r.poller_won_stekkies else 'delta-loss' if r and r.stekkies_lead_s is not none else 'delta-none' }}">
-          {{ fmt_delta(r.stekkies_lead_s) if r else '—' }}
-        </td>
-        <td class="{{ 'delta-win' if r and r.poller_won_huurwoningen else 'delta-loss' if r and r.huurwoningen_lead_s is not none else 'delta-none' }}">
-          {{ fmt_delta(r.huurwoningen_lead_s) if r else '—' }}
-        </td>
+        <td class="muted-txt nowrap">{{ fmt_dur(s.seconds) }}</td>
+        <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
+        <td>{% if r %}{{ race_delta(r.stekkies_lead_s, r.poller_won_stekkies) }}{% else %}<span class="delta-none">—</span>{% endif %}</td>
+        <td>{% if r %}{{ race_delta(r.huurwoningen_lead_s, r.poller_won_huurwoningen) }}{% else %}<span class="delta-none">—</span>{% endif %}</td>
       </tr>
       {% else %}
       <tr><td colspan="8" class="muted-txt">No submissions match these filters.</td></tr>
@@ -76,4 +68,13 @@
     </tbody>
   </table>
 </article>
+
+{% if pages > 1 %}
+<nav class="pagination">
+  {% set qp = 'status=' ~ f_status ~ '&source=' ~ f_source ~ '&origin=' ~ f_origin ~ '&days=' ~ f_days ~ '&per=' ~ per %}
+  {% if page > 1 %}<a role="button" class="secondary" href="/submissions?{{ qp }}&page={{ page - 1 }}">← Prev</a>{% endif %}
+  <span class="muted-txt">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a role="button" class="secondary" href="/submissions?{{ qp }}&page={{ page + 1 }}">Next →</a>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}

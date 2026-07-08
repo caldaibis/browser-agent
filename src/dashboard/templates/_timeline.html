@@ -1,0 +1,31 @@
+<div class="timeline">
+  {% for t in timeline.turns %}
+  <div class="tl-turn">
+    <div class="tl-head">
+      <strong>Turn {{ t.turn }}</strong>
+      {% if t.finish_reason %}<span class="muted-txt">{{ t.finish_reason }}</span>{% endif %}
+      {% if t.completion_tokens is not none %}
+        <span class="muted-txt">{{ t.prompt_tokens if t.prompt_tokens is not none else '?' }} in
+        · {{ t.completion_tokens }} out{% if t.cache_hit_tokens %} · {{ fmt_count(t.cache_hit_tokens) }} cached{% endif %}</span>
+      {% endif %}
+      {% for g in t.guards %}<span class="badge warn">{{ g }}</span>{% endfor %}
+    </div>
+    {% for c in t.calls %}
+    <div class="tl-call">→ {{ c.tool }}{% if c.detail %} <span class="muted-txt">{{ c.detail }}</span>{% endif %}</div>
+    {% endfor %}
+    {% for r in t.results %}
+    <div class="tl-call {{ 'tl-fail' if r.ok is false }}">
+      {{ '✓' if r.ok else '✕' if r.ok is false else '·' }} {{ r.tool }}
+      {% if r.detail %}<span class="muted-txt">{{ r.detail }}</span>{% endif %}
+    </div>
+    {% endfor %}
+    {% for txt in t.texts %}
+    <div class="muted-txt" style="font-size:.82rem;">{{ txt }}</div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% if timeline.final_outcome %}
+<p class="muted-txt" style="margin-top:.5rem;">Final: <strong>{{ timeline.final_outcome }}</strong>{% if timeline.final_reason %} ({{ timeline.final_reason }}){% endif %}
+· source: {{ timeline.source }}</p>
+{% endif %}

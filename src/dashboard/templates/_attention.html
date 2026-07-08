@@ -1,0 +1,25 @@
+<div id="attention" class="attention" hx-get="/partial/attention"
+     hx-trigger="every 30s" hx-swap="outerHTML">
+  {% if attention %}
+    {% for it in attention %}
+    <div class="att-item {{ it.severity }}">
+      <span class="badge {{ 'bad' if it.severity == 'bad' else 'warn' }}">
+        {{ '!' if it.severity == 'bad' else '•' }}
+      </span>
+      <div style="flex:1;min-width:0;">
+        <div class="att-title">
+          {{ it.title }}
+          {% if it.href %}<a href="{{ it.href }}" class="muted-txt" style="font-size:.8rem;">details →</a>{% endif %}
+        </div>
+        <div class="att-detail">{{ it.detail }}</div>
+        {% if it.action %}<div class="att-detail"><code>{{ it.action }}</code></div>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="att-item" style="border-left-color:var(--good);">
+      <span class="att-clear">✓ All clear</span>
+      <span class="att-detail">No action needed right now.</span>
+    </div>
+  {% endif %}
+</div>

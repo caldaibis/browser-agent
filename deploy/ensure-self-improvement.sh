@@ -26,3 +26,12 @@ sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__APP_HOME__|${
   "${APP_DIR}/deploy/systemd/litellm-proxy.service" > /etc/systemd/system/litellm-proxy.service
 systemctl daemon-reload
 systemctl enable --now litellm-proxy.service
+
+# Dashboard safe-action sudoers drop-in. Re-synced on every deploy (not just
+# fresh setup.sh installs) so an existing VPS picks up newly whitelisted
+# commands -- e.g. poller start/stop, added for the dashboard's poller
+# pause/resume buttons, which silently failed before this line existed.
+echo "==> dashboard sudoers drop-in"
+sed "s|__APP_USER__|${APP_USER}|g" "${APP_DIR}/deploy/stekkies-dashboard.sudoers" \
+  > /etc/sudoers.d/stekkies-dashboard
+chmod 0440 /etc/sudoers.d/stekkies-dashboard

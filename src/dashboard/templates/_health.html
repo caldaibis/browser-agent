@@ -28,13 +28,17 @@
     </div>
   </div>
   <footer>
-    <button class="secondary" hx-post="/action/healthcheck" hx-swap="none"
-            onclick="this.setAttribute('aria-busy','true')">Run health check</button>
-    <button class="secondary" hx-post="/action/pause" hx-swap="none"
+    <button class="secondary" hx-post="/action/healthcheck"
+            hx-target="#action-status" hx-swap="innerHTML">Run health check</button>
+    <button class="secondary" hx-post="/action/refresh-mail-index"
+            hx-target="#action-status" hx-swap="innerHTML">Refresh mail index</button>
+    <button class="secondary" hx-post="/action/pause"
+            hx-target="#action-status" hx-swap="innerHTML"
             hx-confirm="Pause the inbox watcher?">Pause inbox</button>
-    <button hx-post="/action/resume" hx-swap="none">Resume inbox</button>
-    <button class="secondary" hx-post="/action/poller-pause" hx-swap="none"
+    <button hx-post="/action/resume" hx-target="#action-status" hx-swap="innerHTML">Resume inbox</button>
+    <button class="secondary" hx-post="/action/poller-pause"
+            hx-target="#action-status" hx-swap="innerHTML"
             hx-confirm="Pause the active site poller?">Pause poller</button>
-    <button hx-post="/action/poller-resume" hx-swap="none">Resume poller</button>
+    <button hx-post="/action/poller-resume" hx-target="#action-status" hx-swap="innerHTML">Resume poller</button>
   </footer>
 </article>

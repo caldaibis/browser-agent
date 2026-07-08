@@ -1,177 +1,38 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Stekkies Agent{% endblock %}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <link rel="stylesheet" href="/static/dashboard.css">
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.3/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-  <style>
-    :root {
-      --pico-font-size: 94%;
-      --line: #d9e0e7;
-      --panel: #ffffff;
-      --soft: #f6f8fb;
-      --ink-2: #4d5b67;
-      --accent: #1769aa;
-      --good: #16794a;
-      --warn: #946200;
-      --bad: #b3261e;
-    }
-    body { background: #f4f6f8; }
-    main.container { max-width: 1280px; }
-    nav.top {
-      border-bottom: 1px solid var(--line);
-      margin-bottom: 1rem;
-      padding: .65rem 0;
-    }
-    nav.top strong { letter-spacing: 0; }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 1.45rem;
-      padding: .12rem .5rem;
-      border-radius: .35rem;
-      font-size: .76rem;
-      font-weight: 700;
-      white-space: nowrap;
-      border: 1px solid transparent;
-    }
-    .badge.ok   { background:#e0f3e9; color:var(--good); border-color:#b9dfcb; }
-    .badge.warn { background:#fff1d2; color:var(--warn); border-color:#ead39c; }
-    .badge.bad  { background:#fde2df; color:var(--bad); border-color:#f3b7b1; }
-    .badge.muted{ background:#edf1f5; color:#53606b; border-color:#d8e0e7; }
-    .badge.origin { background:#e8f2fb; color:#195f95; border-color:#bfd8ee; }
-    .metric-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.75rem; }
-    .metric {
-      background: var(--panel);
-      border:1px solid var(--line);
-      border-radius:8px;
-      padding:.8rem .9rem;
-      min-width: 0;
-    }
-    .metric .big { font-size:1.65rem; font-weight:750; line-height:1.05; }
-    .metric .lbl { color:var(--ink-2); font-size:.76rem; text-transform:uppercase; }
-    .metric .hint { color:var(--pico-muted-color); font-size:.78rem; margin-top:.15rem; }
-    article {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: none;
-      background: var(--panel);
-    }
-    article > header {
-      border-bottom: 1px solid var(--line);
-      background: var(--soft);
-      padding: .7rem .9rem;
-    }
-    table td, table th { padding:.46rem .55rem; font-size:.88rem; vertical-align: top; }
-    table th { color: var(--ink-2); font-size:.76rem; text-transform:uppercase; }
-    .grid2 { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; }
-    .grid3 { display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:1rem; }
-    .toolbar { display:flex; flex-wrap:wrap; gap:.75rem; align-items:end; margin-bottom:1rem; }
-    .toolbar label { min-width: 12rem; margin:0; }
-    .toolbar .actions { margin-left:auto; display:flex; gap:.5rem; }
-    .muted-txt { color:var(--pico-muted-color); }
-    .nowrap { white-space: nowrap; }
-    .truncate {
-      max-width: 36rem;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .delta-win { color: var(--good); font-weight: 700; }
-    .delta-loss { color: var(--bad); font-weight: 700; }
-    .delta-none { color: var(--pico-muted-color); }
-    tr[data-href] { cursor: pointer; }
-    tr[data-href]:hover { background: var(--soft); }
-    pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.35; }
-    .dot { height:.65rem; width:.65rem; border-radius:50%; display:inline-block; margin-right:.4rem; }
-    .dot.up{background:var(--good);} .dot.down{background:var(--bad);} .dot.unk{background:#8a96a3;}
-    @media (max-width:1050px){ .metric-grid{grid-template-columns:repeat(3,1fr);} .grid3{grid-template-columns:1fr;} }
-    @media (max-width:760px){
-      .metric-grid{grid-template-columns:repeat(2,1fr);}
-      .grid2{grid-template-columns:1fr;}
-      table { display:block; overflow-x:auto; }
-      .toolbar .actions { margin-left:0; }
-    }
-  </style>
 </head>
 <body>
   <main class="container">
     <nav class="top">
       <ul><li><strong>Stekkies Agent</strong></li></ul>
       <ul>
-        <li><a href="/">Overview</a></li>
-        <li><a href="/submissions">Submissions</a></li>
+        <li><a href="/" class="{{ 'active' if active_page == 'overview' }}">Overview</a></li>
+        <li><a href="/funnel" class="{{ 'active' if active_page == 'funnel' }}">Funnel</a></li>
+        <li><a href="/self-improvement" class="{{ 'active' if active_page == 'si' }}">Self-improvement</a></li>
+        <li><a href="/submissions" class="{{ 'active' if active_page == 'submissions' }}">Submissions</a></li>
         <li><button id="push-toggle" class="outline secondary" hidden
                     style="padding:.2rem .6rem;font-size:.8rem;margin:0;"
                     title="Native notifications on this device for every submission"></button></li>
+        <li><button class="outline secondary" onclick="toggleTheme()"
+                    style="padding:.2rem .6rem;font-size:.8rem;margin:0;"
+                    title="Toggle light/dark">◐</button></li>
       </ul>
     </nav>
+    <div id="action-status"></div>
     {% block content %}{% endblock %}
     <footer class="muted-txt" style="margin:2rem 0;font-size:.8rem;">
       Autonomous responder · read-only data from logs · secrets redacted
     </footer>
   </main>
-  <script>
-    // Rows tagged data-href navigate on click, unless the click landed on a
-    // nested link/button (e.g. the external listing link), which keeps its
-    // own behavior.
-    document.addEventListener('click', (e) => {
-      const row = e.target.closest('tr[data-href]');
-      if (!row || e.target.closest('a, button')) return;
-      window.location.href = row.dataset.href;
-    });
-
-    // ------------------------------------------------------------ web push --
-    // Native notifications (Chrome desktop + Android) for submissions.
-    // Per device: click the 🔔 button once; unsubscribe by clicking again.
-    (async () => {
-      const btn = document.getElementById('push-toggle');
-      if (!btn || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
-      btn.hidden = false;
-
-      const b64ToBytes = (b64) => {
-        const pad = '='.repeat((4 - b64.length % 4) % 4);
-        const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
-        return Uint8Array.from(raw, (c) => c.charCodeAt(0));
-      };
-      const reg = await navigator.serviceWorker.register('/sw.js');
-      const current = async () => (await reg.pushManager.getSubscription());
-      const render = async () => {
-        btn.textContent = (await current()) ? '🔔 Notifications on' : '🔕 Enable notifications';
-      };
-      await render();
-
-      btn.addEventListener('click', async () => {
-        try {
-          const existing = await current();
-          if (existing) {
-            await fetch('/push/unsubscribe', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ endpoint: existing.endpoint }),
-            });
-            await existing.unsubscribe();
-          } else {
-            if (await Notification.requestPermission() !== 'granted') return;
-            const { key } = await (await fetch('/push/public-key')).json();
-            const sub = await reg.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey: b64ToBytes(key),
-            });
-            const r = await fetch('/push/subscribe', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(sub.toJSON()),
-            });
-            if (!r.ok) { await sub.unsubscribe(); alert('Subscribe failed'); }
-          }
-        } catch (e) {
-          alert('Push setup failed: ' + e);
-        }
-        await render();
-      });
-    })();
-  </script>
+  <script src="/static/dashboard.js"></script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

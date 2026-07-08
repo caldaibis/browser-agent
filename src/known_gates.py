@@ -177,3 +177,37 @@ def record_gate(*, domain: str, kind: str, note: str, source: str = "",
             os.unlink(tmp)
     verb = "updated" if replaced else "recorded"
     return f"{verb} {kind} gate for {domain}" + (f" (expires {expires_ts})" if expires_ts else "")
+
+
+def _write_gates(data: list[dict]) -> None:
+    GATES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(GATES_PATH.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        os.replace(tmp, GATES_PATH)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def remove_gate(domain: str, kind: str) -> str:
+    """Delete the gate for (domain, kind). Used by the dashboard to un-block a
+    site the self-improvement agent gated wrongly (a wrongly-gated site
+    silently skips every listing until the gate is cleared). Raises ValueError
+    if no such gate exists so the caller can surface a clear message."""
+    domain = normalize_domain(domain)
+    if not domain:
+        raise ValueError("empty domain")
+    try:
+        data = json.loads(GATES_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            data = []
+    except (OSError, json.JSONDecodeError):
+        data = []
+    kept = [g for g in data if not (isinstance(g, dict)
+            and g.get("domain") == domain and g.get("kind") == kind)]
+    if len(kept) == len(data):
+        raise ValueError(f"no {kind} gate for {domain}")
+    _write_gates(kept)
+    return f"removed {kind} gate for {domain}"

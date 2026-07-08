@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ name }}{% endblock %}
+{% block content %}
+<p><a href="/self-improvement">← self-improvement</a></p>
+<h3>{{ 'Patch' if is_patch else 'Self-improvement run' }} <span class="muted-txt">{{ name }}</span></h3>
+<article>
+  <header><strong>{{ 'Patch content' if is_patch else 'Run log' }}</strong>
+    <span class="muted-txt">(secrets redacted)</span>
+  </header>
+  <pre class="transcript">{{ log }}</pre>
+</article>
+{% endblock %}
