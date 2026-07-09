@@ -130,13 +130,12 @@ REGISTRY: list[SiteConfig] = [
     _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/",
            enabled=False, needs_login=True),
     # rebogroep.nl: the agency behind 4 of the first 38 real submissions — it
-    # clearly carries Utrecht stock, but until now it was only discovered
-    # indirectly (and late) via huurportaal/huurwoningen aggregator pages.
-    # Server HTML has no listing anchors (client-side rendered; verified
-    # 07-07-2026), so tier-3: render in the shared browser and scrape the
-    # /nl/aanbod/<uuid>-<slug> detail links.
-    _tier3("rebogroep.nl", "https://www.rebogroep.nl/nl/aanbod",
-           parse=make_anchor_parser(r"/nl/aanbod/[0-9a-f]{8}-[0-9a-f-]{27}[a-z0-9-]*")),
+    # clearly carries Utrecht stock. Moved rental listings from /nl/aanbod
+    # (Nuxt landing shell, no listing anchors) to /nl/particulier/ons-aanbod/huren
+    # (244 results with /nl/aanbod/<uuid>-<slug> detail links). Tier-3: render
+    # in the shared browser and scrape the /nl/aanbod/<uuid>-<slug> detail links.
+    _tier3("rebogroep.nl", "https://www.rebogroep.nl/nl/particulier/ons-aanbod/huren",
+           parse=make_anchor_parser(r"/nl/aanbod/[0-9a-f]{8}-[0-9a-f-]{27}[a-z0-9-]*")),  # VALIDATED: 244
     _tier3("verhuurtbeter.nl", "https://www.verhuurtbeter.nl/aanbod",
            parse=make_anchor_parser(r"/appartement-te-huur/[a-zA-Z]+/[a-zA-Z0-9-]+/\d+/")),  # VALIDATED: 40
     _tier3("woonruimte-utrecht.nl", "https://www.woonruimte-utrecht.nl/woningaanbod/",
