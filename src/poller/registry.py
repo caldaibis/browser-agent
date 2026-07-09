@@ -85,9 +85,13 @@ REGISTRY: list[SiteConfig] = [
            parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
     # mijndak serves a challenge/empty page; its Utrecht stock == woningnetregioutrecht.
     _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", needs_login=True),
+    # woningnetregioutrecht.nl: disabled 2026-07-09 — session expired, redirects to
+    # /Inloggen (second occurrence; prior email-only fix 2026-07-08 didn't resolve).
+    # Re-enable after logging into utrecht.mijndak.nl in the shared CDP browser and
+    # verifying /WoningOverzicht shows listings.
     _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/WoningOverzicht",
-           needs_login=True,
-           parse=make_anchor_parser(r"HuisDetails\?PublicatieId=\d+")),  # VALIDATED (logged in)
+           enabled=False, needs_login=True,
+           parse=make_anchor_parser(r"HuisDetails\?PublicatieId=\d+")),
     # JS-SPAs whose listing list is drawn client-side from an API and which
     # block plain httpx AND throwaway headless Chromium (bot-detected / served a
     # 404/challenge). They render fine in the project's real anti-automation
