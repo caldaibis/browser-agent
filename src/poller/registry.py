@@ -118,7 +118,7 @@ REGISTRY: list[SiteConfig] = [
                r"/en/for-rent/(?:apartment|studio)-[a-z-]+/[^/]+/(?:apartment|studio)-\d+")),  # VALIDATED
     # househunting.nl outsources its listing display to huurwoningen.nl (its
     # /woningaanbod links out to huurwoningen.nl), which is already covered above.
-    _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/"),
+    _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/", needs_login=True),
     # rebogroep.nl: the agency behind 4 of the first 38 real submissions — it
     # clearly carries Utrecht stock, but until now it was only discovered
     # indirectly (and late) via huurportaal/huurwoningen aggregator pages.
