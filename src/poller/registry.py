@@ -83,8 +83,9 @@ REGISTRY: list[SiteConfig] = [
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht",
            own_browser=True,
            parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
-    # mijndak serves a challenge/empty page; its Utrecht stock == woningnetregioutrecht.
-    _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", needs_login=True),
+    # mijndak.nl: disabled 2026-07-09 — its list URL serves an AWS S3 403
+    # AccessDenied page (site moved/dead); Utrecht stock == woningnetregioutrecht.
+    _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", enabled=False, needs_login=True),
     # woningnetregioutrecht.nl: disabled 2026-07-09 — session expired, redirects to
     # /Inloggen (second occurrence; prior email-only fix 2026-07-08 didn't resolve).
     # Re-enable after logging into utrecht.mijndak.nl in the shared CDP browser and
