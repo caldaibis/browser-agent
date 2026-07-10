@@ -30,6 +30,21 @@
     <div class="hint">diagnosis + patch</div>
   </div>
   <div class="metric">
+    <div class="big">{{ kpis.orphans }}</div>
+    <div class="lbl">Orphaned runs · 7d</div>
+    <div class="hint">started without terminal record</div>
+  </div>
+  <div class="metric">
+    <div class="big">{{ kpis.turn_exhaustions }}</div>
+    <div class="lbl">Turn exhaustions · 7d</div>
+    <div class="hint">diagnosis/patch budget failures</div>
+  </div>
+  <div class="metric">
+    <div class="big">{{ kpis.queue.pending }}/{{ kpis.queue.failed }}</div>
+    <div class="lbl">Queue pending / failed</div>
+    <div class="hint">durable worker backlog</div>
+  </div>
+  <div class="metric">
     <div class="big">
       {% if lineage.eval %}{{ lineage.eval.payload.passed }}✓ / {{ lineage.eval.payload.failed }}✗{% else %}—{% endif %}
     </div>

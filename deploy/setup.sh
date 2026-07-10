@@ -17,11 +17,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
   git curl ca-certificates xvfb x11vnc fonts-liberation fonts-noto-color-emoji \
-  nodejs npm \
   >/dev/null
-# Node/npx is required for the Playwright MCP (browser automation + file upload)
-# that Hermes drives. The MCP server config travels in the copied ~/.hermes.
-# Also needed for the claude CLI (self-improvement agent) -- see step 5.
+# Node 20+/npx is installed and version-checked by the shared runtime ensure
+# step below. Ubuntu's default Node 18 silently became incompatible with the
+# Playwright MCP in production on 2026-07-10.
 
 echo "==> [2/8] app user '${APP_USER}'"
 if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -55,7 +54,8 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chr
 
 echo "==> [7/8] systemd units"
 for unit in xvfb.service browser-host.service orchestrator.service poller.service \
-            vnc.service healthcheck.service healthcheck.timer dashboard.service; do
+            vnc.service healthcheck.service healthcheck.timer dashboard.service \
+            self-improvement-worker.service self-improvement-worker.timer; do
   sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
     "${APP_DIR}/deploy/systemd/${unit}" > "/etc/systemd/system/${unit}"
 done
@@ -85,6 +85,7 @@ echo "==> enable Xvfb + browser host + health-check timer + dashboard (NOT orche
 systemctl enable --now xvfb.service
 systemctl enable --now browser-host.service
 systemctl enable --now healthcheck.timer
+systemctl enable --now self-improvement-worker.timer
 systemctl enable --now dashboard.service
 
 cat <<EOF

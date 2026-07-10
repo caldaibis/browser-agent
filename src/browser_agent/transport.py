@@ -12,6 +12,7 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 
 from ..agent_tools import BLOCKED_TOOLS
+from ..playwright_mcp_runtime import PLAYWRIGHT_MCP_PACKAGE
 from ..settings import settings
 
 
@@ -19,7 +20,7 @@ def _mcp_params(cdp_url: str) -> StdioServerParameters:
     return StdioServerParameters(
         command="npx",
         args=[
-            "-y", "@playwright/mcp@latest",
+            "--yes", PLAYWRIGHT_MCP_PACKAGE,
             "--cdp-endpoint", cdp_url,
             "--allow-unrestricted-file-access",
         ],

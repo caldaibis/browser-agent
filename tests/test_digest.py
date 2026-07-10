@@ -106,19 +106,36 @@ class TestHealthcheckProbe(unittest.TestCase):
         self._write(["crash", "fix_failed", "timeout", "incomplete", "crash"])
         state: dict = {}
         with patch.object(healthcheck, "LOG_DIR", self.log_dir), \
-             patch.object(healthcheck, "send_alert") as alert:
+             patch.object(healthcheck, "send_alert") as alert, \
+             patch("src.self_improvement_queue.queue_counts",
+                   return_value={"pending": 0, "running": 0, "failed": 0}):
             healthcheck.check_self_improvement(state)
             healthcheck.check_self_improvement(state)
         alert.assert_called_once()
         self.assertTrue(state["si_failing_sent"])
 
-    def test_recent_success_disarms(self):
+    def test_high_rolling_failure_rate_stays_armed(self):
         from src import healthcheck
 
         self._write(["crash", "crash", "crash", "crash", "noop"])
         state = {"si_failing_sent": True}
         with patch.object(healthcheck, "LOG_DIR", self.log_dir), \
-             patch.object(healthcheck, "send_alert") as alert:
+             patch.object(healthcheck, "send_alert") as alert, \
+             patch("src.self_improvement_queue.queue_counts",
+                   return_value={"pending": 0, "running": 0, "failed": 0}):
+            healthcheck.check_self_improvement(state)
+        alert.assert_not_called()
+        self.assertTrue(state["si_failing_sent"])
+
+    def test_healthy_rolling_rate_disarms(self):
+        from src import healthcheck
+
+        self._write(["crash", "noop", "noop", "noop", "noop"])
+        state = {"si_failing_sent": True}
+        with patch.object(healthcheck, "LOG_DIR", self.log_dir), \
+             patch.object(healthcheck, "send_alert") as alert, \
+             patch("src.self_improvement_queue.queue_counts",
+                   return_value={"pending": 0, "running": 0, "failed": 0}):
             healthcheck.check_self_improvement(state)
         alert.assert_not_called()
         self.assertFalse(state["si_failing_sent"])
@@ -129,7 +146,9 @@ class TestHealthcheckProbe(unittest.TestCase):
         self._write(["crash", "crash"])
         state: dict = {}
         with patch.object(healthcheck, "LOG_DIR", self.log_dir), \
-             patch.object(healthcheck, "send_alert") as alert:
+             patch.object(healthcheck, "send_alert") as alert, \
+             patch("src.self_improvement_queue.queue_counts",
+                   return_value={"pending": 0, "running": 0, "failed": 0}):
             healthcheck.check_self_improvement(state)
         alert.assert_not_called()
 

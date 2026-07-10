@@ -235,6 +235,15 @@ form, uploads docs, submits).
   turns/budget/timeout via `SELF_IMPROVEMENT_PROXY_MODEL` (default
   `self-improvement-deepseek`), `SELF_IMPROVEMENT_MAX_TURNS`,
   `SELF_IMPROVEMENT_MAX_BUDGET_USD`, `SELF_IMPROVEMENT_TIMEOUT_SECONDS`.
+- `src/self_improvement_queue.py` / `src/self_improvement_worker.py` — failed
+  applies enqueue redacted durable jobs instead of running repair inline. A
+  30-second systemd timer drains them under one global flock, recovers jobs
+  and worktrees left by killed processes, and is deliberately not restarted
+  by application deploys. This prevents concurrent agents racing `main` and
+  a self-deploy killing sibling diagnosis runs. Diagnosis is submitted via an
+  authoritative tool; commit/push tool state survives later model turn-limit
+  errors. SDK `tools=` is the real availability boundary (`allowed_tools`
+  only auto-approves), and writes are enforced inside the isolated worktree.
 - `src/notify.py` — emails `NOTIFY_TO` after each handled listing
   (outcome + redacted summary) via Gmail `send` scope. Also the single
   integration point for web push: `send_status_email` calls
@@ -344,7 +353,11 @@ form, uploads docs, submits).
   a hard reset to a tree where they're absent deletes them. Always
   `tar czf <backup> documents state` first, reset, then `tar xzf <backup>
   documents`. Run git as the deploy user (the repo is deploy-owned).
-- Node/npx is required at runtime for the Playwright MCP.
+- Node 20+/npx is required at runtime for the pinned Playwright MCP
+  (`@playwright/mcp@0.0.78`). Never use `@latest`: it raised its Node engine
+  requirement on 10-07-2026 and every apply began failing before turn 1 while
+  all systemd units still reported active. Deploy and healthcheck run a
+  functional startup/initialize probe.
 - The self-improvement agent needs the **`claude` CLI on PATH**
   (`npm install -g @anthropic-ai/claude-code` — `claude-agent-sdk` shells out
   to it) and the **LiteLLM proxy running** (`litellm-proxy.service` on the

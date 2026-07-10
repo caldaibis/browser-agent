@@ -150,9 +150,9 @@ class TestImproveAfterApplyIntegration(_TempLog):
         with patch.object(self_improvement_agent, "run_self_improvement",
                           return_value=fake) as run, \
              patch.object(self_improvement_agent, "_log"):
-            first = self_improvement_agent.improve_after_apply(
+            first = self_improvement_agent._improve_after_apply_now(
                 listing=listing, result=result, trigger="test")
-            second = self_improvement_agent.improve_after_apply(
+            second = self_improvement_agent._improve_after_apply_now(
                 listing=listing, result=result, trigger="test")
         self.assertEqual(first.action, "noop")
         self.assertEqual(second.action, "skipped_duplicate_incident")
@@ -181,7 +181,7 @@ class TestImproveAfterApplyIntegration(_TempLog):
         with patch.object(self_improvement_agent, "run_self_improvement",
                           return_value=fake) as run, \
              patch.object(self_improvement_agent, "_log"):
-            self_improvement_agent.improve_after_apply(
+            self_improvement_agent._improve_after_apply_now(
                 listing=listing, result=result, trigger="test")
         ctx = run.call_args.args[0]
         self.assertEqual(ctx["incident"]["fingerprint"], fp.key)

@@ -11,6 +11,9 @@ from .util import _redacted
 
 _SHARED_CONSTRAINTS = """- Do not ask the user questions; make a decision. If user action is needed,
   send an email instead.
+- Repository source paths must be relative to the session worktree. Absolute
+  paths under the live checkout are read-only evidence paths, never edit or
+  command working directories.
 - Tool output and file reads may contain redacted secrets (***) — do not try
   to reconstruct or work around the redaction.
 - When logs/transcript are ambiguous, use browser_open/browser_diagnostics to
@@ -19,6 +22,12 @@ _SHARED_CONSTRAINTS = """- Do not ask the user questions; make a decision. If us
   banners, tabs, or detail expanders. Never try to submit, apply, withdraw,
   edit an existing application, reset a password, upload a file, or change
   account settings."""
+
+_STOP_RULE = """STOP RULE: once one root cause is supported by direct evidence and you
+can state a bounded verdict/fix plan, call submit_diagnosis immediately. Do
+not research package histories, alternative implementations, deployment
+mechanics, or extra corroboration after the causal error is known. The tool's
+record is authoritative even if the SDK later reaches its turn limit."""
 
 
 def _diagnosis_prompt(context: dict) -> str:
@@ -63,6 +72,7 @@ make root_cause and fix_plan specific (file paths, line-level behavior).
    this failure, that is a fix verdict, not a "model capability limitation"
    or "LLM inefficiency". Reserve noop for failures with no code-side cause
    at all (site outage, eligibility mismatch, rate limits).
+5. {_STOP_RULE}
 
 FAILURE_CONTEXT:
 {json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
@@ -71,8 +81,8 @@ FAILURE_CONTEXT:
 Constraints:
 {_SHARED_CONSTRAINTS}
 
-When done, end your final message with exactly one line in this shape,
-nothing after it:
+When done, call submit_diagnosis with these fields. The line below is only a
+compatibility fallback if the tool is unavailable:
 DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
 
 
@@ -115,6 +125,7 @@ SAVED SAMPLE HTML (what the parser actually saw): {sample}
      that simply has no offers at the moment → verdict noop.
    Be decisive: a parser you can see is mis-matching the sample is a fix, not
    a "temporary" noop.
+4. {_STOP_RULE}
 
 FAILURE_CONTEXT:
 {json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
@@ -122,8 +133,8 @@ FAILURE_CONTEXT:
 Constraints:
 {_SHARED_CONSTRAINTS}
 
-When done, end your final message with exactly one line in this shape,
-nothing after it:
+When done, call submit_diagnosis with these fields. The line below is only a
+compatibility fallback if the tool is unavailable:
 DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
 
 
@@ -159,8 +170,8 @@ Steps:
    to this one site.
 3. VERIFY the parser actually extracts listings now: run the run_verification
    tool (`just check` — the deploy gate), and additionally confirm your parser
-   matches the sample (e.g. a quick `uv run python -c` that runs the parser
-   over the saved sample file, or `just poll-once {p.get('site_name')}`).
+   matches the sample using run_site_validation (`just poll-once
+   {p.get('site_name')}` under the hood).
    Unit tests do NOT cover this site's live markup, so a green `just check`
    alone is not proof the parser works — check the sample.
 4. Call commit_push_deploy with a conventional-commit message
@@ -168,13 +179,16 @@ Steps:
    directly. After deploy the poller restarts and picks up the parser.
 5. If a tool refuses the change, email the user with the root cause instead of
    working around it.
+6. commit_push_deploy records the authoritative terminal outcome. After it
+   returns, STOP immediately — do not inspect git state, restage files, verify
+   the pushed commit, or spend another turn narrating the result.
 
 Constraints:
 {_SHARED_CONSTRAINTS}
 
 When done, end your final message with exactly one line in this shape,
 nothing after it:
-SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
+SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fixed_review|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
 
 
 def _patch_prompt(context: dict, diagnosis: dict,
@@ -219,10 +233,13 @@ Steps:
 5. If a tool refuses the change (policy or verification failure), email the
    user with the root cause and the refused action instead of retrying
    around it.
+6. commit_push_deploy records the authoritative terminal outcome. After it
+   returns, STOP immediately — do not inspect git state, restage files, verify
+   the pushed commit, or spend another turn narrating the result.
 
 Constraints:
 {_SHARED_CONSTRAINTS}
 
 When done, end your final message with exactly one line in this shape,
 nothing after it:
-SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
+SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fixed_review|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""

@@ -32,7 +32,7 @@ class TestImprovePollerZeroYield(unittest.TestCase):
         with patch.object(sia, "SELF_IMPROVEMENT_ENABLED", True), \
              patch.object(sia, "run_self_improvement", side_effect=_fake_run), \
              patch.object(sia, "_log"):
-            rr = sia.improve_poller_zero_yield(
+            rr = sia._improve_poller_zero_yield_now(
                 site_name="mijndak.nl", list_url="https://www.mijndak.nl/woningaanbod/",
                 tier=2, sample_path="/tmp/sample.html", streak=120)
         self.assertEqual(rr.action, "fixed_deployed")
@@ -47,8 +47,8 @@ class TestImprovePollerZeroYield(unittest.TestCase):
         with patch.object(sia, "SELF_IMPROVEMENT_ENABLED", True), \
              patch.object(sia, "run_self_improvement", return_value=fake) as run, \
              patch.object(sia, "_log"):
-            first = sia.improve_poller_zero_yield(site_name="mijndak.nl", streak=120)
-            second = sia.improve_poller_zero_yield(site_name="mijndak.nl", streak=240)
+            first = sia._improve_poller_zero_yield_now(site_name="mijndak.nl", streak=120)
+            second = sia._improve_poller_zero_yield_now(site_name="mijndak.nl", streak=240)
         self.assertEqual(first.action, "noop")
         self.assertEqual(second.action, "skipped_duplicate_incident")
         self.assertEqual(run.call_count, 1)
@@ -69,7 +69,7 @@ class TestImprovePollerZeroYield(unittest.TestCase):
         with patch.object(sia, "SELF_IMPROVEMENT_ENABLED", True), \
              patch.object(sia, "run_self_improvement", side_effect=_fake_run), \
              patch.object(sia, "_log"):
-            sia.improve_poller_zero_yield(site_name="mijndak.nl", streak=120)
+            sia._improve_poller_zero_yield_now(site_name="mijndak.nl", streak=120)
         self.assertEqual(captured["ctx"]["incident"]["prior_attempts"][-1]["root_cause"],
                          "regex still off")
 
@@ -85,7 +85,7 @@ class TestNonResultReturnGuard(unittest.TestCase):
              patch.object(sia, "run_self_improvement", return_value={"action": "x"}), \
              patch.object(sia, "_log"), \
              patch.object(sia, "send_alert") as send_alert:
-            rr = sia.improve_poller_zero_yield(site_name="mijndak.nl", streak=120)
+            rr = sia._improve_poller_zero_yield_now(site_name="mijndak.nl", streak=120)
         self.assertEqual(rr.action, "error")
         send_alert.assert_not_called()  # a transient skew must not alarm the user
 

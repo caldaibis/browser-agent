@@ -29,10 +29,13 @@ import os
 import subprocess
 import time
 import urllib.request
+from datetime import datetime
 
+from . import eventlog
 from .config import LOG_DIR, PROJECT_ROOT, CDP_URL
 from .notify import send_alert
 from .poller.browser_lock import browser_lock
+from .playwright_mcp_runtime import initialize_check, runtime_check
 from .settings import settings
 from .eventlog import get_logger
 
@@ -170,6 +173,27 @@ def check_services(state: dict) -> None:
             state[key] = False
 
 
+def check_playwright_mcp(state: dict) -> None:
+    """Functional runtime probe: active units can still have a dead MCP."""
+    ok, detail = runtime_check()
+    if ok:
+        ok, detail = initialize_check(CDP_URL)
+    _LOG.info(f"Playwright MCP runtime ok={ok}: {detail}")
+    key = "playwright_mcp_runtime_sent"
+    if not ok:
+        if not state.get(key):
+            send_alert(
+                "🚨 Stekkies bot: Playwright MCP cannot start",
+                f"The browser automation runtime failed its startup probe:\n\n"
+                f"{detail}\n\nApplications will fail before their first turn. "
+                "Run deploy/ensure-self-improvement.sh to enforce Node 20+ "
+                "and reinstall the pinned MCP package.",
+            )
+            state[key] = True
+    else:
+        state[key] = False
+
+
 def _logged_out_heuristic(page) -> bool:
     """Shared logged-out signal: the account page bounced to a login flow or
     is showing a password prompt."""
@@ -243,14 +267,19 @@ def check_site_logins(state: dict) -> None:
             state[key] = False
 
 
-# Alert when the last N self-improvement runs ALL failed (crash, fix_failed,
-# timeout, incomplete). Skips/dedup records are neither success nor failure.
+# Alert on a high rolling failure ratio, abandoned runs, or durable queue
+# failures. Skips/dedup records are neither success nor failure.
 SELF_IMPROVEMENT_HEALTH_WINDOW = settings().self_improvement_health_window
+SELF_IMPROVEMENT_HEALTH_FAILURE_RATIO = settings().self_improvement_health_failure_ratio
+SELF_IMPROVEMENT_ORPHAN_SECONDS = settings().self_improvement_orphan_seconds
 _SI_FAILURE_ACTIONS = {"error", "fix_failed", "timeout", "incomplete"}
 
 
 def check_self_improvement(state: dict) -> None:
     runs: list[bool] = []  # True = failed
+    starts: dict[str, datetime] = {}
+    terminals: set[str] = set()
+    abandoned_recent = 0
     try:
         with (LOG_DIR / "self_improvement.jsonl").open(encoding="utf-8") as f:
             for line in f:
@@ -259,6 +288,18 @@ def check_self_improvement(state: dict) -> None:
                 except json.JSONDecodeError:
                     continue
                 event = rec.get("event")
+                run_id = str(rec.get("run_id") or "")
+                if event == "run_started" and run_id:
+                    ts = eventlog.parse_ts(rec.get("ts"))
+                    if ts is not None:
+                        starts[run_id] = ts
+                elif event == "run_finished" and run_id:
+                    terminals.add(run_id)
+                elif event == "run_abandoned":
+                    abandoned_ts = eventlog.parse_ts(rec.get("ts"))
+                    if (abandoned_ts is not None
+                            and (datetime.now() - abandoned_ts).total_seconds() < 86400):
+                        abandoned_recent += 1
                 if event == "error":
                     runs.append(True)
                 elif event == "done":
@@ -266,15 +307,32 @@ def check_self_improvement(state: dict) -> None:
     except OSError:
         return
     recent = runs[-SELF_IMPROVEMENT_HEALTH_WINDOW:]
-    all_failing = (len(recent) >= SELF_IMPROVEMENT_HEALTH_WINDOW and all(recent))
+    failure_ratio = sum(recent) / len(recent) if recent else 0.0
+    unhealthy_ratio = (
+        len(recent) >= SELF_IMPROVEMENT_HEALTH_WINDOW
+        and failure_ratio >= SELF_IMPROVEMENT_HEALTH_FAILURE_RATIO
+    )
+    now = datetime.now()
+    orphans = [
+        run_id for run_id, started in starts.items()
+        if run_id not in terminals
+        and (now - started).total_seconds() >= SELF_IMPROVEMENT_ORPHAN_SECONDS
+    ]
+    from .self_improvement_queue import queue_counts
+    queue_state = queue_counts()
+    unhealthy = (unhealthy_ratio or bool(orphans) or abandoned_recent > 0
+                 or queue_state["failed"] > 0)
     _LOG.info(f"self-improvement recent failures: "
-          f"{sum(recent)}/{len(recent)} (window {SELF_IMPROVEMENT_HEALTH_WINDOW})")
-    if all_failing:
+          f"{sum(recent)}/{len(recent)} ratio={failure_ratio:.2f}; "
+          f"orphans={len(orphans)} abandoned={abandoned_recent} queue={queue_state}")
+    if unhealthy:
         if not state.get("si_failing_sent"):
             send_alert(
                 "🚨 Stekkies bot: self-improvement keeps failing",
-                f"The last {len(recent)} self-improvement runs ALL ended in "
-                "error/fix_failed/timeout/incomplete — the layer that is "
+                f"Recent failure rate is {sum(recent)}/{len(recent)} "
+                f"(threshold {SELF_IMPROVEMENT_HEALTH_FAILURE_RATIO:.0%}); "
+                f"orphaned runs={len(orphans)}, recovered abandonments={abandoned_recent}; "
+                f"queue={queue_state}. The layer that is "
                 "supposed to repair failures is itself broken or blocked "
                 "(dead proxy? read-only deploy key? see "
                 "state/pending_patches/ for unlanded fixes).\n\n"
@@ -325,6 +383,7 @@ def main() -> int:
     state = _load()
     check_credits(state)
     check_services(state)
+    check_playwright_mcp(state)
     check_site_logins(state)
     check_self_improvement(state)
     maybe_send_digest(state)

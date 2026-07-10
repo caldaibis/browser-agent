@@ -26,6 +26,7 @@ from typing import Any
 
 from . import eventlog, incident_store, known_gates
 from .config import LOG_DIR, PROJECT_ROOT
+from .settings import settings
 
 MAIL_SUMMARY_LOG = LOG_DIR / "mail_summary.jsonl"
 SELF_IMPROVEMENT_LOG = LOG_DIR / "self_improvement.jsonl"
@@ -81,6 +82,10 @@ def build_digest(*, days: float = 7.0, now: datetime | None = None) -> str:
     lines.append(
         f"SELF-IMPROVEMENT: {si['runs']} runs, {si['deployed']} deployed, "
         f"{si['skipped_duplicates']} duplicate incidents skipped"
+    )
+    lines.append(
+        f"  lifecycle: {si['started']} started, {si['finished']} finished, "
+        f"{si['orphans']} orphaned, {si['authoritative_tools']} authoritative tool outcomes"
     )
     for action, count in sorted(si["actions"].items(), key=lambda kv: -kv[1]):
         lines.append(f"  {action}: {count}")
@@ -148,11 +153,24 @@ def _guard_stats(cutoff: datetime) -> dict[str, int]:
 def _self_improvement_stats(cutoff: datetime) -> dict[str, Any]:
     actions: Counter = Counter()
     runs = deployed = skipped = 0
+    starts: dict[str, datetime] = {}
+    finishes: set[str] = set()
+    authoritative_tools = 0
+    abandoned = 0
     for rec in _read_jsonl(SELF_IMPROVEMENT_LOG):
         ts = _parse_ts(rec.get("ts"))
         if ts is None or ts < cutoff:
             continue
         event = str(rec.get("event") or "")
+        run_id = str(rec.get("run_id") or "")
+        if event == "run_started" and run_id:
+            starts[run_id] = ts
+        elif event == "run_finished" and run_id:
+            finishes.add(run_id)
+        elif event == "tool_result" and rec.get("authoritative"):
+            authoritative_tools += 1
+        elif event == "run_abandoned":
+            abandoned += 1
         if event == "skipped_duplicate_incident":
             skipped += 1
         elif event == "error":
@@ -163,8 +181,14 @@ def _self_improvement_stats(cutoff: datetime) -> dict[str, Any]:
             actions[str(rec.get("action") or "unknown")] += 1
             if rec.get("deployed") in (True, "True"):
                 deployed += 1
+    orphan_cutoff = datetime.now() - timedelta(
+        seconds=settings().self_improvement_orphan_seconds)
+    orphans = abandoned + sum(1 for run_id, started in starts.items()
+                              if run_id not in finishes and started <= orphan_cutoff)
     return {"runs": runs, "deployed": deployed,
-            "skipped_duplicates": skipped, "actions": dict(actions)}
+            "skipped_duplicates": skipped, "actions": dict(actions),
+            "started": len(starts), "finished": len(finishes),
+            "orphans": orphans, "authoritative_tools": authoritative_tools}
 
 
 def _pending_patches() -> list[str]:

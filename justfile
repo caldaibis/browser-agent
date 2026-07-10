@@ -44,7 +44,8 @@ doctor:
     chk(){ if eval "$2" >/dev/null 2>&1; then printf "  ok    %s\n" "$1"; else printf "  FAIL  %s\n" "$1"; rc=1; fi; }
     echo "preflight:"
     chk "uv installed"                 "command -v uv"
-    chk "node/npx present (MCP)"       "command -v npx"
+    chk "Node 20+ present (MCP)"       "node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 20 ? 0 : 1)'"
+    chk "pinned Playwright MCP starts" "uv run python -c 'from src.playwright_mcp_runtime import runtime_check; raise SystemExit(0 if runtime_check()[0] else 1)'"
     chk "DEEPSEEK_API_KEY set"         '[ -n "${DEEPSEEK_API_KEY:-}" ]'
     chk "claude CLI present (self-improvement)" "command -v claude"
     chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
@@ -175,7 +176,7 @@ activity:
 
 # status of all services
 status:
-    {{ssh}} 'for s in orchestrator poller browser-host dashboard caddy xvfb healthcheck.timer; do printf "%-18s %s\\n" "$s" "$(systemctl is-active $s)"; done'
+    {{ssh}} 'for s in orchestrator poller browser-host dashboard caddy xvfb healthcheck.timer self-improvement-worker.timer; do printf "%-30s %s\\n" "$s" "$(systemctl is-active $s)"; done'
 
 # restart a service, e.g. `just restart browser-host`
 restart svc:

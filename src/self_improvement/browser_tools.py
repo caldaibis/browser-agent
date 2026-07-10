@@ -16,6 +16,7 @@ from ..browser_dom_tools import compact, current_page, evaluate_controls, evalua
 from ..config import CDP_URL, SCREENSHOT_DIR
 from ..poller.browser_lock import browser_lock
 from ..redaction import redact
+from ..settings import settings
 
 
 _BLOCKED_CLICK_RE = re.compile(
@@ -27,6 +28,7 @@ _BLOCKED_CLICK_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_LOCK_TIMEOUT = settings().self_improvement_browser_lock_timeout
 
 
 async def _browser_open(url: str, settle_ms: int) -> str:
@@ -65,22 +67,22 @@ def _clamp_settle(ms: int) -> int:
 
 
 def _browser_open_locked(url: str, settle_ms: int) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
+    with browser_lock(timeout=_LOCK_TIMEOUT, holder="self-improvement"):
         return asyncio.run(_browser_open_async(url, settle_ms))
 
 
 def _browser_diagnostics_locked(settle_ms: int) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
+    with browser_lock(timeout=_LOCK_TIMEOUT, holder="self-improvement"):
         return asyncio.run(_browser_diagnostics_async(settle_ms))
 
 
 def _browser_safe_click_locked(text: str, settle_ms: int) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
+    with browser_lock(timeout=_LOCK_TIMEOUT, holder="self-improvement"):
         return asyncio.run(_browser_safe_click_async(text, settle_ms))
 
 
 def _browser_screenshot_locked(full_page: bool) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
+    with browser_lock(timeout=_LOCK_TIMEOUT, holder="self-improvement"):
         return asyncio.run(_browser_screenshot_async(full_page))
 
 
@@ -88,7 +90,7 @@ async def _browser_open_async(url: str, settle_ms: int) -> str:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
+        browser = await p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
         try:
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await ctx.new_page()
@@ -105,7 +107,7 @@ async def _browser_diagnostics_async(settle_ms: int) -> str:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
+        browser = await p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
         try:
             page = await current_page(browser)
             events = _attach_browser_event_collectors(page)
@@ -120,7 +122,7 @@ async def _browser_safe_click_async(text: str, settle_ms: int) -> str:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
+        browser = await p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
         try:
             page = await current_page(browser)
             events = _attach_browser_event_collectors(page)
@@ -136,7 +138,7 @@ async def _browser_screenshot_async(full_page: bool) -> str:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
+        browser = await p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
         try:
             page = await current_page(browser)
             path = SCREENSHOT_DIR / f"self_improvement_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"

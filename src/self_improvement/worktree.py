@@ -55,3 +55,47 @@ def _remove_worktree(path: Path, branch: str, logger: Any) -> None:
                        capture_output=True, text=True, timeout=10)
     except Exception as e:  # noqa: BLE001 - cleanup must never raise
         logger.line(f"[self-improvement] worktree cleanup error: {type(e).__name__}: {e}")
+
+
+def remove_orphaned_worktrees() -> list[str]:
+    """Remove leftovers while the dedicated worker holds its global lock."""
+    removed: list[str] = []
+    try:
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=PROJECT_ROOT,
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        blocks = listing.split("\n\n")
+        base = WORKTREE_BASE.resolve()
+        for block in blocks:
+            fields = dict(
+                line.split(" ", 1) for line in block.splitlines()
+                if " " in line
+            )
+            raw_path = fields.get("worktree")
+            branch_ref = fields.get("branch", "")
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            try:
+                managed = path.resolve().is_relative_to(base)
+            except OSError:
+                managed = False
+            if not managed:
+                continue
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(path)],
+                cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30,
+            )
+            branch = branch_ref.removeprefix("refs/heads/")
+            if branch:
+                subprocess.run(
+                    ["git", "branch", "-D", branch], cwd=PROJECT_ROOT,
+                    capture_output=True, text=True, timeout=10,
+                )
+            removed.append(str(path))
+        subprocess.run(["git", "worktree", "prune"], cwd=PROJECT_ROOT,
+                       capture_output=True, text=True, timeout=30)
+    except Exception:
+        return removed
+    return removed

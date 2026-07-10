@@ -145,6 +145,8 @@ class Settings:
     healthcheck_ping_url: str
     healthcheck_site_probes_json: str  # raw JSON; healthcheck parses fail-open
     self_improvement_health_window: int
+    self_improvement_health_failure_ratio: float
+    self_improvement_orphan_seconds: int
     digest_interval_days: float
 
     # --- Site playbooks
@@ -179,6 +181,7 @@ class Settings:
     self_improvement_allow_code_changes: bool
     self_improvement_allow_deploy: bool
     self_improvement_proposal_candidates: int
+    self_improvement_browser_lock_timeout: float
     self_improvement_outcomes: frozenset[str]
 
     # --- Paths (the one env-driven one; config.py consumes it)
@@ -251,10 +254,15 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         server_ssh_hint=_str(e, "SERVER_SSH", "root@your-server-ip"),
         healthcheck_services=_csv(
             e, "HEALTHCHECK_SERVICES",
-            ("orchestrator", "poller", "browser-host", "litellm-proxy")),
+            ("orchestrator", "poller", "browser-host", "litellm-proxy",
+             "self-improvement-worker.timer")),
         healthcheck_ping_url=_str(e, "HEALTHCHECK_PING_URL", ""),
         healthcheck_site_probes_json=_str(e, "HEALTHCHECK_SITE_PROBES", "{}"),
         self_improvement_health_window=_int(e, "SELF_IMPROVEMENT_HEALTH_WINDOW", 5),
+        self_improvement_health_failure_ratio=_float(
+            e, "SELF_IMPROVEMENT_HEALTH_FAILURE_RATIO", 0.6),
+        self_improvement_orphan_seconds=_int(
+            e, "SELF_IMPROVEMENT_ORPHAN_SECONDS", 1800),
         digest_interval_days=_float(e, "DIGEST_INTERVAL_DAYS", 7.0),
 
         playbook_model=_str(e, "PLAYBOOK_MODEL", apply_model),
@@ -308,6 +316,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         self_improvement_proposal_candidates=_int(
             e, "SELF_IMPROVEMENT_PROPOSAL_CANDIDATES", 2,
             _si_legacy("SELF_IMPROVEMENT_PROPOSAL_CANDIDATES")),
+        self_improvement_browser_lock_timeout=_float(
+            e, "SELF_IMPROVEMENT_BROWSER_LOCK_TIMEOUT", 10.0,
+            _si_legacy("SELF_IMPROVEMENT_BROWSER_LOCK_TIMEOUT")),
         self_improvement_outcomes=frozenset(
             _csv(e, "SELF_IMPROVEMENT_OUTCOMES",
                  tuple(sorted(DEFAULT_SELF_IMPROVEMENT_OUTCOMES)),
