@@ -83,15 +83,21 @@ REGISTRY: list[SiteConfig] = [
     _tier3("pararius.nl", "https://www.pararius.nl/huurwoningen/utrecht",
            own_browser=True,
            parse=make_anchor_parser(r"/(?:appartement|huis|studio)-te-huur/[a-z-]+/[0-9a-f]+/")),
-    # mijndak.nl: disabled 2026-07-09 — its list URL serves an AWS S3 403
-    # AccessDenied page (site moved/dead); Utrecht stock == woningnetregioutrecht.
+    # mijndak.nl: disabled 2026-07-09, re-verified 2026-07-10 — www.mijndak.nl is
+    # WoningNet's national DAK-platform marketing site, not a listing feed; its
+    # /woningaanbod/ path 404s straight to a raw AWS S3 AccessDenied XML (dead
+    # route, not a gate). Real listings live on the regional subdomain
+    # utrecht.mijndak.nl, which the registry already covers as the
+    # woningnetregioutrecht.nl entry below — keeping this one enabled would just
+    # double-poll the same houses under two names. Leave disabled.
     _tier3("mijndak.nl", "https://www.mijndak.nl/woningaanbod/", enabled=False, needs_login=True),
-    # woningnetregioutrecht.nl: disabled 2026-07-09 — session expired, redirects to
-    # /Inloggen (second occurrence; prior email-only fix 2026-07-08 didn't resolve).
-    # Re-enable after logging into utrecht.mijndak.nl in the shared CDP browser and
-    # verifying /WoningOverzicht shows listings.
+    # woningnetregioutrecht.nl (utrecht.mijndak.nl): session renewed 2026-07-10 by
+    # logging into /Inloggen in the shared CDP browser — verified /WoningOverzicht
+    # renders listings again (e.g. HuisDetails?PublicatieId=370276) instead of
+    # redirecting to /Inloggen. Re-disable + note the failure mode if this
+    # regresses again; MijnDak sessions have expired twice now (2026-07-08, -09).
     _tier3("woningnetregioutrecht.nl", "https://utrecht.mijndak.nl/WoningOverzicht",
-           enabled=False, needs_login=True,
+           needs_login=True,
            parse=make_anchor_parser(r"HuisDetails\?PublicatieId=\d+")),
     # JS-SPAs whose listing list is drawn client-side from an API and which
     # block plain httpx AND throwaway headless Chromium (bot-detected / served a
@@ -123,12 +129,15 @@ REGISTRY: list[SiteConfig] = [
                r"/en/for-rent/(?:apartment|studio)-[a-z-]+/[^/]+/(?:apartment|studio)-\d+")),  # VALIDATED
     # househunting.nl outsources its listing display to huurwoningen.nl (its
     # /woningaanbod links out to huurwoningen.nl), which is already covered above.
-    # rebowonenhuur.nl: disabled 2026-07-09 — login wall not resolvable without
-    # human login in shared browser (second occurrence; prior needs_login=True +
-    # email didn't resolve). Re-enable after logging into rebowonenhuur.nl in the
-    # shared CDP browser and verifying /woningaanbod/ shows listings.
-    _tier3("rebowonenhuur.nl", "https://www.rebowonenhuur.nl/woningaanbod/",
-           enabled=False, needs_login=True),
+    # rebowonenhuur.nl: dropped 2026-07-10 (was disabled 2026-07-09 for a
+    # "login wall"). Logged in and re-checked: it's REBO Groep's own applicant
+    # self-service portal (set a saved "zoekopdracht", track application status),
+    # not a public listing feed — /woningaanbod/ is a genuine 404, and its own
+    # homepage tells applicants "een uitgebreide omschrijving van onze woningen
+    # vindt u terug op onze website www.rebogroep.nl". The zoekopdracht search
+    # returns 0 results with no complex explicitly picked (no general Utrecht
+    # feed to scrape). Same agency's real listings are already polled below as
+    # rebogroep.nl — this entry was a duplicate source, not a broken one.
     # rebogroep.nl: the agency behind 4 of the first 38 real submissions — it
     # clearly carries Utrecht stock. Moved rental listings from /nl/aanbod
     # (Nuxt landing shell, no listing anchors) to /nl/particulier/ons-aanbod/huren
