@@ -221,10 +221,13 @@ def _run_for_incident(
                 pass
         return rr
     except Exception as e:  # noqa: BLE001 - self-improvement must be best-effort
-        # Log the FULL traceback (not just str(e)): the crash email only carried
-        # "AttributeError: 'dict' ..." with no frames, which made the 08-07-2026
-        # version-skew crash hard to place.
-        _log("error", status=status_label, error=f"{type(e).__name__}: {e}",
+        # Log the FULL traceback (not just str(e)): a bare "AttributeError:
+        # 'dict' ..." with no frames made the 08-07-2026 version-skew crash
+        # hard to place. No per-crash email: the healthcheck already alerts
+        # when the last SELF_IMPROVEMENT_HEALTH_WINDOW runs all failed, and
+        # per-crash mails were pure noise on top of that (removed 10-07-2026).
+        _log("error", status=status_label, detail=crash_detail,
+             error=f"{type(e).__name__}: {e}",
              traceback=traceback.format_exc()[-3000:])
         if fp is not None:
             try:
@@ -232,11 +235,6 @@ def _run_for_incident(
                     fp, action="error", summary=f"{type(e).__name__}: {e}")
             except Exception:
                 pass
-        try:
-            send_alert("⚠️ Self-improvement agent failed",
-                       f"{crash_detail}\n\n{type(e).__name__}: {e}")
-        except Exception:
-            pass
         return SelfImprovementResult(action="error", summary=f"{type(e).__name__}: {e}")
 
 
