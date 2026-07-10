@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from src import browser_agent
+from src.browser_agent import loop
 
 
 class _FakeMessage:
@@ -135,10 +136,11 @@ def _patch_agent(responses, session=None):
     """Patch the OpenAI + MCP boundary so _run runs against canned responses."""
     fake_client = _FakeAsyncOpenAI(responses)
     fake_session = session if session is not None else _FakeMcpSession()
+    # The transport seams live in the loop module now; patch it, not the facade.
     return (
-        patch.object(browser_agent, "AsyncOpenAI", lambda *a, **kw: fake_client),
-        patch.object(browser_agent, "stdio_client", lambda params: _FakeAsyncCM((None, None))),
-        patch.object(browser_agent, "ClientSession", lambda read, write: _FakeAsyncCM(fake_session)),
+        patch.object(loop, "AsyncOpenAI", lambda *a, **kw: fake_client),
+        patch.object(loop, "stdio_client", lambda params: _FakeAsyncCM((None, None))),
+        patch.object(loop, "ClientSession", lambda read, write: _FakeAsyncCM(fake_session)),
     )
 
 
@@ -270,7 +272,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses)
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2]:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake", log=log,
             )
@@ -293,7 +295,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses)
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2]:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake", log=log,
             )
@@ -322,7 +324,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses, session=_FakeMcpSessionPermissive())
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2]:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake", log=log,
             )
@@ -349,7 +351,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses, session=_FakeMcpSessionBigSnapshots())
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2]:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake", log=log,
             )
@@ -365,7 +367,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses)
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2]:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake", log=log, yield_check=lambda: True,
             )
@@ -380,7 +382,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses, session=_FakeMcpSessionPayment())
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2]:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake", log=log,
             )
@@ -402,11 +404,11 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         patches = _patch_agent(responses)  # strict session: raises on MCP call_tool
         log = _CollectingLogger()
         with patches[0], patches[1], patches[2], \
-             patch.object(browser_agent.browser_dom_tools, "dom_scan",
+             patch.object(loop.browser_dom_tools, "dom_scan",
                           AsyncMock(return_value="dom report")) as mock_scan, \
-             patch.object(browser_agent.browser_dom_tools, "click_by_text",
+             patch.object(loop.browser_dom_tools, "click_by_text",
                           AsyncMock(return_value="clicked")) as mock_click:
-            rc, text = await browser_agent._run(
+            rc, text = await loop._run(
                 prompt="test prompt", model="test-model", max_turns=60,
                 cdp_url="http://fake-cdp", log=log,
             )

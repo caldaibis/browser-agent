@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from typing import Any
 
 from .config import PROJECT_ROOT
+from .models import Listing
 from .settings import settings
 from .eventlog import get_logger
 
@@ -137,18 +138,20 @@ def items_for_domain(domain: str) -> list[dict[str, Any]]:
     return [asdict(item) for item in _load_items(domain)]
 
 
-def update_after_run(listing: dict, result) -> None:
+def update_after_run(listing: Listing | dict, result) -> None:
     """Distill durable site knowledge out of a finished apply run.
 
     Best-effort: catches everything and only prints, because a playbook is a
     bonus — it must never turn a submitted application into an error."""
     try:
+        if not isinstance(listing, Listing):
+            listing = Listing.from_json(listing)
         _update(listing, result)
     except Exception as e:  # noqa: BLE001 - fail-open by design, see docstring
         _LOG.info(f"update skipped: {type(e).__name__}: {e}")
 
 
-def _update(listing: dict, result) -> None:
+def _update(listing: Listing, result) -> None:
     # A yielded run was aborted for priority, not finished — nothing to learn.
     if result.outcome == "yielded" or not getattr(result, "transcript_path", ""):
         return
@@ -161,13 +164,13 @@ def _update(listing: dict, result) -> None:
 
     # Same redaction the dashboard/self-improvement agent use: transcripts can
     # contain typed passwords in tool args.
-    from .dashboard.data import redact
+    from .redaction import redact
     transcript = redact(
         transcript_path.read_text(encoding="utf-8")[-_TRANSCRIPT_TAIL_CHARS:])
 
     # The domain the listing was discovered at AND the real destination the run
     # reached (for aggregators these differ; both flows are worth remembering).
-    domains = {domain_for(listing.get("source_url", ""))}
+    domains = {domain_for(listing.source_url)}
     if getattr(result, "resolved_url", ""):
         domains.add(domain_for(result.resolved_url))
     domains.discard("")

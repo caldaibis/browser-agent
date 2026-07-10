@@ -20,29 +20,44 @@ import asyncio
 import json
 import os
 import re
-import signal
 import threading
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI, APIStatusError
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
-from . import browser_dom_tools, credentials
-from .agent_tools import (
-    BLOCKED_TOOLS,
+from .. import browser_dom_tools, credentials
+from ..agent_tools import (
     CLICK_BY_TEXT_TOOL,
     CREDENTIAL_TOOL,
     DOM_SCAN_TOOL,
     FILL_BY_LABEL_TOOL,
     SELECT_OPTION_BY_LABEL_TOOL,
 )
-from .poller import dedup as poller_dedup
-from .self_improvement_harness import record_trajectory_event
-from .settings import settings
+from .guards import (
+    GRACE_TURNS,
+    _clamp_tool_result,
+    _is_payment_url,
+    _prune_stale_page_dumps,
+    _recent_form_activity,
+    _should_nudge_snapshot_overuse,
+    _trailing_cycle_repeats,
+)
+from .result import NO_CREDIT_RC, AgentResult, _extract_outcome, _parse_outcome
+from .transport import (
+    TEARDOWN_GRACE_SECONDS,
+    Logger,
+    _current_tab_url,
+    _kill_wedged_children,
+    _mcp_params,
+    _result_text,
+    _to_openai_tools,
+)
+from ..poller import dedup as poller_dedup
+from ..self_improvement_harness import record_trajectory_event
+from ..settings import settings
 
 DEEPSEEK_BASE_URL = settings().deepseek_base_url
 
@@ -64,260 +79,10 @@ THINKING = (
 # short status) is small, so this is just generous headroom against truncation.
 MAX_TOKENS = settings().apply_max_tokens
 
-# Stale-page-dump pruning. Full-page tool results (browser_snapshot,
-# browser_navigate's embedded snapshot, dom_scan) run ~7k tokens each and the
-# model only ever acts on the newest one -- but every one appended to
-# `messages` is re-sent on every later turn, so cumulative input grows
-# quadratically with turns. Measured on the 60-turn Hof van Oslo transcript
-# (20260701_144029): context grew 7.7k -> 188k tokens and the run consumed
-# 6.12M cumulative prompt tokens, ~all of it re-sent stale page dumps. So:
-# each turn, every large tool result except the newest PRUNE_KEEP_RECENT is
-# replaced in-place with a short stub. Each prune invalidates DeepSeek's
-# prefix cache from the stubbed message onward, but the stub lands near the
-# tail (the 3rd-newest dump), so the one-off miss re-read is far smaller than
-# carrying ~7k extra tokens on every remaining turn.
-PRUNE_MIN_CHARS = settings().apply_prune_min_chars
-PRUNE_KEEP_RECENT = settings().apply_prune_keep_recent
-STALE_DUMP_STUB = (
-    "[stale page dump removed to save context. The page may have changed "
-    "since; rely on the most recent snapshot/scan, or take a fresh one if "
-    "you need the current state.]"
-)
-
-# Cap on any single tool result fed back to the model. Long pages blow past
-# this, and a silent cut makes the model conclude something is absent when it
-# was merely below the cut — so truncation is always marked as such.
-TOOL_RESULT_MAX_CHARS = 20000
-
-
-def _clamp_tool_result(text: str) -> str:
-    if len(text) <= TOOL_RESULT_MAX_CHARS:
-        return text
-    return text[:TOOL_RESULT_MAX_CHARS] + (
-        f"\n[tool output truncated at {TOOL_RESULT_MAX_CHARS} chars -- the "
-        "page continues beyond this point. Do NOT conclude an element is "
-        "absent because it isn't shown above; scroll to it or target it "
-        "directly instead.]"
-    )
-
-
-def _prune_stale_page_dumps(messages: list[dict]) -> int:
-    """Replace all but the newest PRUNE_KEEP_RECENT large tool results with
-    STALE_DUMP_STUB (in place, tool_call_id preserved). Returns how many
-    messages were stubbed this call. Already-stubbed messages fall under the
-    size threshold, so repeat calls are no-ops for them."""
-    big_idx = [
-        i for i, m in enumerate(messages)
-        if m.get("role") == "tool"
-        and len(m.get("content") or "") >= PRUNE_MIN_CHARS
-    ]
-    for i in big_idx[:-PRUNE_KEEP_RECENT]:
-        messages[i]["content"] = STALE_DUMP_STUB
-    return len(big_idx[:-PRUNE_KEEP_RECENT])
-
-# Outcomes the model may declare via a final "OUTCOME: <x>" line.
-VALID_OUTCOMES = {
-    "submitted", "already_applied", "not_available", "not_eligible",
-    "login_required", "blocked", "payment_required",
-}
-
-# HARD MONEY GUARD. The agent must never spend real money. On 07-07-2026 a run
-# navigated all the way to a live Mollie €25 "membership" checkout on
-# your-house.nl and spent a whole turn *deliberating whether to pay* before
-# declining — one tool call from entering payment details. Prompt text is not
-# a spending boundary, so this is enforced in code: the moment the browser's
-# current tab lands on a known payment processor / checkout, the run aborts
-# with payment_required BEFORE the model can act on that page. Substring match
-# on the host (adyen/stripe expose checkout on subdomains).
-_PAYMENT_HOST_MARKERS = (
-    "mollie.com", "buckaroo.nl", "buckaroo.eu", "adyen.com", "stripe.com",
-    "checkout.stripe", "paypal.com", "pay.nl", "ideal.nl", "targetpay",
-    "sisow", "multisafepay", "worldline", "ingenico",
-)
-
-
-def _is_payment_url(url: str) -> bool:
-    host = (re.sub(r"^https?://", "", url or "").split("/", 1)[0]).lower()
-    return any(m in host for m in _PAYMENT_HOST_MARKERS)
-
-# One-shot extra turn budget granted at max_turns when the run is
-# demonstrably mid-form (recent fill/upload/select activity): killing a run
-# that is one dropdown away from submitting consumes the listing forever
-# under the one-attempt rule. Verified twice in production (03/05-07-2026):
-# a run died at turn 60 while dismissing a cookie overlay blocking the LAST
-# form field, another died at turn 60 right after finally locating the real
-# listing URL. Wall-clock APPLY_TIMEOUT_SECONDS still bounds the whole run.
-GRACE_TURNS = settings().apply_grace_turns
-_FORM_TOOLS = {
-    "browser_fill_form", "browser_type", "browser_file_upload",
-    "browser_select_option", "fill_by_label", "select_option_by_label",
-}
-
 # Deterministic cookie-banner dismissal after every navigation (free — no LLM
 # turn). Cookie/consent overlays intercept clicks and eat turns: one observed
 # run burned its final turns clicking a consent modal away field by field.
 AUTO_COOKIE = settings().apply_auto_cookie
-
-# rc for "the LLM API refused for lack of credit": the agent never really ran,
-# so callers must NOT consume the listing (one-attempt rule) — the run said
-# nothing about the listing, exactly like a browser-lock timeout.
-NO_CREDIT_RC = 126
-
-def _recent_form_activity(sig_history: list[tuple], window: int = 8) -> bool:
-    """True when any of the last `window` turns' tool calls touched a form —
-    the signal that the run is mid-application rather than lost/looping."""
-    for sig in sig_history[-window:]:
-        for name, _ in sig:
-            if name in _FORM_TOOLS:
-                return True
-    return False
-
-
-@dataclass
-class AgentResult:
-    rc: int            # 0 ok, 1 incomplete/loop, 2 setup error, 124 timeout,
-    #                    125 yielded to a priority (mail-triggered) apply
-    outcome: str       # one of VALID_OUTCOMES, or incomplete/timeout/error/unknown
-    summary: str       # the model's final one-paragraph status
-    transcript_path: str = ""
-    resolved_url: str = ""  # last distinct external URL the browser actually
-    # reached, when different from the input source_url -- e.g. an
-    # aggregator listing's real destination after in-page redirect dialogs.
-    # Callers persist this as an extra dedup key (see
-    # poller.dedup.known_processed_urls) so a listing reachable via two
-    # different entry points isn't double-submitted.
-
-    @property
-    def applied(self) -> bool:
-        return self.outcome == "submitted"
-
-    @property
-    def terminal(self) -> bool:
-        """True when retrying would not help (don't re-attempt this listing)."""
-        return self.outcome in VALID_OUTCOMES
-
-
-_OUTCOME_RE = re.compile(r"OUTCOME:\s*([a-z_]+)", re.IGNORECASE)
-
-
-def _extract_outcome(text: str) -> str | None:
-    """Return the declared outcome if `text` contains the mandatory final
-    'OUTCOME: <x>' line from the apply prompt, else None."""
-    m = _OUTCOME_RE.search(text or "")
-    if m and m.group(1).lower() in VALID_OUTCOMES:
-        return m.group(1).lower()
-    return None
-
-
-def _parse_outcome(final_text: str, rc: int) -> str:
-    outcome = _extract_outcome(final_text)
-    if outcome:
-        return outcome
-    if rc == NO_CREDIT_RC:
-        return "no_credit"
-    if rc == 125:
-        return "yielded"
-    if rc == 124:
-        return "timeout"
-    if rc == 2:
-        return "error"
-    if rc == 1:
-        return "incomplete"
-    return "unknown"
-
-
-def _mcp_params(cdp_url: str) -> StdioServerParameters:
-    return StdioServerParameters(
-        command="npx",
-        args=[
-            "-y", "@playwright/mcp@latest",
-            "--cdp-endpoint", cdp_url,
-            "--allow-unrestricted-file-access",
-        ],
-    )
-
-
-def _to_openai_tools(mcp_tools) -> list[dict]:
-    out = []
-    for t in mcp_tools:
-        if t.name in BLOCKED_TOOLS:
-            continue
-        out.append({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": (t.description or "")[:1024],
-                "parameters": t.inputSchema or {"type": "object", "properties": {}},
-            },
-        })
-    return out
-
-
-def _result_text(result) -> str:
-    """Flatten an MCP CallToolResult into text for the model."""
-    parts = []
-    for block in getattr(result, "content", []) or []:
-        text = getattr(block, "text", None)
-        if text is not None:
-            parts.append(text)
-        else:
-            parts.append(str(block))
-    return "\n".join(parts) if parts else "(no output)"
-
-
-_CURRENT_TAB_RE = re.compile(r"^- \d+: \(current\).*\((https?://[^)]+)\)\s*$", re.MULTILINE)
-
-
-async def _current_tab_url(session: ClientSession) -> str | None:
-    """Ask the MCP itself which tab is current (browser_tabs marks it with
-    "(current)") so dom_scan/click_by_text -- which connect over CDP on a
-    separate Playwright client and can't see the MCP's own tab pointer --
-    look at the same tab the model has been looking at, not just the
-    last-created one. See browser_dom_tools.current_page for why that
-    fallback is unreliable here."""
-    try:
-        result = await session.call_tool("browser_tabs", {"action": "list"})
-    except Exception:
-        return None
-    m = _CURRENT_TAB_RE.search(_result_text(result))
-    return m.group(1) if m else None
-
-
-def _trailing_cycle_repeats(history: list[tuple], period: int) -> int:
-    """How many consecutive times the last `period` actions repeat the
-    `period` actions before them. 0 if the tail isn't such a cycle.
-
-    period=1 catches exact repeats (e.g. ArrowDown x30, the original case).
-    period=2/3 catches short oscillations that never repeat the *same*
-    single action back-to-back but still make no progress — e.g. click a
-    button / Escape a dialog it opened / click the same button again / Escape
-    again, forever. This looks "different" turn-to-turn (different sig each
-    time) so the period=1 check alone never fires, but the 2-action pattern
-    itself is repeating.
-    """
-    reps = 0
-    while True:
-        start = len(history) - period * (reps + 2)
-        if start < 0:
-            break
-        if history[start:start + period] == history[start + period:start + period * 2]:
-            reps += 1
-        else:
-            break
-    return reps
-
-
-def _should_nudge_snapshot_overuse(snapshot_calls: int, turn: int) -> bool:
-    """True once browser_snapshot has dominated the turns so far despite the
-    prompt's own 'don't re-snapshot after every click' guidance -- verified in
-    production to not be reliably followed on its own (Hof van Oslo,
-    01-07-2026: ~29 of 60 turns were snapshots, each following a *different*
-    click, so the exact/short-cycle repeat guard never fires -- the repeated
-    element is the call TYPE, not its arguments). One-shot course-correction,
-    not a hard cap.
-    """
-    return turn >= 10 and snapshot_calls >= max(6, turn // 2)
-
 
 def _record_trajectory(run_id: str, event: str, payload: dict | None = None) -> None:
     if run_id:
@@ -929,81 +694,6 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                 "budget": budget,
             })
             return 1, "Hit the turn budget before reaching a conclusion."
-
-
-# How long after the wall-clock timeout the teardown may take before the
-# watchdog assumes the MCP subprocess is wedged and kills it. asyncio.wait_for
-# only CANCELS the task; the cancellation still has to unwind stdio_client's
-# __aexit__, which waits on the npx/node MCP process -- if that process
-# ignores its closed stdin, asyncio.run() blocks forever with the browser
-# flock still held. That is the one failure mode the timeout cannot cover
-# (03-07-2026: the lock stayed held for 9+ hours, starving eight consecutive
-# mail-triggered applies).
-TEARDOWN_GRACE_SECONDS = settings().apply_teardown_grace_seconds
-
-_CHILD_MARKERS = (b"playwright", b"mcp", b"node", b"npx")
-
-
-def _descendant_pids(root_pid: int) -> list[int]:
-    """All live descendant pids of root_pid, via /proc (no psutil dependency)."""
-    children: dict[int, list[int]] = {}
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            stat = (Path("/proc") / entry / "stat").read_text()
-            ppid = int(stat.rsplit(")", 1)[1].split()[1])
-        except (OSError, IndexError, ValueError):
-            continue
-        children.setdefault(ppid, []).append(int(entry))
-    out: list[int] = []
-    queue = [root_pid]
-    while queue:
-        for child in children.get(queue.pop(), []):
-            out.append(child)
-            queue.append(child)
-    return out
-
-
-def _kill_wedged_children(root_pid: int) -> list[int]:
-    """SIGKILL descendant processes that look like the MCP/Playwright stack
-    (node/npx). Killing them closes the stdio pipes a hung teardown is
-    blocked on, letting asyncio.run() finally return and release the browser
-    flock."""
-    killed: list[int] = []
-    for pid in _descendant_pids(root_pid):
-        try:
-            cmdline = (Path("/proc") / str(pid) / "cmdline").read_bytes().lower()
-        except OSError:
-            continue
-        if any(m in cmdline for m in _CHILD_MARKERS):
-            try:
-                os.kill(pid, signal.SIGKILL)
-                killed.append(pid)
-            except OSError:
-                pass
-    return killed
-
-
-class Logger:
-    """Tee log lines to stdout (live) and a file."""
-    def __init__(self, path: Path):
-        self.path = path
-        # Long-lived handle owned by this object; released in close().
-        self.fh = open(path, "w", encoding="utf-8")  # noqa: SIM115
-
-    def line(self, s: str) -> None:
-        stamp = datetime.now().strftime("%H:%M:%S")
-        out = f"{stamp} {s}"
-        print(out, flush=True)
-        self.fh.write(out + "\n")
-        self.fh.flush()
-
-    def close(self) -> None:
-        try:
-            self.fh.close()
-        except Exception:
-            pass
 
 
 def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: Path,

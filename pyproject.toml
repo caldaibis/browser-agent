@@ -39,9 +39,10 @@ source = ["src"]
 
 [tool.coverage.report]
 # Coverage ratchet: `just check` fails below this floor. Raise it when real
-# coverage rises (57% on 08-07-2026); never lower it. Machine-authored patches
-# (self-improvement agent) must not erode the tested fraction of the codebase.
-fail_under = 55
+# coverage rises (60% on 10-07-2026; floor keeps ~2pt margin for environment
+# variance); never lower it. Machine-authored patches (self-improvement
+# agent) must not erode the tested fraction of the codebase.
+fail_under = 58
 
 [tool.ruff.lint]
 # Bug-catching rule sets only, not style: Pyflakes (unused/undefined names,

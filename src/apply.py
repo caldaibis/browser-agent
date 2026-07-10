@@ -175,7 +175,7 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL,
     result.transcript_path = str(transcript)
     # Distill durable site knowledge out of this run for the next one on the
     # same domain(s). Fail-open and outside the browser lock — see the module.
-    site_playbooks.update_after_run(listing.to_json(), result)
+    site_playbooks.update_after_run(listing, result)
     return result
 
 

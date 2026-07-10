@@ -142,21 +142,29 @@ agent context while keeping the crown jewels durable.
 ## Follow-ups queued for later sessions
 
 - **Flip store reads to SQLite-only + drop dual-writes** after a soak
-  release: `orchestrator._processed_keys` / `dedup._processed_urls_canonical`
-  drop the JSONL union; `incident_store._read` prefers the store; then retire
+  release (store first deployed 10-07-2026 — give it days of real traffic):
+  `orchestrator._processed_keys` / `dedup._processed_urls_canonical` drop
+  the JSONL union; `incident_store._read` prefers the store; then retire
   the JSONL appends.
-- **Add the `VPS_HOST_KEY` GitHub secret** (output of `ssh-keyscan <host>`)
-  to activate deploy host-key pinning; until then deploy warns and keyscans.
+- ~~Add the `VPS_HOST_KEY` GitHub secret~~ — done 10-07-2026 (scanned key
+  verified against the locally-trusted known_hosts entry before pinning).
 - **R7c rename** (`src/` → `stekkies/`) per the recipe above, ideally with a
   VPS re-provision.
-- **browser_agent loop package-split** (see R6 note) together with a
-  test_browser_agent_loop.py refactor away from module-global patching.
-- **Push `Listing` deeper**: site_playbooks / self-improvement contexts /
-  incident fingerprints still take `listing.to_json()` dicts at the boundary.
-- Raise the coverage ratchet as coverage rises (60% at session end vs 55 floor).
+- ~~browser_agent loop package-split~~ — done 10-07-2026:
+  `src/browser_agent/{loop,guards,result,transport}.py` + facade
+  `__init__.py`; tests patch `src.browser_agent.loop` for transport seams.
+- **Push `Listing` deeper** — site_playbooks done 10-07-2026 (typed
+  `update_after_run`). Deliberately NOT pushed into self-improvement
+  contexts / `incident_store.fingerprint_failure`: those boundaries carry
+  PARTIAL listings (e.g. `improve_exception` with only a stekkies_url), and
+  `Listing` requires source_url — a loose dict is the honest type there.
+- ~~Raise the coverage ratchet~~ — floor 55 → 58 on 10-07-2026 (60% actual).
 
 ## Session log
 
 - 08-07-2026: roadmap created; R1–R6, R7a, R7b, R7d implemented and verified
   (`just check` green, 260 tests, coverage 60%); R7c evaluated and deferred
   with a migration recipe. All work left uncommitted for human review.
+- 10-07-2026: everything committed/pushed/deployed (store migrated 184
+  processed listings + 30 incidents on the VPS). Follow-ups: VPS_HOST_KEY
+  pinned, browser_agent package split landed, playbooks typed, ratchet → 58.
