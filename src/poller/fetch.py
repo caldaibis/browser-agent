@@ -71,9 +71,7 @@ def _looks_challenged(body: str) -> bool:
     low = body[:4000].lower()
     if any(m in low for m in _STRONG_MARKERS):
         return True
-    if len(body) < _SMALL_BODY and any(m in low for m in _WEAK_MARKERS):
-        return True
-    return False
+    return len(body) < _SMALL_BODY and any(m in low for m in _WEAK_MARKERS)
 
 
 async def fetch(client: httpx.AsyncClient, site: SiteConfig) -> FetchResult:

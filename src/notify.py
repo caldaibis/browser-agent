@@ -7,16 +7,19 @@ your cached token predates it.
 Disable with NOTIFY_ENABLED=0.
 """
 import json
-import os
 import time
 from email.message import EmailMessage
 from base64 import urlsafe_b64encode
 
 from .config import PROJECT_ROOT
 from .gmail_watch import get_service
+from .settings import settings
+from .eventlog import get_logger
+
+_LOG = get_logger("notify")
 
 _PLACEHOLDER_TO = "you@example.com"
-NOTIFY_TO = os.environ.get("NOTIFY_TO", _PLACEHOLDER_TO)
+NOTIFY_TO = settings().notify_to
 # Enabled only when a real recipient is configured. Without this guard, any
 # process that runs without NOTIFY_TO in its env falls back to the placeholder
 # and actually emails it -- e.g. the Claude Agent SDK spawns the `claude` CLI
@@ -24,7 +27,7 @@ NOTIFY_TO = os.environ.get("NOTIFY_TO", _PLACEHOLDER_TO)
 # send to you@example.com and bounce (observed 08-07-2026). Treat the
 # placeholder as "notifications not configured": push still fires, email does not.
 NOTIFY_ENABLED = (
-    os.environ.get("NOTIFY_ENABLED", "1") != "0"
+    settings().notify_enabled_flag
     and bool(NOTIFY_TO)
     and NOTIFY_TO != _PLACEHOLDER_TO
 )
@@ -86,7 +89,7 @@ def send_alert(subject: str, body: str) -> None:
         from .push_notify import send_push
         send_push(title=subject, body=body[:300], tag="alert")
     except Exception as e:  # pragma: no cover - alerts are best-effort
-        print(f"[notify] alert push failed: {e}")
+        _LOG.info(f"alert push failed: {e}")
     if not NOTIFY_ENABLED:
         return
     try:
@@ -97,9 +100,9 @@ def send_alert(subject: str, body: str) -> None:
         msg.set_content(body)
         raw = urlsafe_b64encode(msg.as_bytes()).decode()
         get_service().users().messages().send(userId="me", body={"raw": raw}).execute()
-        print(f"[notify] alert sent: {subject}")
+        _LOG.info(f"alert sent: {subject}")
     except Exception as e:  # pragma: no cover
-        print(f"[notify] alert send failed: {e}")
+        _LOG.info(f"alert send failed: {e}")
 
 
 def send_alert_dedup(key: str, subject: str, body: str,
@@ -125,7 +128,7 @@ def send_alert_dedup(key: str, subject: str, body: str,
         ALERT_DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
         ALERT_DEDUP_FILE.write_text(json.dumps(state), encoding="utf-8")
     except Exception as e:  # pragma: no cover - bookkeeping is best-effort
-        print(f"[notify] alert dedup state write failed: {e}")
+        _LOG.info(f"alert dedup state write failed: {e}")
     send_alert(subject, body)
     return True
 
@@ -153,4 +156,4 @@ def send_status_email(rec: dict) -> None:
         raw = urlsafe_b64encode(msg.as_bytes()).decode()
         get_service().users().messages().send(userId="me", body={"raw": raw}).execute()
     except Exception as e:  # pragma: no cover - notifications are best-effort
-        print(f"[notify] failed to send status email: {e}")
+        _LOG.info(f"failed to send status email: {e}")

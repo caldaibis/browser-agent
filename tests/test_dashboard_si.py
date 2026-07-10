@@ -104,7 +104,7 @@ class TestPendingPatches(unittest.TestCase):
     def test_patch_content_redacts(self):
         (self.dir / "20260708_x.patch").write_text(
             "password: hunter2secret\n", encoding="utf-8")
-        with patch("src.dashboard.data._secret_values", return_value=("hunter2secret",)):
+        with patch("src.redaction._secret_values", return_value=("hunter2secret",)):
             out = si.patch_content("20260708_x.patch")
         self.assertIsNotNone(out)
         self.assertNotIn("hunter2secret", out)

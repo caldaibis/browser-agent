@@ -25,10 +25,15 @@ sync:
 # patch that pushes straight to main must not pass on lint alone.
 check:
     uv run ruff check .
+    uv run ty check src
     uv run python -m compileall -q src
-    uv run python -m unittest discover tests
+    uv run pytest -q --cov --cov-report=term:skip-covered
     uv run python -m src.self_improvement_harness apply-eval
     uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; import src.poller.watcher, src.poller.discover, src.poller.registry, src.poller.sniff; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
+
+# print every runtime setting as resolved from the current environment
+settings:
+    uv run python -m src.settings
 
 # preflight: verify everything needed to run the agent locally is in place.
 doctor:

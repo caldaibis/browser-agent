@@ -9,21 +9,17 @@ reading of the address/description and live in ``judge.py``.
 """
 from __future__ import annotations
 
-import os
 import re
 
 from ..rent_policy import MAX_RENT
+from ..settings import settings
 from .models import RawListing
 
-MIN_RENT = float(os.environ.get("POLL_MIN_PRICE", "800"))
-MIN_SURFACE = float(os.environ.get("POLL_MIN_SURFACE", "30"))
-REQUIRE_KNOWN_PRICE = os.environ.get("POLL_REQUIRE_KNOWN_PRICE", "1") != "0"
+MIN_RENT = settings().poll_min_price
+MIN_SURFACE = settings().poll_min_surface
+REQUIRE_KNOWN_PRICE = settings().poll_require_known_price
 # Cities we apply in. Matched case-insensitively as a substring of city/address.
-CITIES = tuple(
-    c.strip().lower()
-    for c in os.environ.get("POLL_CITIES", "utrecht").split(",")
-    if c.strip()
-)
+CITIES = settings().poll_cities
 
 # Obvious room/share markers in the raw type/title. The nuanced judgment (a flat
 # described as shared without the word "kamer") is left to the LLM.
@@ -57,7 +53,7 @@ _SHORT_STAY_RES = (
     re.compile(r"\b(?:maximum|max\.?)\s*(?:of\s*)?(\d{1,2})\s*months?\b"),
 )
 # A max stay below this is pointless for someone seeking a long-term home.
-MIN_STAY_MONTHS = int(os.environ.get("POLL_MIN_STAY_MONTHS", "6"))
+MIN_STAY_MONTHS = settings().poll_min_stay_months
 
 _SENTENCE_SPLIT = re.compile(r"[.!?\n|]+")
 

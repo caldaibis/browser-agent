@@ -81,7 +81,7 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
             seen = dedup.SeenStore()
             listing = RawListing(**_LISTING)
             self.assertTrue(seen.reserve(listing.source_url))
-            queue: "asyncio.Queue[RawListing]" = asyncio.Queue()
+            queue: asyncio.Queue[RawListing] = asyncio.Queue()
             await queue.put(listing)
             await _run_worker_until_drained(seen, queue)
 
@@ -109,7 +109,7 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
             seen = dedup.SeenStore()
             listing = RawListing(**_LISTING)
             self.assertTrue(seen.reserve(listing.source_url))
-            queue: "asyncio.Queue[RawListing]" = asyncio.Queue()
+            queue: asyncio.Queue[RawListing] = asyncio.Queue()
             await queue.put(listing)
             await _run_worker_until_drained(seen, queue)
 
@@ -129,7 +129,7 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
             seen = dedup.SeenStore()
             listing = RawListing(**_LISTING)
             self.assertTrue(seen.reserve(listing.source_url))
-            queue: "asyncio.Queue[RawListing]" = asyncio.Queue()
+            queue: asyncio.Queue[RawListing] = asyncio.Queue()
             await queue.put(listing)
             await _run_worker_until_drained(seen, queue)
 

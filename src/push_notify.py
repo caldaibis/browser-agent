@@ -23,22 +23,21 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-from datetime import datetime
 
 from .config import PROJECT_ROOT
+from .settings import settings
+from .eventlog import get_logger
+
+_LOG = get_logger("push")
+from .eventlog import utc_now_iso
 
 VAPID_FILE = PROJECT_ROOT / "state" / "vapid.json"
 SUBSCRIPTIONS_FILE = PROJECT_ROOT / "state" / "push_subscriptions.jsonl"
 
-WEB_PUSH_ENABLED = os.environ.get("WEB_PUSH_ENABLED", "1") != "0"
-WEB_PUSH_OUTCOMES = {
-    s.strip()
-    for s in os.environ.get("WEB_PUSH_OUTCOMES", "submitted").split(",")
-    if s.strip()
-}
+WEB_PUSH_ENABLED = settings().web_push_enabled
+WEB_PUSH_OUTCOMES = set(settings().web_push_outcomes)
 # VAPID requires a contact claim; reuse the notification mailbox.
-_CONTACT = os.environ.get("NOTIFY_TO", "you@example.com")
+_CONTACT = settings().notify_to
 
 
 def _b64url(raw: bytes) -> str:
@@ -103,7 +102,7 @@ def add_subscription(subscription: dict, user_agent: str = "") -> None:
     if subscription in list_subscriptions():
         return
     SUBSCRIPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+    rec = {"ts": utc_now_iso(),
            "subscription": subscription, "user_agent": user_agent[:200]}
     with SUBSCRIPTIONS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -113,7 +112,7 @@ def remove_subscription(endpoint: str) -> None:
     if not endpoint:
         return
     SUBSCRIPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+    rec = {"ts": utc_now_iso(),
            "subscription": {"endpoint": endpoint}, "removed": True}
     with SUBSCRIPTIONS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -135,9 +134,9 @@ def _send_one(subscription: dict, payload: dict, keys: dict) -> None:
         status = getattr(getattr(e, "response", None), "status_code", None)
         if status in (404, 410):
             remove_subscription(subscription.get("endpoint", ""))
-            print(f"[push] pruned expired subscription (HTTP {status})")
+            _LOG.info(f"pruned expired subscription (HTTP {status})")
         else:
-            print(f"[push] send failed: {e}")
+            _LOG.info(f"send failed: {e}")
 
 
 def send_push(title: str, body: str, url: str = "/", tag: str = "stekkies") -> int:
@@ -155,7 +154,7 @@ def send_push(title: str, body: str, url: str = "/", tag: str = "stekkies") -> i
             _send_one(sub, payload, keys)
         return len(subs)
     except Exception as e:  # noqa: BLE001 - notifications are best-effort
-        print(f"[push] failed: {type(e).__name__}: {e}")
+        _LOG.info(f"failed: {type(e).__name__}: {e}")
         return 0
 
 

@@ -26,6 +26,7 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
           REMOTE: /home/deploy/browser-agent
         run: |
           set -euo pipefail
@@ -42,34 +43,78 @@ jobs:
             *@*) ;;
             *) SSH_TARGET="root@$SSH_TARGET" ;;
           esac
-          if ! ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts; then
-            echo "::error::ssh-keyscan could not reach $SSH_HOST — usually a transient network blip between the runner and the VPS; re-run this job"
-            exit 1
+          # Host-key pinning: set the VPS_HOST_KEY secret to the output of
+          #   ssh-keyscan <vps-host>
+          # so the runner verifies it is talking to YOUR box. Without the
+          # secret we fall back to live keyscan — trust-on-first-use on every
+          # deploy, i.e. a MITM between runner and VPS would go unnoticed.
+          if [ -n "${VPS_HOST_KEY:-}" ]; then
+            printf '%s\n' "$VPS_HOST_KEY" >> ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_HOST_KEY secret not set — falling back to ssh-keyscan (unpinned host key). Set it to the output of: ssh-keyscan $SSH_HOST"
+            if ! ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts; then
+              echo "::error::ssh-keyscan could not reach $SSH_HOST — usually a transient network blip between the runner and the VPS; re-run this job"
+              exit 1
+            fi
           fi
           ssh -i ~/.ssh/deploy_key "$SSH_TARGET" "REMOTE='$REMOTE' bash -s" <<'REMOTE_DEPLOY'
             set -euo pipefail
             echo "deploying in $REMOTE on $(hostname)"
             echo "::group::git fast-forward"
             sudo -H -u deploy git -C "$REMOTE" status --short --branch
+            # Remember where we came from so a failed smoke check can roll
+            # back. `git reset --hard` only touches tracked files, so the
+            # gitignored documents/ and state/ are safe (see AGENTS.md).
+            PREV_SHA=$(sudo -H -u deploy git -C "$REMOTE" rev-parse HEAD)
+            echo "pre-deploy SHA: $PREV_SHA"
             sudo -H -u deploy git -C "$REMOTE" fetch origin main
             sudo -H -u deploy git -C "$REMOTE" merge --ff-only origin/main
             sudo -H -u deploy git -C "$REMOTE" log --oneline -1
             echo "::endgroup::"
+
+            restart_services() {
+              systemctl restart orchestrator dashboard
+              if systemctl is-active poller >/dev/null 2>&1; then
+                systemctl restart poller
+              fi
+            }
+
+            smoke_check() {
+              # Services must be active AND the dashboard must actually
+              # answer HTTP on its local port (a unit can be "active" while
+              # the app crash-loops behind uvicorn's supervisor).
+              sleep 5
+              systemctl is-active orchestrator dashboard || return 1
+              if systemctl is-active poller >/dev/null 2>&1; then
+                systemctl is-active poller || return 1
+              fi
+              for _ in 1 2 3 4 5 6; do
+                if curl -sf --max-time 20 -o /dev/null http://127.0.0.1:8000/; then
+                  return 0
+                fi
+                sleep 5
+              done
+              return 1
+            }
 
             echo "::group::dependencies and self-improvement runtime"
             sudo -H -u deploy bash -lc "cd '$REMOTE' && uv sync"
             bash "$REMOTE/deploy/ensure-self-improvement.sh"
             echo "::endgroup::"
 
-            echo "::group::restart services"
-            systemctl restart orchestrator dashboard
-            if systemctl is-active poller >/dev/null 2>&1; then
-              systemctl restart poller
+            echo "::group::restart + smoke check"
+            restart_services
+            if smoke_check; then
+              echo "::endgroup::"
+              echo deployed
+            else
+              echo "::error::smoke check failed — rolling back to $PREV_SHA"
+              sudo -H -u deploy git -C "$REMOTE" reset --hard "$PREV_SHA"
+              sudo -H -u deploy bash -lc "cd '$REMOTE' && uv sync"
+              restart_services
+              systemctl is-active orchestrator dashboard || true
+              echo "::endgroup::"
+              echo "rolled back to $PREV_SHA"
+              exit 1
             fi
-            systemctl is-active orchestrator dashboard
-            if systemctl is-active poller >/dev/null 2>&1; then
-              systemctl is-active poller
-            fi
-            echo "::endgroup::"
-            echo deployed
           REMOTE_DEPLOY

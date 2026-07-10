@@ -4,26 +4,27 @@ Run:  python -m src.orchestrator            # live watch loop
       python -m src.orchestrator --once URL # process one Stekkies URL and exit
 """
 import json
-import os
 import sys
 import time
 import traceback
 from dataclasses import asdict
-from datetime import datetime
 
+from . import eventlog, store
 from .apply_priority import priority_claim
 from .config import LOG_DIR, PROJECT_ROOT
+from .models import Listing, ProcessedRecord
 from .stekkies import extract_listing
 from .apply import apply
 from .gmail_watch import message_received_ts, mark_read, watch_events
 from .poller.dedup import active_claim_keys, canonical_url
 from .notify import send_alert_dedup, send_status_email
 from .self_improvement_agent import improve_after_apply, improve_exception
+from .settings import settings
 
 # How long to sleep before re-entering the Gmail watch loop after it dies.
 # Long enough not to hammer a dead token (the failure will not self-heal),
 # short enough to resume within minutes once the user fixes it.
-WATCH_RETRY_SECONDS = int(os.environ.get("WATCH_RETRY_SECONDS", "300"))
+WATCH_RETRY_SECONDS = settings().watch_retry_seconds
 
 
 def _alert_no_credit() -> None:
@@ -43,54 +44,50 @@ MAIL_SUMMARY_LOG = LOG_DIR / "mail_summary.jsonl"
 
 
 def _log(event: str, **kw) -> None:
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **kw}
-    with (LOG_DIR / "runs.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"[{rec['ts']}] {event}: " + " ".join(f"{k}={v}" for k, v in kw.items()))
+    eventlog.log_event(LOG_DIR / "runs.jsonl", event, echo="orchestrator", **kw)
 
 
 def _activity(message: str) -> None:
-    ts = datetime.now().isoformat(timespec="seconds")
-    line = f"[{ts}] {message}"
-    with ACTIVITY_LOG.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
-    print(line)
+    eventlog.activity(message, echo="orchestrator")
 
 
 def _mail_summary(**kw) -> dict:
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), **kw}
-    with MAIL_SUMMARY_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return rec
+    return eventlog.record(MAIL_SUMMARY_LOG, **kw)
 
 
 def _processed_keys() -> set[str]:
+    """Every raw + canonical key of every processed listing (stekkies/source/
+    resolved URLs — resolved_url is the ACTUAL external destination an
+    earlier run reached mid-flight; without it a later mail pointing straight
+    at the real site sails past this pre-flight check). Key derivation lives
+    in models.ProcessedRecord.keys(); membership in the SQLite store."""
     keys: set[str] = set()
-    if not PROCESSED_FILE.exists():
-        return keys
-    for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        # resolved_url is the ACTUAL external destination an earlier run
-        # reached mid-flight (e.g. eenhoornmanagement.nl behind a
-        # huurwoningen.nl entry page). Without it here, a later mail that
-        # points at the real site directly sails past this pre-flight check
-        # and burns a full agent run just to hit the mid-run duplicate guard.
-        for field in ("stekkies_url", "source_url", "resolved_url"):
-            value = rec.get(field)
-            if value:
-                keys.add(value)
-                keys.add(canonical_url(value))
+    # UNION of store + legacy JSONL while the store soaks: a record present
+    # in only one of them (rollback build, failed store write) must still
+    # dedup. Sets make the overlap free; drop the JSONL scan with dual-write.
+    try:
+        for value in store.processed_keys():
+            keys.add(value)
+            keys.add(canonical_url(value))
+    except Exception as e:
+        _log("store_read_failed", error=f"{type(e).__name__}: {e}")
+    if PROCESSED_FILE.exists():
+        for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                keys |= ProcessedRecord.from_json(json.loads(line)).keys()
+            except (json.JSONDecodeError, ValueError):
+                continue
     return keys
 
 
 def _remember_processed(**kw) -> None:
-    PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), **kw}
-    with PROCESSED_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # Dual-write during the store rollout: SQLite is the queryable copy, the
+    # JSONL append keeps a rollback to a pre-store build lossless.
+    rec = eventlog.record(PROCESSED_FILE, **kw)
+    try:
+        store.record_processed(ProcessedRecord.from_json(rec))
+    except Exception as e:
+        _log("store_write_failed", error=f"{type(e).__name__}: {e}")
 
 
 # Outcomes not worth emailing about (pure bookkeeping, no real attempt).
@@ -126,14 +123,16 @@ def _prevented_message(url: str) -> str:
     )
 
 
-def process_source(listing: dict, msg_id: str | None = None,
+def process_source(listing: Listing | dict, msg_id: str | None = None,
                    trigger: str = "manual", msg_received_ts: str = "") -> dict:
     """Apply directly to an external source listing, used by Huurwoningen mail
     and manual/direct integrations that do not need Stekkies extraction."""
     t0 = time.time()
-    source_url = listing["source_url"]
-    source = listing.get("source_name") or listing.get("source") or "unknown source"
-    address = listing.get("address") or "unknown address"
+    if not isinstance(listing, Listing):
+        listing = Listing.from_json(listing)
+    source_url = listing.source_url
+    source = listing.source_name or "unknown source"
+    address = listing.address or "unknown address"
     _log("source_listing_received", msg_id=msg_id, trigger=trigger,
          source=source, source_url=source_url, address=address)
 
@@ -153,7 +152,8 @@ def process_source(listing: dict, msg_id: str | None = None,
 
     try:
         (LOG_DIR / "last_listing.json").write_text(
-            json.dumps(listing, indent=2, ensure_ascii=False), encoding="utf-8")
+            json.dumps(listing.to_json(), indent=2, ensure_ascii=False),
+            encoding="utf-8")
         # Priority claim: the poller defers/yields the shared browser to this
         # mail/manual apply for the whole run (see apply_priority.py).
         with priority_claim():
@@ -178,7 +178,7 @@ def process_source(listing: dict, msg_id: str | None = None,
                 message=result.summary,
             )
         improve_after_apply(
-            listing=listing,
+            listing=listing.to_json(),
             result=result,
             trigger=trigger,
             msg_id=msg_id,
@@ -213,7 +213,7 @@ def process_source(listing: dict, msg_id: str | None = None,
         _log("error", error=str(e))
         traceback.print_exc()
         improve_exception(
-            listing=listing,
+            listing=listing.to_json(),
             error=e,
             trigger=trigger,
             msg_id=msg_id,

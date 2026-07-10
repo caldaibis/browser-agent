@@ -39,8 +39,10 @@ class TestSelfImprovementWorktree(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_create_and_remove_worktree_round_trip(self):
-        with patch.object(self_improvement_agent, "PROJECT_ROOT", self.work), \
-             patch.object(self_improvement_agent, "WORKTREE_BASE", self.worktree_base):
+        from src.self_improvement import worktree
+
+        with patch.object(worktree, "PROJECT_ROOT", self.work), \
+             patch.object(worktree, "WORKTREE_BASE", self.worktree_base):
             path, branch = self_improvement_agent._create_worktree()
             try:
                 self.assertTrue(path.exists())
@@ -179,13 +181,16 @@ class TestSelfImprovementAgent(unittest.TestCase):
         self.assertIn("blocked", body)
 
     def test_legacy_recovery_env_alias(self):
-        with patch.dict("os.environ", {
-            "RECOVERY_DEPLOY_CMD": "echo legacy",
-        }, clear=False):
-            self.assertEqual(
-                self_improvement_agent._env("SELF_IMPROVEMENT_DEPLOY_CMD", "default"),
-                "echo legacy",
-            )
+        # RECOVERY_* aliases are honored by the settings loader now.
+        from src.settings import load_settings
+        s = load_settings({"RECOVERY_VERIFY_CMD": "echo legacy"})
+        self.assertEqual(s.self_improvement_verify_cmd, "echo legacy")
+        # The canonical name wins over the alias when both are set.
+        s = load_settings({
+            "SELF_IMPROVEMENT_VERIFY_CMD": "echo canonical",
+            "RECOVERY_VERIFY_CMD": "echo legacy",
+        })
+        self.assertEqual(s.self_improvement_verify_cmd, "echo canonical")
 
     def test_parse_marker_reads_diagnosis_json(self):
         msg = type("FakeResult", (), {

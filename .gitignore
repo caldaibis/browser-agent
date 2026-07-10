@@ -14,3 +14,6 @@ documents/*
 .env
 *.env
 passwords.csv
+
+# Test/coverage artifacts
+.coverage

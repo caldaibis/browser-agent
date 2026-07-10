@@ -25,16 +25,26 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from openai import AsyncOpenAI, APIStatusError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from . import browser_dom_tools, credentials
+from .agent_tools import (
+    BLOCKED_TOOLS,
+    CLICK_BY_TEXT_TOOL,
+    CREDENTIAL_TOOL,
+    DOM_SCAN_TOOL,
+    FILL_BY_LABEL_TOOL,
+    SELECT_OPTION_BY_LABEL_TOOL,
+)
 from .poller import dedup as poller_dedup
 from .self_improvement_harness import record_trajectory_event
+from .settings import settings
 
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_BASE_URL = settings().deepseek_base_url
 
 # Reasoning control. DeepSeek thinking mode can burn hidden reasoning
 # tokens before emitting content/tool_calls. Over a large page snapshot that can
@@ -43,9 +53,7 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 # science, so we DISABLE reasoning by default. Override via
 # APPLY_REASONING_EFFORT = off | low | medium | high | max (anything but
 # "off" re-enables reasoning at that effort).
-REASONING_EFFORT = os.environ.get("APPLY_REASONING_EFFORT", "off").lower()
-if REASONING_EFFORT == "minimal":
-    REASONING_EFFORT = "low"
+REASONING_EFFORT = settings().apply_reasoning_effort
 THINKING = (
     {"type": "disabled"}
     if REASONING_EFFORT in ("off", "none", "false", "0")
@@ -54,154 +62,7 @@ THINKING = (
 
 # Completion cap per turn. With reasoning off the visible output (a tool call or a
 # short status) is small, so this is just generous headroom against truncation.
-MAX_TOKENS = int(os.environ.get("APPLY_MAX_TOKENS", "8000"))
-
-# Local (non-MCP) tool: look up a stored site login by domain/URL on demand, so
-# credentials never sit in the prompt and the agent can fetch whichever site it
-# actually lands on (a single application can span multiple hosts).
-CREDENTIAL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "lookup_credential",
-        "description": (
-            "Return the stored username/password for a rental site. Pass the "
-            "site's domain or current URL (e.g. 'ikwilhuren.nu'). Use this for "
-            "every email/password login instead of guessing; returns an error "
-            "string if no credential is stored for that site. Some listing "
-            "sites redirect their login to a SHARED third-party auth provider "
-            "(e.g. eye-move.nl / mijnklantdossier.nl) that also serves other, "
-            "unrelated rental sites with DIFFERENT accounts — credentials are "
-            "stored per originating listing site, not per shared provider. If "
-            "the current login page's own domain has no stored credential, "
-            "retry this tool with THIS listing's original domain (from the "
-            "'Apply at this URL' line at the top of your task) instead."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "site": {
-                    "type": "string",
-                    "description": "Domain or full URL of the login page, e.g. 'ikwilhuren.nu'.",
-                },
-            },
-            "required": ["site"],
-        },
-    },
-}
-
-# Local (non-MCP) fallback tools for when the Playwright MCP's accessibility-
-# tree snapshot doesn't show something known to be on the page -- seen
-# repeatedly on real listings: an HTML dialog/overlay built without proper
-# ARIA roles never gets a browser_snapshot ref, so browser_click can't target
-# it and browser_handle_dialog doesn't apply (that's for native JS dialogs,
-# not in-page HTML). These query the raw DOM / click by visible text instead
-# of the accessibility tree -- narrow, fixed operations, NOT arbitrary JS
-# (BLOCKED_TOOLS below still applies).
-DOM_SCAN_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "dom_scan",
-        "description": (
-            "FALLBACK ONLY. Raw-DOM page report (title/url/text + every "
-            "button, link, and form field found by direct DOM query) -- NOT "
-            "the accessibility tree browser_snapshot uses. Use this ONLY when "
-            "you know something is on the page (e.g. you just clicked a "
-            "button that should open a dialog/modal) but browser_snapshot "
-            "doesn't show it. Waits briefly first so a just-opened dialog has "
-            "time to render. Do NOT use this as your primary way to read the "
-            "page -- prefer browser_snapshot; this is slower and has no refs, "
-            "only visible text."
-        ),
-        "parameters": {"type": "object", "properties": {}},
-    },
-}
-CLICK_BY_TEXT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "click_by_text",
-        "description": (
-            "FALLBACK ONLY. Click the first element whose VISIBLE TEXT "
-            "matches (not a browser_snapshot ref). Use this ONLY when "
-            "dom_scan shows an element you need to click (e.g. inside a "
-            "dialog invisible to browser_snapshot) but it has no ref you can "
-            "pass to browser_click. Do NOT use this instead of browser_click "
-            "for anything a snapshot ref already covers."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Visible text of the element to click, e.g. 'Ja, ik ga akkoord'.",
-                },
-            },
-            "required": ["text"],
-        },
-    },
-}
-FILL_BY_LABEL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "fill_by_label",
-        "description": (
-            "FALLBACK ONLY. Type into the text/email/tel/textarea input "
-            "associated with the given <label> text, bypassing the "
-            "accessibility-tree ref system. Use this ONLY when dom_scan shows "
-            "a form field inside a dialog invisible to browser_snapshot -- "
-            "such a field has no ref, so browser_type/browser_fill_form "
-            "cannot reach it at all. Do NOT use this instead of "
-            "browser_type/browser_fill_form for anything a snapshot ref "
-            "already covers."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "Visible label text of the field, e.g. 'Voornaam'.",
-                },
-                "value": {
-                    "type": "string",
-                    "description": "Text to type into that field.",
-                },
-            },
-            "required": ["label", "value"],
-        },
-    },
-}
-SELECT_OPTION_BY_LABEL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "select_option_by_label",
-        "description": (
-            "FALLBACK ONLY. Operate a custom (non-<select>) dropdown inside a "
-            "dialog invisible to browser_snapshot: opens the dropdown "
-            "associated with the given label, then clicks the option matching "
-            "the given visible text. Use this ONLY for a dropdown dom_scan "
-            "shows with no ref -- e.g. one where the toggle control has no "
-            "text of its own (an icon only), so click_by_text can't target it "
-            "either. Do NOT use this for a normal <select> or any dropdown a "
-            "snapshot ref already covers -- use browser_select_option there."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": "Visible label text of the dropdown field, e.g. 'Soort inkomen'.",
-                },
-                "option": {
-                    "type": "string",
-                    "description": "Visible text of the option to select, e.g. 'Loondienst'.",
-                },
-            },
-            "required": ["label", "option"],
-        },
-    },
-}
-
-# Playwright MCP tools we never want the model to use (raw JS = token bleed).
-BLOCKED_TOOLS = {"browser_evaluate", "browser_run_code_unsafe"}
+MAX_TOKENS = settings().apply_max_tokens
 
 # Stale-page-dump pruning. Full-page tool results (browser_snapshot,
 # browser_navigate's embedded snapshot, dom_scan) run ~7k tokens each and the
@@ -215,8 +76,8 @@ BLOCKED_TOOLS = {"browser_evaluate", "browser_run_code_unsafe"}
 # prefix cache from the stubbed message onward, but the stub lands near the
 # tail (the 3rd-newest dump), so the one-off miss re-read is far smaller than
 # carrying ~7k extra tokens on every remaining turn.
-PRUNE_MIN_CHARS = int(os.environ.get("APPLY_PRUNE_MIN_CHARS", "2500"))
-PRUNE_KEEP_RECENT = max(1, int(os.environ.get("APPLY_PRUNE_KEEP_RECENT", "2")))
+PRUNE_MIN_CHARS = settings().apply_prune_min_chars
+PRUNE_KEEP_RECENT = settings().apply_prune_keep_recent
 STALE_DUMP_STUB = (
     "[stale page dump removed to save context. The page may have changed "
     "since; rely on the most recent snapshot/scan, or take a fresh one if "
@@ -286,7 +147,7 @@ def _is_payment_url(url: str) -> bool:
 # a run died at turn 60 while dismissing a cookie overlay blocking the LAST
 # form field, another died at turn 60 right after finally locating the real
 # listing URL. Wall-clock APPLY_TIMEOUT_SECONDS still bounds the whole run.
-GRACE_TURNS = int(os.environ.get("APPLY_GRACE_TURNS", "10"))
+GRACE_TURNS = settings().apply_grace_turns
 _FORM_TOOLS = {
     "browser_fill_form", "browser_type", "browser_file_upload",
     "browser_select_option", "fill_by_label", "select_option_by_label",
@@ -295,7 +156,7 @@ _FORM_TOOLS = {
 # Deterministic cookie-banner dismissal after every navigation (free — no LLM
 # turn). Cookie/consent overlays intercept clicks and eat turns: one observed
 # run burned its final turns clicking a consent modal away field by field.
-AUTO_COOKIE = os.environ.get("APPLY_AUTO_COOKIE", "1") != "0"
+AUTO_COOKIE = settings().apply_auto_cookie
 
 # rc for "the LLM API refused for lack of credit": the agent never really ran,
 # so callers must NOT consume the listing (one-attempt rule) — the run said
@@ -306,7 +167,7 @@ def _recent_form_activity(sig_history: list[tuple], window: int = 8) -> bool:
     """True when any of the last `window` turns' tool calls touched a form —
     the signal that the run is mid-application rather than lost/looping."""
     for sig in sig_history[-window:]:
-        for name, _args in sig:
+        for name, _ in sig:
             if name in _FORM_TOOLS:
                 return True
     return False
@@ -407,7 +268,7 @@ def _result_text(result) -> str:
 _CURRENT_TAB_RE = re.compile(r"^- \d+: \(current\).*\((https?://[^)]+)\)\s*$", re.MULTILINE)
 
 
-async def _current_tab_url(session: "ClientSession") -> str | None:
+async def _current_tab_url(session: ClientSession) -> str | None:
     """Ask the MCP itself which tab is current (browser_tabs marks it with
     "(current)") so dom_scan/click_by_text -- which connect over CDP on a
     separate Playwright client and can't see the MCP's own tab pointer --
@@ -463,7 +324,7 @@ def _record_trajectory(run_id: str, event: str, payload: dict | None = None) -> 
         record_trajectory_event(run_id, event, payload or {})
 
 
-async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logger",
+async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logger,
                 source_url: str = "", resolved: dict | None = None,
                 yield_check=None, trajectory_id: str = "") -> tuple[int, str]:
     """resolved, when given, is a plain dict this fills in as {"url": ...} with
@@ -477,7 +338,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
     one, see apply_priority.py) can take the shared browser within seconds
     instead of waiting out this whole run. A yielded attempt is NOT a verdict
     on the listing -- callers requeue it untouched."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_key = settings().deepseek_api_key
     if not api_key:
         log.line("[agent] ERROR: DEEPSEEK_API_KEY not set")
         return 2, "DEEPSEEK_API_KEY not set."
@@ -554,7 +415,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
                         "apply. This attempt did not finish and says nothing about "
                         "the listing itself; it must be re-run."
                     )
-                request = {
+                request: dict[str, Any] = {
                     "model": model,
                     "messages": messages,
                     "tools": tools,
@@ -1078,7 +939,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: "Logg
 # flock still held. That is the one failure mode the timeout cannot cover
 # (03-07-2026: the lock stayed held for 9+ hours, starving eight consecutive
 # mail-triggered applies).
-TEARDOWN_GRACE_SECONDS = int(os.environ.get("APPLY_TEARDOWN_GRACE_SECONDS", "120"))
+TEARDOWN_GRACE_SECONDS = settings().apply_teardown_grace_seconds
 
 _CHILD_MARKERS = (b"playwright", b"mcp", b"node", b"npx")
 
@@ -1128,7 +989,8 @@ class Logger:
     """Tee log lines to stdout (live) and a file."""
     def __init__(self, path: Path):
         self.path = path
-        self.fh = open(path, "w", encoding="utf-8")
+        # Long-lived handle owned by this object; released in close().
+        self.fh = open(path, "w", encoding="utf-8")  # noqa: SIM115
 
     def line(self, s: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -1157,7 +1019,7 @@ def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: P
                      resolved=resolved, yield_check=yield_check,
                      trajectory_id=log_path.stem),
                 timeout=timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.line(f"[agent] TIMEOUT after {timeout_seconds}s")
             return 124, "Timed out before reaching a conclusion."
 

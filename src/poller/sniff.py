@@ -90,7 +90,7 @@ def sniff(url: str, wait_ms: int = 6000) -> None:
         try:
             data = json.loads(r["body"])
             if isinstance(data, dict):
-                preview = "keys: " + ", ".join(list(data.keys())[:8])
+                preview = "keys: " + ", ".join(str(k) for k in list(data.keys())[:8])
             elif isinstance(data, list):
                 preview = f"array[{len(data)}]"
         except Exception:

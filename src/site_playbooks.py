@@ -21,26 +21,28 @@ reason for an apply to fail. `state/` is gitignored, like all runtime state.
 """
 from __future__ import annotations
 
-import os
 import json
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
 from .config import PROJECT_ROOT
+from .settings import settings
+from .eventlog import get_logger
+
+_LOG = get_logger("playbooks")
+from .eventlog import utc_now_iso
 
 PLAYBOOK_DIR = PROJECT_ROOT / "state" / "site_playbooks"
 
 # One cheap non-reasoning call per touched domain; reuses the apply key/model.
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-PLAYBOOK_MODEL = os.environ.get(
-    "PLAYBOOK_MODEL", os.environ.get("APPLY_MODEL", "deepseek-v4-pro"))
-PLAYBOOK_MAX_CHARS = int(os.environ.get("PLAYBOOK_MAX_CHARS", "4000"))
-PLAYBOOK_TIMEOUT_SECONDS = int(os.environ.get("PLAYBOOK_TIMEOUT_SECONDS", "120"))
-PLAYBOOK_MAX_ITEMS = int(os.environ.get("PLAYBOOK_MAX_ITEMS", "40"))
+DEEPSEEK_BASE_URL = settings().deepseek_base_url
+PLAYBOOK_MODEL = settings().playbook_model
+PLAYBOOK_MAX_CHARS = settings().playbook_max_chars
+PLAYBOOK_TIMEOUT_SECONDS = settings().playbook_timeout_seconds
+PLAYBOOK_MAX_ITEMS = settings().playbook_max_items
 
 # Transcript tail fed to the distiller. Covers a whole normal run; caps the
 # bill on pathological ones.
@@ -143,7 +145,7 @@ def update_after_run(listing: dict, result) -> None:
     try:
         _update(listing, result)
     except Exception as e:  # noqa: BLE001 - fail-open by design, see docstring
-        print(f"[playbook] update skipped: {type(e).__name__}: {e}")
+        _LOG.info(f"update skipped: {type(e).__name__}: {e}")
 
 
 def _update(listing: dict, result) -> None:
@@ -153,7 +155,7 @@ def _update(listing: dict, result) -> None:
     transcript_path = Path(result.transcript_path)
     if not transcript_path.exists():
         return
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_key = settings().deepseek_api_key
     if not api_key:
         return
 
@@ -210,13 +212,13 @@ def _update(listing: dict, result) -> None:
                              result.outcome)
                 continue
         PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().isoformat(timespec="seconds")
+        stamp = utc_now_iso()
         if not merged and current_items:
             _path(domain).write_text(
                 _render_items(current_items)[:PLAYBOOK_MAX_CHARS]
                 + f"\n\n<!-- checked {stamp} after outcome={result.outcome} -->\n",
                 encoding="utf-8")
-        print(f"[playbook] updated {domain} ({len(load(domain) or '')} chars)")
+        _LOG.info(f"updated {domain} ({len(load(domain) or '')} chars)")
 
 
 def _load_items(domain: str) -> list[PlaybookItem]:
@@ -242,7 +244,7 @@ def _write_items(domain: str, items: list[PlaybookItem], outcome: str) -> None:
     _json_path(domain).write_text(
         json.dumps([asdict(i) for i in ranked], ensure_ascii=False, indent=2),
         encoding="utf-8")
-    stamp = datetime.now().isoformat(timespec="seconds")
+    stamp = utc_now_iso()
     _path(domain).write_text(
         _render_items(ranked)[:PLAYBOOK_MAX_CHARS]
         + f"\n\n<!-- updated {stamp} after outcome={outcome} -->\n",
@@ -278,7 +280,7 @@ def _markdown_delta_items(text: str) -> list[PlaybookItem]:
 
 def _merge_items(existing: list[PlaybookItem], delta: list[PlaybookItem], *,
                  outcome: str) -> list[PlaybookItem]:
-    now = datetime.now().isoformat(timespec="seconds")
+    now = utc_now_iso()
     by_id = {item.id: item for item in existing}
     for item in delta:
         if not item.content:

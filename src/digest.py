@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import incident_store, known_gates
+from . import eventlog, incident_store, known_gates
 from .config import LOG_DIR, PROJECT_ROOT
 
 MAIL_SUMMARY_LOG = LOG_DIR / "mail_summary.jsonl"
@@ -191,10 +191,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _parse_ts(value: Any) -> datetime | None:
-    try:
-        return datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
+    return eventlog.parse_ts(value)
 
 
 def main() -> int:

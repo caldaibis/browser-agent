@@ -37,8 +37,8 @@ def _anchor(name: str, list_url: str, pattern: str, **kw) -> SiteConfig:
 # Tier-3 usually opens a real tab under the browser lock, so it can compete with
 # live submissions. Kept OFF by default and on a slow cadence to limit
 # contention. Flip on with POLL_ENABLE_TIER3=1 once verified.
-import os as _os
-_TIER3_ON = _os.environ.get("POLL_ENABLE_TIER3", "0") == "1"
+from ..settings import settings as _settings
+_TIER3_ON = _settings().poll_enable_tier3
 
 
 def _tier3(name: str, list_url: str, *, parse=None, cadence_s: int = 180,

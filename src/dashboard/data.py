@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
+from .. import eventlog
 from ..config import LOG_DIR, PROJECT_ROOT
 from ..gmail_watch import recent_mail_events
 from ..llm_pricing import pricing_table
@@ -57,7 +58,7 @@ class Submission:
     msg_id: str = ""
     msg_received_ts: str = ""
     detected_ts: str = ""
-    token_usage: "TokenUsage | None" = None
+    token_usage: TokenUsage | None = None
 
     @property
     def when(self) -> datetime | None:
@@ -193,12 +194,9 @@ class RaceInfo:
 
 
 def parse_ts(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
-    except Exception:
-        return None
+    # Delegates to eventlog.parse_ts: old records are naive local time, new
+    # ones aware UTC; both normalize to naive local so age math stays right.
+    return eventlog.parse_ts(value)
 
 
 def format_delta(seconds: float | None) -> str:
@@ -688,32 +686,9 @@ def warm_dashboard_caches() -> None:
 # --------------------------------------------------------------------------- #
 # Transcripts (redacted)
 # --------------------------------------------------------------------------- #
-@lru_cache(maxsize=1)
-def _secret_values() -> tuple[str, ...]:
-    vals: set[str] = set()
-    try:
-        creds = json.loads(CREDS_FILE.read_text(encoding="utf-8"))
-        for c in creds.values():
-            for k in ("password", "username"):
-                v = (c.get(k) or "").strip()
-                if len(v) >= 4:
-                    vals.add(v)
-    except Exception:
-        pass
-    # longest first so substrings don't pre-empt longer secrets
-    return tuple(sorted(vals, key=len, reverse=True))
-
-
-def redact(text: str) -> str:
-    if not text:
-        return text
-    for v in _secret_values():
-        text = text.replace(v, "***")
-    text = re.sub(r"(?im)^(\s*password:).*$", r"\1 ***", text)
-    text = re.sub(r"(?im)^(\s*username(?:/email)?:).*$", r"\1 ***", text)
-    # belt-and-braces: redact any 'password' value the agent may have logged
-    text = re.sub(r"(?i)(password['\"]?\s*[:=]\s*)\S+", r"\1***", text)
-    return text
+# The implementation moved to src/redaction.py so non-dashboard writers
+# (eventlog, notify, trajectories) share it; re-exported for existing callers.
+from ..redaction import redact  # noqa: E402  (section-local re-export)
 
 
 def find_transcript(sub: Submission) -> Path | None:
@@ -856,7 +831,7 @@ def _build_poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
             error_recent=error_recent, new_recent=new_recent,
             last_block_reason=(last_block or {}).get("reason", ""),
             last_block_ts=(last_block or {}).get("ts", ""),
-            block_streak=(last.get("streak") or 0) if status == "blocked" else 0,
+            block_streak=((last or {}).get("streak") or 0) if status == "blocked" else 0,
             status=status,
         ))
 

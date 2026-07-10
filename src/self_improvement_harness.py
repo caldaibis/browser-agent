@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import fnmatch
 from collections import Counter, defaultdict
@@ -33,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import LOG_DIR, PROJECT_ROOT
+from .settings import settings
+from .eventlog import utc_now_iso
 
 
 STATE_DIR = PROJECT_ROOT / "state" / "self_improvement"
@@ -42,10 +43,10 @@ TRAJECTORY_DIR = LOG_DIR / "trajectories"
 DEFAULT_FIXTURE_DIR = PROJECT_ROOT / "tests" / "fixtures" / "self_improvement_harness"
 DEFAULT_APPLY_EVAL_DIR = PROJECT_ROOT / "tests" / "fixtures" / "apply_harness_eval"
 
-SELF_IMPROVEMENT_EVAL_FIXTURES = os.environ.get(
-    "SELF_IMPROVEMENT_EVAL_FIXTURES", str(DEFAULT_FIXTURE_DIR))
-APPLY_HARNESS_EVAL_FIXTURES = os.environ.get(
-    "APPLY_HARNESS_EVAL_FIXTURES", str(DEFAULT_APPLY_EVAL_DIR))
+SELF_IMPROVEMENT_EVAL_FIXTURES = (
+    settings().self_improvement_eval_fixtures or str(DEFAULT_FIXTURE_DIR))
+APPLY_HARNESS_EVAL_FIXTURES = (
+    settings().apply_harness_eval_fixtures or str(DEFAULT_APPLY_EVAL_DIR))
 
 HARNESS_SURFACES = {
     "prompt_context",
@@ -147,13 +148,13 @@ def record_trajectory_event(run_id: str, event: str, payload: dict[str, Any] | N
 
     This is called from the hot apply loop, so every failure is swallowed.
     """
-    if os.environ.get("APPLY_TRAJECTORY_ENABLED", "1") == "0":
+    if not settings().apply_trajectory_enabled:
         return
     try:
         safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", run_id or "run")[:120]
         TRAJECTORY_DIR.mkdir(parents=True, exist_ok=True)
         rec = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            "ts": utc_now_iso(),
             "run_id": safe_run_id,
             "event": event,
             "payload": redact_value(payload or {}),
@@ -314,7 +315,7 @@ def mine_failures(
     clusters = _cluster_records(records)
     bundle = {
         "schema": "self-improvement-evidence-v1",
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": utc_now_iso(),
         "source": str(transcript_dir),
         "record_count": len(records),
         "preserved_success_examples": passing[:8],
@@ -618,7 +619,7 @@ def _append_lineage(event: str, payload: dict[str, Any]) -> None:
     try:
         LINEAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
         rec = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            "ts": utc_now_iso(),
             "event": event,
             "payload": redact_value(payload, max_string=8000),
         }
@@ -654,7 +655,7 @@ def _extract_domain(text: str) -> str:
 
 def _dashboard_redact(text: str) -> str:
     try:
-        from .dashboard.data import redact
+        from .redaction import redact
 
         return redact(text)
     except Exception:

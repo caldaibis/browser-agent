@@ -14,8 +14,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -23,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..config import PROJECT_ROOT, LOG_DIR
+from ..settings import settings
 from .. import push_notify
 from . import costs, data, funnel, healthinfo, si, trajectories
 
@@ -30,13 +33,19 @@ BASE_DIR = Path(__file__).resolve().parent
 PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
 APPLY_LOCK = PROJECT_ROOT / "state" / "apply.lock"
 
-app = FastAPI(title="Stekkies Agent Dashboard")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    start_dashboard_warmer()  # defined below; resolved at startup, not import
+    yield
+
+
+app = FastAPI(title="Stekkies Agent Dashboard", lifespan=_lifespan)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 if data.SCREENSHOTS_DIR.exists():
     app.mount("/screenshots", StaticFiles(directory=str(data.SCREENSHOTS_DIR)), name="screenshots")
 
-DASHBOARD_WARM_INTERVAL_SECONDS = float(os.environ.get("DASHBOARD_WARM_INTERVAL_SECONDS", "300"))
+DASHBOARD_WARM_INTERVAL_SECONDS = settings().dashboard_warm_interval_seconds
 _warm_thread_started = False
 _warm_thread_lock = threading.Lock()
 
@@ -68,7 +77,6 @@ def _dashboard_warm_loop() -> None:
         time.sleep(max(60.0, DASHBOARD_WARM_INTERVAL_SECONDS))
 
 
-@app.on_event("startup")
 def start_dashboard_warmer() -> None:
     global _warm_thread_started
     with _warm_thread_lock:
@@ -98,12 +106,15 @@ STATUS_CLASS = {
     "skipped_duplicate": "muted", "no_source_url": "muted", "no_listing_link": "muted",
     "timeout": "bad", "incomplete": "bad", "error": "bad",
 }
-templates.env.globals["status_class"] = lambda s: STATUS_CLASS.get(s, "muted")
-templates.env.globals["fmt_delta"] = data.format_delta
-templates.env.globals["fmt_age"] = data.format_age
-templates.env.globals["fmt_dur"] = data.format_duration
-templates.env.globals["fmt_usd"] = data.format_usd
-templates.env.globals["fmt_count"] = data.format_count
+# jinja2 leaves Environment.globals unannotated, so checkers infer an
+# over-narrow value union from its defaults; widen once and assign through it.
+_template_globals: dict[str, Any] = templates.env.globals
+_template_globals["status_class"] = lambda s: STATUS_CLASS.get(s, "muted")
+_template_globals["fmt_delta"] = data.format_delta
+_template_globals["fmt_age"] = data.format_age
+_template_globals["fmt_dur"] = data.format_duration
+_template_globals["fmt_usd"] = data.format_usd
+_template_globals["fmt_count"] = data.format_count
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -367,17 +378,18 @@ def action_retry(request: Request, url: str = ""):
         return _action(request, False, "an apply is already running; try again shortly")
     try:
         APPLY_LOCK.write_text("retry", encoding="utf-8")
-        log = open(LOG_DIR / "retry.log", "ab")
         # Wrapper clears the lock when the apply finishes (fire-and-forget).
         cmd = (
             f"{shlex.quote(sys.executable)} -m src.orchestrator --once "
             f"{shlex.quote(url)}; rm -f {shlex.quote(str(APPLY_LOCK))}"
         )
-        subprocess.Popen(
-            ["bash", "-c", cmd],
-            cwd=str(PROJECT_ROOT), env={**os.environ}, stdout=log, stderr=log,
-            start_new_session=True,
-        )
+        with open(LOG_DIR / "retry.log", "ab") as log:
+            # Popen dups the fd at spawn; the child keeps writing after we close.
+            subprocess.Popen(
+                ["bash", "-c", cmd],
+                cwd=str(PROJECT_ROOT), env={**os.environ}, stdout=log, stderr=log,
+                start_new_session=True,
+            )
     except Exception as e:
         APPLY_LOCK.unlink(missing_ok=True)
         return _action(request, False, f"launch failed: {e}")

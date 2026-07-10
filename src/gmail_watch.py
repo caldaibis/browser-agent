@@ -21,7 +21,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterator
+from collections.abc import Iterator
 
 import httpx
 from google.auth.transport.requests import Request
@@ -30,6 +30,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from .config import PROJECT_ROOT
+from .eventlog import get_logger
+
+_LOG = get_logger("gmail")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -128,6 +131,8 @@ def _headers(payload) -> dict[str, str]:
 
 def _received_ts(msg: dict) -> str:
     internal = msg.get("internalDate")
+    if internal is None:
+        return ""
     try:
         return datetime.fromtimestamp(int(internal) / 1000).isoformat(timespec="seconds")
     except Exception:
@@ -341,7 +346,7 @@ def watch_events(poll_seconds: int = POLL_SECONDS) -> Iterator[GmailListingEvent
         ("stekkies", STEKKIES_QUERY),
         ("huurwoningen", HUURWONINGEN_QUERY),
     ]
-    print("[gmail] watching listing mail: " + " | ".join(q for _p, q in queries)
+    _LOG.info("watching listing mail: " + " | ".join(q for _p, q in queries)
           + f" every {poll_seconds}s...")
     seen_this_process: set[str] = set()
     while True:
@@ -368,17 +373,17 @@ def watch_events(poll_seconds: int = POLL_SECONDS) -> Iterator[GmailListingEvent
             batch.sort(key=lambda e: e.received_ts or "", reverse=True)
             for ev in batch:
                 if not ev.url:
-                    print(f"[gmail] {ev.provider} mail {ev.msg_id} had no listing link; skipped.")
+                    _LOG.info(f"{ev.provider} mail {ev.msg_id} had no listing link; skipped.")
                 yield ev
         except Exception as e:  # keep the watcher alive
-            print("[gmail] error:", e)
+            _LOG.info(f"error: {e}")
         time.sleep(poll_seconds)
 
 
 def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str | None]]:
     """Backward-compatible Stekkies-only iterator."""
     svc = get_service()
-    print(f"[gmail] watching (query='{STEKKIES_QUERY}', every {poll_seconds}s)...")
+    _LOG.info(f"watching (query='{STEKKIES_QUERY}', every {poll_seconds}s)...")
     while True:
         try:
             resp = svc.users().messages().list(
@@ -392,16 +397,16 @@ def watch(poll_seconds: int = POLL_SECONDS) -> Iterator[tuple[str, str | None]]:
                 if ev.url:
                     yield ev.msg_id, ev.url
                 else:
-                    print(f"[gmail] mail {msg_id} had no listing link; skipped.")
+                    _LOG.info(f"mail {msg_id} had no listing link; skipped.")
                     yield ev.msg_id, None
         except Exception as e:  # keep the watcher alive
-            print("[gmail] error:", e)
+            _LOG.info(f"error: {e}")
         time.sleep(poll_seconds)
 
 
 def main() -> None:
     for ev in watch_events():
-        print(f"[gmail] NEW {ev.provider} LISTING {ev.msg_id}: {ev.url}")
+        _LOG.info(f"NEW {ev.provider} LISTING {ev.msg_id}: {ev.url}")
 
 
 if __name__ == "__main__":

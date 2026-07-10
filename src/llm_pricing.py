@@ -14,7 +14,8 @@ the global `LLM_{INPUT,CACHED_INPUT,OUTPUT}_USD_PER_1M` env vars.
 from __future__ import annotations
 
 import json
-import os
+
+from .settings import settings
 
 # USD per 1,000,000 tokens.
 DEFAULT_MODEL_PRICES: dict[str, dict[str, float]] = {
@@ -30,7 +31,7 @@ DEFAULT_APPLY_MODEL = "deepseek-v4-pro"
 def pricing_table() -> dict[str, dict[str, float]]:
     """The per-1M price table with env overrides applied."""
     prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
-    raw = os.environ.get("LLM_MODEL_PRICES_JSON", "")
+    raw = settings().llm_model_prices_json
     if raw:
         try:
             for model, vals in json.loads(raw).items():
@@ -41,9 +42,9 @@ def pricing_table() -> dict[str, dict[str, float]]:
                 }
         except Exception:
             pass
-    global_input = os.environ.get("LLM_INPUT_USD_PER_1M")
-    global_cached = os.environ.get("LLM_CACHED_INPUT_USD_PER_1M")
-    global_output = os.environ.get("LLM_OUTPUT_USD_PER_1M")
+    global_input = settings().llm_input_usd_per_1m
+    global_cached = settings().llm_cached_input_usd_per_1m
+    global_output = settings().llm_output_usd_per_1m
     if global_input and global_output:
         try:
             for vals in prices.values():

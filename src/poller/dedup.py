@@ -14,17 +14,18 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
 import fcntl
 from urllib.parse import urlparse, urlunparse
 
 from ..config import PROJECT_ROOT
+from ..settings import settings
+from ..eventlog import utc_now_iso
 
 SEEN_FILE = PROJECT_ROOT / "state" / "poller_seen.jsonl"
 PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
 CLAIMS_FILE = PROJECT_ROOT / "state" / "listing_claims.jsonl"
 LOCK_FILE = PROJECT_ROOT / "state" / "dedup.lock"
-CLAIM_TTL_SECONDS = int(os.environ.get("LISTING_CLAIM_TTL_SECONDS", "7200"))
+CLAIM_TTL_SECONDS = settings().listing_claim_ttl_seconds
 
 # Query params that never identify a listing — strip them before keying.
 _TRACKING_PREFIXES = ("utm_", "gclid", "fbclid", "mc_")
@@ -104,7 +105,7 @@ def _dedup_lock():
 def _append_claim(key: str, url: str, status: str, **meta) -> None:
     CLAIMS_FILE.parent.mkdir(parents=True, exist_ok=True)
     rec = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
+        "ts": utc_now_iso(),
         "epoch": time.time(),
         "key": key,
         "url": url,
@@ -202,6 +203,23 @@ def known_processed_urls() -> set[str]:
             key = rec.get("key") or rec.get("url")
             if key:
                 urls.add(canonical_url(key))
+    urls |= _processed_urls_canonical()
+    return urls
+
+
+def _processed_urls_canonical() -> set[str]:
+    """Canonical keys of every processed listing: UNION of the SQLite store
+    and the legacy JSONL while the store soaks (a record present in only one
+    must still dedup — sets make the overlap free). Raw keys are
+    canonicalized at read time so stored keys keep matching as
+    canonicalization rules evolve."""
+    urls: set[str] = set()
+    try:
+        from .. import store  # late import: store imports models imports this module
+
+        urls |= {canonical_url(k) for k in store.processed_keys()}
+    except Exception:
+        pass
     if PROCESSED_FILE.exists():
         for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
             try:
@@ -241,17 +259,10 @@ class SeenStore:
         # Anything the Stekkies pipeline already processed (dedup across
         # paths) -- resolved_url is the final destination an apply run
         # actually reached mid-flight (see known_processed_urls), which can
-        # differ from source_url for aggregator-style listings.
-        if PROCESSED_FILE.exists():
-            for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                for field in ("source_url", "resolved_url"):
-                    url = rec.get(field)
-                    if url:
-                        self._seen.add(canonical_url(url))
+        # differ from source_url for aggregator-style listings. Includes
+        # stekkies_url keys too (harmless superset: the poller never
+        # discovers a listing at a stekkies.com URL).
+        self._seen |= _processed_urls_canonical()
 
     def is_new(self, url: str) -> bool:
         with self._lock:
@@ -297,7 +308,7 @@ class SeenStore:
                 if key not in self._seen:
                     self._seen.add(key)
                     SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+                    rec = {"ts": utc_now_iso(),
                            "key": key, "url": url, **meta}
                     with SEEN_FILE.open("a", encoding="utf-8") as f:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")

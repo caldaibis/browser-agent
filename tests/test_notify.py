@@ -99,13 +99,21 @@ class TestPlaceholderRecipientGuard(unittest.TestCase):
     def test_placeholder_value_disables_notify(self):
         # The computed NOTIFY_ENABLED must be false for the placeholder.
         import importlib
-        with patch.dict("os.environ", {"NOTIFY_TO": "you@example.com"}, clear=False):
-            reloaded = importlib.reload(notify)
-            self.assertFalse(reloaded.NOTIFY_ENABLED)
-        with patch.dict("os.environ", {"NOTIFY_TO": "real@person.com"}, clear=False):
-            reloaded = importlib.reload(notify)
-            self.assertTrue(reloaded.NOTIFY_ENABLED)
-        importlib.reload(notify)  # restore module-level state for other tests
+
+        from src import settings as settings_module
+        try:
+            with patch.dict("os.environ", {"NOTIFY_TO": "you@example.com"}, clear=False):
+                settings_module.reload_settings()
+                reloaded = importlib.reload(notify)
+                self.assertFalse(reloaded.NOTIFY_ENABLED)
+            with patch.dict("os.environ", {"NOTIFY_TO": "real@person.com"}, clear=False):
+                settings_module.reload_settings()
+                reloaded = importlib.reload(notify)
+                self.assertTrue(reloaded.NOTIFY_ENABLED)
+        finally:
+            # Restore module-level state for other tests.
+            settings_module.reload_settings()
+            importlib.reload(notify)
 
 
 if __name__ == "__main__":

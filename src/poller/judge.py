@@ -14,19 +14,19 @@ this market a missed home costs more than a wasted look (owner's standing call).
 from __future__ import annotations
 
 import json
-import os
 
 from openai import AsyncOpenAI
 
 from ..rent_policy import MAX_RENT
 from ..applicant_profile import PROFILE
+from ..settings import settings
 from .models import RawListing
 
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-JUDGE_MODEL = os.environ.get("POLL_JUDGE_MODEL", "deepseek-v4-pro")
-MAX_CYCLING_MIN = int(os.environ.get("POLL_MAX_CYCLING_MIN", "15"))
-MIN_RENT = float(os.environ.get("POLL_MIN_PRICE", "800"))
-MIN_SURFACE = float(os.environ.get("POLL_MIN_SURFACE", "30"))
+DEEPSEEK_BASE_URL = settings().deepseek_base_url
+JUDGE_MODEL = settings().poll_judge_model
+MAX_CYCLING_MIN = settings().poll_max_cycling_min
+MIN_RENT = settings().poll_min_price
+MIN_SURFACE = settings().poll_min_surface
 
 _SYSTEM = (
     "You screen Dutch rental listings for a solo applicant. Answer ONLY with a "
@@ -61,7 +61,7 @@ _SYSTEM = (
 
 
 def _client() -> AsyncOpenAI | None:
-    key = os.environ.get("DEEPSEEK_API_KEY")
+    key = settings().deepseek_api_key
     if not key:
         return None
     return AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=key)

@@ -28,12 +28,13 @@ import time
 from contextlib import contextmanager
 
 from .config import PROJECT_ROOT
+from .settings import settings
 
 PRIORITY_FLAG = PROJECT_ROOT / "state" / "apply_priority.flag"
 
 # A mail apply is extraction + one agent run (APPLY_TIMEOUT_SECONDS=900 by
 # default), so a flag this old means the claimant died without cleanup.
-STALE_SECONDS = int(os.environ.get("APPLY_PRIORITY_STALE_SECONDS", "1800"))
+STALE_SECONDS = settings().apply_priority_stale_seconds
 
 
 @contextmanager

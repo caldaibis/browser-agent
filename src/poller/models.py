@@ -8,7 +8,11 @@ See docs/poller-plan.md for the design these types implement.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import Listing
 
 
 @dataclass
@@ -22,25 +26,27 @@ class RawListing:
     source_name: str = ""
     address: str = ""
     city: str = ""
-    price: Optional[float] = None      # euros/month, numeric when known
-    surface: Optional[float] = None    # m², numeric when known
+    price: float | None = None      # euros/month, numeric when known
+    surface: float | None = None    # m², numeric when known
     listing_type: str = ""             # e.g. "apartment", "room" — raw site label
     title: str = ""
     description: str = ""              # listing body text when the site publishes it
     detected_by: str = ""              # poller registry site that found it
     detected_ts: str = ""              # when the watcher first qualified it
 
-    def to_listing(self) -> dict:
-        """Shape handed to ``apply.apply()`` — it needs only source_url; the
-        rest enriches the prompt/logs. Mirrors the Stekkies listing dict."""
-        return {
-            "source_url": self.source_url,
-            "source_name": self.source_name or "poller",
-            "detected_by": self.detected_by,
-            "address": self.address or self.title or "?",
-            "price": f"€{self.price:.0f}" if self.price is not None else "?",
-            **({"description": self.description[:4000]} if self.description else {}),
-        }
+    def to_listing(self) -> Listing:
+        """The typed pipeline Listing handed to ``apply.apply()`` — it needs
+        only source_url; the rest enriches the prompt/logs."""
+        from ..models import Listing  # runtime late import: src.models imports poller.dedup
+
+        return Listing(
+            source_url=self.source_url,
+            source_name=self.source_name or "poller",
+            detected_by=self.detected_by,
+            address=self.address or self.title or "?",
+            price=f"€{self.price:.0f}" if self.price is not None else "?",
+            description=self.description[:4000] if self.description else "",
+        )
 
 
 # A parser turns a fetched payload (JSON dict/list for tier 1, HTML str for
@@ -59,7 +65,7 @@ class SiteConfig:
     method: str = "GET"
     params: dict = field(default_factory=dict)
     headers: dict = field(default_factory=dict)
-    parse: Optional[Parser] = None         # payload -> list[RawListing]; None = generic
+    parse: Parser | None = None         # payload -> list[RawListing]; None = generic
     needs_login: bool = False              # list requires an authed profile (tier 3)
     own_browser: bool = False              # tier 3: LAUNCH a dedicated browser
     #   instead of attaching to the shared host over CDP. Needed for sites whose

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from src import apply
+from src.models import Listing
 from src.poller import filters
 from src.poller.models import RawListing
 from src.rent_policy import parse_rent
@@ -58,17 +59,17 @@ class TestRentPolicy(unittest.TestCase):
         self.assertIn("requires payment", result.summary)
 
     def test_payment_wording_detected_without_browser(self):
-        reason = apply._payment_required_reason({
+        reason = apply._payment_required_reason(Listing.from_json({
             "source_url": "https://example.test/listing",
             "description": "Om te reageren is een lidmaatschap van €25 per jaar vereist.",
-        })
+        }))
         self.assertIsNotNone(reason)
 
     def test_free_registration_wording_not_detected_as_payment(self):
-        reason = apply._payment_required_reason({
+        reason = apply._payment_required_reason(Listing.from_json({
             "source_url": "https://example.test/listing",
             "description": "Geen inschrijfkosten. Reageren is gratis.",
-        })
+        }))
         self.assertIsNone(reason)
 
 

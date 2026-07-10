@@ -8,8 +8,8 @@ USER_DATA_DIR = PROJECT_ROOT / "state" / "chromium-profile"
 
 # Application documents you provide locally (gitignored — they hold personal
 # data, so they are never committed). Override the location with DOCS_DIR.
-import os as _os
-DOCS_DIR = Path(_os.environ.get("DOCS_DIR", PROJECT_ROOT / "documents"))
+from .settings import settings as _settings
+DOCS_DIR = Path(_settings().docs_dir or PROJECT_ROOT / "documents")
 
 LOG_DIR = PROJECT_ROOT / "logs"
 SCREENSHOT_DIR = LOG_DIR / "screenshots"

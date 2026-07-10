@@ -57,7 +57,7 @@ class TestLoadTimeline(unittest.TestCase):
             {"event": "tool_call", "payload": {"turn": 1, "tool": "fill_by_label",
                                                "args": "password=hunter2secret"}},
         ])
-        with patch("src.dashboard.data._secret_values", return_value=("hunter2secret",)):
+        with patch("src.redaction._secret_values", return_value=("hunter2secret",)):
             tl = trajectories.load_timeline("run2")
         blob = json.dumps([c.detail for c in tl.turns[0].calls])
         self.assertNotIn("hunter2secret", blob)

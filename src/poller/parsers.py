@@ -17,6 +17,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from collections.abc import Callable
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -195,7 +196,9 @@ def parse_jsonld(payload: object, site: SiteConfig) -> list[RawListing]:
     return out
 
 
-def make_anchor_parser(path_pattern: str) -> "callable":
+def make_anchor_parser(
+    path_pattern: str,
+) -> Callable[[object, SiteConfig], list[RawListing]]:
     """Build a parser that scrapes listing-detail links matching a regex on the
     URL path. Best-effort tier-2 fallback: yields URLs only (no price/surface),
     which then rely on the LLM/apply stage."""

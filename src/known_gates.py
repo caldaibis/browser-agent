@@ -36,6 +36,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .config import PROJECT_ROOT
+from .eventlog import parse_ts, utc_now_iso
 
 GATES_PATH = PROJECT_ROOT / "state" / "known_gates.json"
 
@@ -69,13 +70,9 @@ def load_gates(*, now: datetime | None = None) -> list[dict[str, Any]]:
     for entry in data:
         if not isinstance(entry, dict) or entry.get("kind") not in GATE_KINDS:
             continue
-        expires = str(entry.get("expires_ts") or "")
-        if expires:
-            try:
-                if datetime.fromisoformat(expires) <= now:
-                    continue
-            except ValueError:
-                pass
+        expires = parse_ts(entry.get("expires_ts"))
+        if expires is not None and expires <= now:
+            continue
         active.append(entry)
     return active
 
@@ -152,7 +149,7 @@ def record_gate(*, domain: str, kind: str, note: str, source: str = "",
         "kind": kind,
         "note": (note or "").strip()[:400],
         "source": (source or "").strip()[:120],
-        "added_ts": datetime.now().isoformat(timespec="seconds"),
+        "added_ts": utc_now_iso(),
     }
     if expires_ts:
         entry["expires_ts"] = expires_ts

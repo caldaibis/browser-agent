@@ -25,16 +25,36 @@ package = false
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15",
+    "ty>=0.0.57",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+# Coverage ratchet: `just check` fails below this floor. Raise it when real
+# coverage rises (57% on 08-07-2026); never lower it. Machine-authored patches
+# (self-improvement agent) must not erode the tested fraction of the codebase.
+fail_under = 55
 
 [tool.ruff.lint]
-# Pyflakes only: catches real bugs (unused/undefined names, redefinitions like
-# the _run/_run shadowing that broke the self-improvement agent), not style.
-select = ["F"]
+# Bug-catching rule sets only, not style: Pyflakes (unused/undefined names,
+# redefinitions like the _run/_run shadowing that broke the self-improvement
+# agent), bugbear, pyupgrade, flake8-async (real value given the 07-07-2026
+# executor-starvation incident), and simplify.
+select = ["F", "B", "UP", "ASYNC", "SIM"]
+ignore = [
+    # Pure style; this codebase's bare `try/except: pass` fail-open idiom and
+    # stacked `with` blocks are deliberate and clearer at their call sites.
+    "SIM105",
+    "SIM117",
+]
 # Ruff's default dummy-variable regex (matches any `_foo`) exempts *all*
 # underscore-prefixed names -- including this codebase's `_private_helper`
 # convention -- from F811/F841. That's exactly the class of name that hid the

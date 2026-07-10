@@ -29,8 +29,11 @@ from pathlib import Path
 
 import httpx
 
+from .. import eventlog, store
 from ..apply_priority import priority_pending
 from ..config import LOG_DIR
+from ..models import ProcessedRecord
+from ..settings import settings
 from ..listing_context import fetch_context
 from ..notify import send_alert, send_alert_dedup, send_status_email
 from . import filters, judge
@@ -47,7 +50,7 @@ ACTIVITY_LOG = LOG_DIR / "activity.log"
 ZERO_YIELD_DIR = LOG_DIR / "poller_zero_yield"
 
 # Tier-3 render settle time (ms) after DOM load, for the listing JS to populate.
-SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
+SETTLE_MS = settings().poll_tier3_settle_ms
 
 # Size of the event loop's default thread executor. The default
 # (min(32, cpus+4) — 8 threads on a 4-vCPU VPS) is far too small here:
@@ -57,26 +60,26 @@ SETTLE_MS = int(os.environ.get("POLL_TIER3_SETTLE_MS", "5500"))
 # DNS, so every pending httpx connect times out AT ONCE — observed as 10k+
 # simultaneous ConnectTimeout poll_errors per day across all tier-2 sites
 # (07-07-2026), i.e. ~80% of tier-2 polls silently lost.
-EXECUTOR_THREADS = int(os.environ.get("POLL_EXECUTOR_THREADS", "64"))
+EXECUTOR_THREADS = settings().poll_executor_threads
 
 # A speculative tier-3 poll must not queue behind a long apply for the shared
 # browser: skip the poll and try again next cadence (also frees its executor
 # thread quickly — see EXECUTOR_THREADS).
-TIER3_LOCK_TIMEOUT = float(os.environ.get("POLL_TIER3_LOCK_TIMEOUT", "120"))
+TIER3_LOCK_TIMEOUT = settings().poll_tier3_lock_timeout
 
 # Hard wall-clock cap for one shared-browser tier-3 render, including lock
 # acquisition and Playwright teardown. This intentionally sits well below the
 # browser-lock wait alert threshold (300s by default): if a speculative poll
 # wedges, kill it before any apply spends five minutes waiting behind it.
-TIER3_RENDER_TIMEOUT = float(os.environ.get("POLL_TIER3_RENDER_TIMEOUT", "120"))
+TIER3_RENDER_TIMEOUT = settings().poll_tier3_render_timeout
 
 # Cleanup should never dominate the lock-hold time. The parent process still
 # has the hard TIER3_RENDER_TIMEOUT kill switch if Playwright ignores this.
-TIER3_CLOSE_TIMEOUT = float(os.environ.get("POLL_TIER3_CLOSE_TIMEOUT", "5"))
+TIER3_CLOSE_TIMEOUT = settings().poll_tier3_close_timeout
 
 # Consecutive zero-listing polls before suspecting a silently-broken parser:
 # a parser that matches nothing looks exactly like "no new listings", forever.
-ZERO_YIELD_ALERT_POLLS = int(os.environ.get("POLL_ZERO_YIELD_ALERT_POLLS", "120"))
+ZERO_YIELD_ALERT_POLLS = settings().poll_zero_yield_alert_polls
 
 # Backoff schedule (seconds) applied on consecutive blocks, capped.
 _BACKOFF = [60, 300, 900, 1800, 3600]
@@ -93,26 +96,15 @@ _BACKOFF = [60, 300, 900, 1800, 3600]
 
 
 def _log(event: str, **kw) -> None:
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **kw}
-    POLL_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with POLL_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"[poll] {event}: " + " ".join(f"{k}={v}" for k, v in kw.items()))
+    eventlog.log_event(POLL_LOG, event, echo="poll", **kw)
 
 
 def _summary(**kw) -> dict:
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "trigger": "poller", **kw}
-    MAIL_SUMMARY_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with MAIL_SUMMARY_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return rec
+    return eventlog.record(MAIL_SUMMARY_LOG, trigger="poller", **kw)
 
 
 def _activity(message: str) -> None:
-    ts = datetime.now().isoformat(timespec="seconds")
-    line = f"[{ts}] {message}"
-    with ACTIVITY_LOG.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    eventlog.activity(message, echo="poll")
 
 
 async def _write_zero_yield_diagnostic(client: httpx.AsyncClient, site: SiteConfig) -> str:
@@ -133,7 +125,8 @@ async def _write_zero_yield_diagnostic(client: httpx.AsyncClient, site: SiteConf
             result = await fetch(client, site)
             html = json.dumps(result.json, ensure_ascii=False, indent=2) \
                 if site.tier == 1 else result.text
-        Path(path).write_text((html or "")[:250_000], encoding="utf-8")
+        await asyncio.to_thread(
+            Path(path).write_text, (html or "")[:250_000], encoding="utf-8")
         return str(path)
     except Exception as e:  # noqa: BLE001 - diagnostics must not break polling
         _log("zero_yield_diagnostic_failed", site=site.name,
@@ -142,9 +135,7 @@ async def _write_zero_yield_diagnostic(client: httpx.AsyncClient, site: SiteConf
 
 
 def _remember_processed(listing: RawListing, outcome: str, resolved_url: str = "") -> None:
-    PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
     rec = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
         "trigger": "poller",
         "source_url": listing.source_url,
         "source": listing.source_name,
@@ -160,8 +151,12 @@ def _remember_processed(listing: RawListing, outcome: str, resolved_url: str = "
     # URL. See poller.dedup.known_processed_urls.
     if resolved_url:
         rec["resolved_url"] = resolved_url
-    with PROCESSED_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # Dual-write during the store rollout (see src/store.py).
+    written = eventlog.record(PROCESSED_FILE, **rec)
+    try:
+        store.record_processed(ProcessedRecord.from_json(written))
+    except Exception as e:
+        _log("store_write_failed", error=f"{type(e).__name__}: {e}")
 
 
 async def _render_tier3(site: SiteConfig) -> str:
@@ -241,13 +236,9 @@ def _render_tier3_process(site_name: str, list_url: str) -> str:
 
     ctx = multiprocessing.get_context("spawn")
     result_queue = ctx.Queue(maxsize=1)
-    tmp = tempfile.NamedTemporaryFile(
-        prefix=f"tier3_{site_name.replace('.', '_')}_",
-        suffix=".html",
-        delete=False,
-    )
-    output_path = tmp.name
-    tmp.close()
+    tmp_fd, output_path = tempfile.mkstemp(
+        prefix=f"tier3_{site_name.replace('.', '_')}_", suffix=".html")
+    os.close(tmp_fd)
     proc = ctx.Process(
         target=_render_tier3_child,
         args=(site_name, list_url, output_path, result_queue),
@@ -338,7 +329,7 @@ def _annotate_detected(site: SiteConfig, listings: list[RawListing]) -> list[Raw
     return listings
 
 
-async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> None:
+async def _apply_worker(queue: asyncio.Queue[RawListing], seen: SeenStore) -> None:
     """Drain qualifying listings and run the existing apply pipeline (serialized;
     apply() takes the exclusive browser lock internally)."""
     from ..apply import apply  # local import: heavy deps, and avoids import cycle
@@ -352,7 +343,7 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
             if priority_pending():
                 _log("apply_deferred", url=listing.source_url,
                      reason="priority mail apply in progress")
-                while priority_pending():
+                while priority_pending():  # noqa: ASYNC110 — the flag is a cross-process file (apply_priority), no in-process Event can signal it
                     await asyncio.sleep(2)
             _log("apply_start", url=listing.source_url, source=listing.source_name)
             result = await asyncio.to_thread(
@@ -389,7 +380,7 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
             from ..self_improvement_agent import improve_after_apply
             await asyncio.to_thread(
                 improve_after_apply,
-                listing=listing.to_listing(),
+                listing=listing.to_listing().to_json(),
                 result=result,
                 trigger="poller",
                 extra={"detected_by": listing.detected_by or listing.source_name},
@@ -431,7 +422,7 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
             from ..self_improvement_agent import improve_exception
             await asyncio.to_thread(
                 improve_exception,
-                listing=listing.to_listing(),
+                listing=listing.to_listing().to_json(),
                 error=e,
                 trigger="poller",
                 extra={"detected_by": listing.detected_by or listing.source_name},
@@ -456,7 +447,7 @@ async def _apply_worker(queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> 
 
 
 async def _watch_site(site: SiteConfig, client: httpx.AsyncClient,
-                      queue: "asyncio.Queue[RawListing]", seen: SeenStore) -> None:
+                      queue: asyncio.Queue[RawListing], seen: SeenStore) -> None:
     """Poll one site forever on its cadence, with jitter and block backoff."""
     # Stagger startup: all ~20 watchers firing in the same second contends
     # tier-3 sites on the browser lock and spikes DNS/executor demand.
@@ -560,7 +551,7 @@ async def _enrich(l: RawListing) -> None:
     l.address = l.address or ctx.address
 
 
-async def _consider(l: RawListing, queue: "asyncio.Queue[RawListing]",
+async def _consider(l: RawListing, queue: asyncio.Queue[RawListing],
                     seen: SeenStore) -> None:
     """Run deterministic filter -> LLM judgment; enqueue if it qualifies."""
     await _enrich(l)
@@ -574,7 +565,7 @@ async def _consider(l: RawListing, queue: "asyncio.Queue[RawListing]",
         _log("judged_out", url=l.source_url, reason=reason)
         seen.mark(l.source_url, judged=reason)
         return
-    l.detected_ts = l.detected_ts or datetime.now().isoformat(timespec="seconds")
+    l.detected_ts = l.detected_ts or eventlog.utc_now_iso()
     if not seen.reserve(l.source_url, source=l.source_name,
                         address=l.address or l.title):
         _log("duplicate_skipped", url=l.source_url, reason="already reserved")
@@ -587,7 +578,7 @@ async def _consider(l: RawListing, queue: "asyncio.Queue[RawListing]",
 async def run() -> None:
     sites = enabled_sites()
     seen = SeenStore()
-    queue: "asyncio.Queue[RawListing]" = asyncio.Queue()
+    queue: asyncio.Queue[RawListing] = asyncio.Queue()
     # See EXECUTOR_THREADS: asyncio.to_thread AND the loop's own DNS lookups
     # share the default executor; it must be big enough that lock-waiting
     # tier-3 renders + a long apply can never starve getaddrinfo.

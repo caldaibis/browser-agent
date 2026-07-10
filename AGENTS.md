@@ -51,10 +51,25 @@ form, uploads docs, submits).
   `poller/dedup.py`'s `known_processed_urls`), it stops immediately with
   `already_applied` instead of re-filling/resubmitting a form the site itself
   gives no "already applied" signal for.
-- `src/apply.py` — build the prompt, run the agent, persist a per-run transcript
-  to `logs/transcripts/<ts>_<source>_<address>.log`. Apply model:
-  `deepseek-v4-pro` (override via `APPLY_MODEL`);
-  gemini-3.5-flash was too flaky.
+- `src/apply.py` — pre-flight vetoes (rent cap, payment gates), run the agent,
+  persist a per-run transcript to `logs/transcripts/<ts>_<source>_<address>.log`.
+  Apply model: `deepseek-v4-pro` (override via `APPLY_MODEL`);
+  gemini-3.5-flash was too flaky. The task prompt itself lives in
+  `src/prompts/apply_prompt.py` (re-exported as `apply.build_prompt`) so
+  prompt diffs review apart from pipeline code.
+- **Cross-cutting substrate** (08-07-2026 overhaul, see
+  `docs/engineering-roadmap.md`): `src/settings.py` — every env knob, typed,
+  in one place (`just settings` prints the resolved values; modules bind
+  from `settings()`, never parse `os.environ` themselves);
+  `src/models.py` — typed `Listing`/`ProcessedRecord` with the ONE
+  `dedup_keys()`/`keys()` identity derivation; `src/store.py` — SQLite
+  state store (`state/store.db`, WAL) for processed listings + dedup keys +
+  incidents, dual-written with the legacy JSONL while it soaks;
+  `src/eventlog.py` — UTC timestamps, shared JSONL append + activity log,
+  redaction-before-write (`src/redaction.py` holds the one `redact()`);
+  `src/self_improvement/` — the SI agent's split-out prompts / worktree /
+  cost / browser-tools modules (`self_improvement_agent.py` stays the
+  facade); `src/agent_tools.py` — the apply agent's local tool schemas.
 - `src/message_template.py` — reference application message; the agent customizes
   it per listing instead of pasting verbatim.
 - `documents/` — your application PDFs/JPG. **Gitignored** (never committed —
@@ -286,11 +301,14 @@ form, uploads docs, submits).
 - Python 3.12, managed by **uv** (`pyproject.toml` + `uv.lock`). `uv sync` to
   install; prefix commands with `uv run` (no manual venv activate).
 - Run modules as packages: `uv run python -m src.<module>`.
-- **`just check` runs the unit tests** (`unittest discover tests`), not just
-  lint + import smoke. This is deliberate: it is also the self-improvement
-  agent's verify gate (`SELF_IMPROVEMENT_VERIFY_CMD`), and an autonomous patch
-  that pushes straight to main must not pass on lint alone (found the hard
-  way: the suite sat broken for a while because nothing ran it).
+- **`just check` is the one quality gate**: ruff (rule sets F,B,UP,ASYNC,SIM),
+  the `ty` type checker over `src/`, byte-compile, pytest with a coverage
+  ratchet (`fail_under` in pyproject — raise it when coverage rises, never
+  lower it), the apply-harness eval, and an import/prompt smoke. This is
+  deliberate: it is also the self-improvement agent's verify gate
+  (`SELF_IMPROVEMENT_VERIFY_CMD`), and an autonomous patch that pushes
+  straight to main must not pass on lint alone (found the hard way: the
+  suite sat broken for a while because nothing ran it).
 - **Use the `justfile` recipes for common workflows** instead of reinventing
   commands — run `just` (or read the `justfile`) to list them. Covers local dev
   (`sync`, `host`, `login`, `watch`, `dashboard`, `healthcheck`, `reauth`,
@@ -362,195 +380,88 @@ form, uploads docs, submits).
   redacts them and never serves `*.prompt.txt`. Don't undo that.
 
 ## Hard-won lessons (don't relearn these)
-- **Alerting must not share a failure mode with what it monitors.** The Gmail
-  refresh token was revoked on 04-07-2026; the orchestrator crash-looped 1136
-  times over 3+ days and NO alert could reach the user because alert email
-  used that same dead token. Fixes: `notify.send_alert` pushes (web push)
-  BEFORE emailing; the orchestrator's watch loop catches Gmail failures
-  in-process (alert + `WATCH_RETRY_SECONDS` backoff, no systemd crash loop);
-  the healthcheck checks unit liveness and supports a dead-man ping. NB: a
-  Google OAuth app in *Testing* status expires refresh tokens every 7 days —
-  publish it to Production or this recurs weekly.
-- **asyncio's default executor is tiny and DNS shares it.** `asyncio.to_thread`
-  AND `loop.getaddrinfo` both use the loop's default executor (8 threads on a
-  4-vCPU box). ~13 tier-3 watchers parking threads on the browser flock
-  starved DNS, so every pending httpx connect timed out AT ONCE — 10k+
-  ConnectTimeout poll_errors/day, ~80% of tier-2 polls silently lost
-  (diagnosed 07-07-2026 from all-sites-simultaneous timeout bursts). Fixes:
-  a 64-thread default executor (`POLL_EXECUTOR_THREADS`), tier-3 polls give
-  up on the lock after `POLL_TIER3_LOCK_TIMEOUT` (120s) instead of queueing
-  30 min, and startup polls are staggered.
-- **`asyncio.wait_for` cannot unwedge a hung MCP teardown.** It only cancels
-  the task; the cancellation still unwinds `stdio_client.__aexit__`, which
-  waits on the npx process — if that ignores closed stdin, `asyncio.run()`
-  blocks forever holding the browser flock (03-07-2026: 9+ hours, eight
-  consecutive mail applies starved out at 1800s each). `run_agent` now arms a
-  `threading.Timer` watchdog that SIGKILLs wedged MCP descendants
-  `APPLY_TEARDOWN_GRACE_SECONDS` (120s) past the wall-clock timeout, and
-  `browser_lock` records its holder + pushes an alert after a 300s wait.
-- **HTTP 402 (out of credit) is not a verdict on the listing.** Every apply
-  outcome used to consume the listing (one-attempt rule) — so during a credit
-  outage every listing that dropped was burned forever as "error". outcome
-  `no_credit` (rc=126) is now a third carve-out alongside `yielded` and the
-  browser-lock timeout: poller releases the claim, orchestrator leaves the
-  mail unread, both alert (rate-limited via `notify.send_alert_dedup`).
+The standing rules are below; each dated incident's full postmortem lives in
+`docs/lessons/` — read the linked file before touching the related code.
+
+- **Alerting must not share a failure mode with what it monitors.** Push
+  (web push) BEFORE email; the healthcheck watches unit liveness + a
+  dead-man ping. NB: a Google OAuth app in *Testing* status expires refresh
+  tokens every 7 days — publish to Production or the 04-07-2026 outage
+  recurs weekly. → `docs/lessons/2026-07-04-alerting-shared-failure-mode.md`
+- **asyncio's default executor is tiny and DNS shares it.** Never park many
+  threads on locks: 64-thread executor (`POLL_EXECUTOR_THREADS`), tier-3
+  polls give up on the flock after 120s, startup polls staggered.
+  → `docs/lessons/2026-07-07-asyncio-executor-dns-starvation.md`
+- **`asyncio.wait_for` cannot unwedge a hung MCP teardown.** `run_agent`
+  arms a `threading.Timer` watchdog that SIGKILLs wedged MCP descendants
+  `APPLY_TEARDOWN_GRACE_SECONDS` past the timeout; `browser_lock` records
+  its holder and alerts after a 300s wait.
+  → `docs/lessons/2026-07-03-hung-mcp-teardown-watchdog.md`
+- **HTTP 402 (out of credit) is not a verdict on the listing.** Outcome
+  `no_credit` (rc=126) never consumes the listing: poller releases the
+  claim, orchestrator leaves the mail unread, both alert (deduped).
+  → `docs/lessons/2026-07-05-no-credit-is-not-a-verdict.md`
 - **Model:** `deepseek-v4-pro` is the default apply model. Keep
   `gemini-3.5-flash` avoided; it falls into degenerate loops (e.g. ArrowDown ×30).
-- **Reasoning truncation = silent stall.** Reasoning models can emit hidden
-  reasoning tokens (counted against the completion budget) before any
-  content/tool_call. Over a big page snapshot that reasoning can exhaust the
-  completion cap mid-thought, so the API returns `finish_reason="length"` with
-  empty content AND no tool_calls. The loop reads that as "the model stopped",
-  burns its 2 nudges, and bails after a few seconds with no real attempt. This
-  sank kamernet submission #25 (29-06-2026). Fixes in `browser_agent.py`:
-  (1) thinking is **disabled by default** via
-  `extra_body={"thinking":{"type":"disabled"}}` — form-filling needs no heavy reasoning. Re-enable with
-  `APPLY_REASONING_EFFORT`.
-  (2) explicit `max_tokens` headroom; (3) truncated-empty turns (`finish_reason=
-  length`) are retried, not counted as a conclusion; (4) per-turn log of
-  `finish_reason` + `completion/reasoning_tokens`. NB: the reasoning *text* stays
-  hidden — only the token *count* is exposed (`usage.completion_tokens_details`).
-  Also: the transcript's tool-arg log no longer clamps urls/refs to 60 chars (that
-  clamp made a full URL look truncated and masked the real cause).
+- **Reasoning truncation = silent stall.** Thinking is disabled by default
+  for the apply agent (re-enable via `APPLY_REASONING_EFFORT`); truncated
+  empty turns (`finish_reason=length`) are retried, never treated as a
+  conclusion; per-turn `finish_reason` + token counts are logged.
+  → `docs/lessons/2026-06-29-reasoning-truncation-silent-stall.md`
 - **Use the Playwright MCP high-level tools** (snapshot→ref→click/fill_form);
-  the raw-JS path (`browser_cdp`/`browser_evaluate`) caused 50+ calls + full-page
-  dumps for one task. They stay filtered out.
+  the raw-JS path (`browser_cdp`/`browser_evaluate`) caused 50+ calls +
+  full-page dumps for one task. They stay filtered out.
 - **Accessibility-tree snapshots miss dialogs built without proper ARIA
-  roles.** Seen repeatedly on real listings, most recently Hof van Oslo via
-  REBO Groep (01-07-2026): a "credit check" consent dialog opened and
-  intercepted all clicks, but `browser_snapshot` never showed it (no
-  `dialog`/`button` role on its markup) — the agent burned ~18 of 60 turns
-  trying screenshots, `boxes` snapshots, and console/network inspection
-  before giving up. `browser_handle_dialog` doesn't help either — that's for
-  native JS `alert`/`confirm`, not in-page HTML. Fix: `dom_scan`/
-  `click_by_text` (raw DOM query + click-by-visible-text, `src/
-  browser_dom_tools.py`) as a narrow, explicitly-scoped fallback — not a
-  reopening of raw JS. Also seen in the same transcript: ~29 of 60 turns
-  were `browser_snapshot` calls, each after a *different* click, so neither
-  the prompt's own "don't re-snapshot every click" guidance nor the
-  exact/short-cycle repeat guard caught it (the repeated element is the call
-  *type*, not its arguments) — `_should_nudge_snapshot_overuse` adds a
-  one-shot code-level nudge for this specific pattern.
+  roles.** `dom_scan`/`click_by_text`/`fill_by_label`/
+  `select_option_by_label` (`src/browser_dom_tools.py`) are the narrow,
+  dialog-scoped fallback — not a reopening of raw JS; a one-shot code nudge
+  fires on snapshot overuse (`_should_nudge_snapshot_overuse`).
+  → `docs/lessons/2026-07-01-aria-less-dialogs-snapshot-blindspot.md`
 - **Already-applied = STOP, never resubmit.** Detect by control wording
   ("Aanvraag wijzigen", "Reactie intrekken", "je hebt gereageerd", "Doorgaan
   met gesprek"). Pre-filled fields / saved docs alone do NOT mean already-applied.
-- **Hof van Oslo, resolved (02-07-2026):** the above dialog-blindspot fix
-  (`dom_scan`/`click_by_text`) alone wasn't enough — three more real, verified
-  bugs surfaced only once the actual REBO Groep dialog was driven end to end.
-  (1) `dom_scan`'s "current page" picked the last-*created* tab, not the one
-  the Playwright MCP actually had selected — with several tabs open (SSO
-  popups, an inschrijfportaal tab...) that's silently the wrong tab. Fixed by
-  asking the MCP's own `browser_tabs` listing (which marks the true current
-  tab with `(current)`) and passing that URL through as a hint (`current_page`
-  in `browser_dom_tools.py`). (2) an uncaught `Locator.click` timeout inside
-  `click_by_text` propagated out and killed the whole MCP session/process —
-  now caught and returned as a normal (recoverable) tool result. (3) there was
-  no way to *type* into a ref-less dialog's inputs at all — `dom_scan` can
-  read, `click_by_text` can only click. Added `fill_by_label` and
-  `select_option_by_label` (see architecture section above) — the missing
-  piece that actually let the agent complete the form. Also found: REBO
-  Groep's page has a button labelled "Inschrijven huuraanbod" that opens a
-  **paid €34,95/year email-alert subscription**, not an application for the
-  listing — a real dark pattern, verified by inspecting the dialog's DOM
-  directly (title: "Schrijf je in voor onze e-mailservice"), not assumed;
-  `apply.py`'s prompt now warns against it by name. With all of the above,
-  the same listing went from a 60-turn timeout to a 23-turn real submission.
-- **Duplicate HTML ids break scoped lookups, not just accessibility.**
-  REBO Groep reuses `id="first_name"`/`id="email"`/etc across three different
-  `<dialog>` elements on one page (viewing request, brochure download, email
-  upsell) — invalid HTML, but real. `getElementById` and Playwright's
-  `get_by_label` (which resolves a `<label for=id>` via a similar document-wide
-  lookup) both silently resolve to whichever hidden dialog comes first in DOM
-  order, not the open one: a fill sees a 0×0 bounding box and times out with no
-  hint why. `get_by_text`, by contrast, verifiably scopes correctly to a
-  Locator's own subtree. Fix: every raw-DOM tool scopes to the currently open
-  `<dialog>` first (`dialog_scope` in `browser_dom_tools.py`), and
-  `fill_by_label`/`select_option_by_label` find inputs/dropdowns by walking up
-  from a text-matched `<label>` rather than trusting `for=id` resolution.
-- **Custom dropdown options can default to `type="submit"`.** REBO Groep's
-  "Soort inkomen" options are `<button>`s with no explicit `type="button"`
-  inside a `<form>` — clicking one to just *select* it can fire a real,
-  premature form submission before the rest of the dialog is filled (verified:
-  selecting the option early showed the browser's native "Vul dit veld in"
-  validation on every other still-empty required field). `select_option_by_label`
-  now attaches a one-time capturing submit-preventing guard to every form right
-  before clicking an option.
-- **One site, one listing, several URL shapes — path-based keying can't
-  connect them.** Kaatstraat (02-07-2026): the Huurwoningen alert mail
-  deep-links `/frontend/listing/<full-uuid>/?alt=...` while Stekkies extracts
-  (and the poller discovers) the site page `/huren/<city>/<uuid-first-8-hex>/
-  <street-slug>/`. Same listing, two canonical keys → the pre-flight duplicate
-  check matched neither and TWO full agent runs (~$0.07) were spent only for
-  the mid-run guard to stop each at the real landlord site
-  (eenhoornmanagement.nl — huurwoningen.nl is often just the shop window).
-  Fixes: (1) `dedup.canonical_url` collapses both huurwoningen shapes to a
-  synthetic per-listing key (`https://huurwoningen.nl/listing/<hex8>`, see
-  `_site_listing_key` — extend it when another site shows the same disease);
-  backward compatible because every reader re-canonicalizes stored keys at
-  load time. (2) `orchestrator._processed_keys` now also reads
-  `resolved_url`, so a mail pointing straight at a landlord site an earlier
-  run only reached mid-flight is caught pre-flight too. (3) a deterministic
-  prevention is deliberately visible: `skipped_duplicate` rows land in
-  `mail_summary.jsonl` with a "Prevented by the deterministic duplicate
-  guard..." message and show in the dashboard's submissions list (no status
-  filter hides them) — prevented spend should be observable, not silent.
-- **Cross-source dedup gap: the same listing, two different keys.** The
-  Stekkies-mail path records the final external `source_url` (already resolved
-  by Stekkies' own extraction); the poller records whatever URL it discovered
-  the listing at, which for an aggregator (huurwoningen.nl) is a DIFFERENT URL
-  than the real destination reached only after clicking through in-page
-  redirect dialogs. Neither recognized the other's key as the same real-world
-  listing. This is why Hof van Oslo got stuck in an endless poller retry loop
-  in the first place (see above) AND why a manual retest of the fixed agent on
-  02-07-2026 submitted a real, duplicate second application to REBO — the
-  poller-triggered run had no way to know a Stekkies-triggered run had already
-  succeeded under a different URL. Fixed two ways: (1) `apply.py`/
-  `browser_agent.py` now capture `AgentResult.resolved_url` — the actual
-  external destination an apply run reaches mid-flight — and persist it as an
-  extra dedup key in `processed_listings.jsonl` (`orchestrator.py`,
-  `poller/watcher.py`); `dedup.known_processed_urls()` reads all of
-  `source_url`/`stekkies_url`/`resolved_url` across both the poller's and the
-  orchestrator's records. (2) since an aggregator's real destination can't be
-  resolved before opening the browser (it's in-page JS, not an HTTP redirect
-  `fetch.py` could follow), `browser_agent.py`'s `_run()` also checks the
-  *current* tab's URL against that same set once per turn — the earliest point
-  a duplicate can actually be caught — and stops immediately with
-  `already_applied` instead of re-filling/resubmitting a form the target site
-  itself gives no "already applied" signal for.
-- **Stale page dumps in history = quadratic input tokens.** Every
-  `browser_snapshot`/`browser_navigate`/`dom_scan` result is ~7k tokens (they
-  are already clamped at 20k chars), and until 02-07-2026 every one of them
-  stayed in `messages` for the rest of the run — re-sent to the API on every
-  later turn. Measured on the worst Hof van Oslo transcript
-  (20260701_144029, 60 turns): context grew 7.7k → 188k tokens, 6.12M
-  cumulative prompt tokens for ONE run (the dashboard's 5–6M-token
-  `incomplete` rows). The model only ever acts on the newest snapshot, so
-  `_prune_stale_page_dumps` (browser_agent.py) now stubs all but the newest
-  2 large tool results in place each turn (thresholds via
-  `APPLY_PRUNE_MIN_CHARS`/`APPLY_PRUNE_KEEP_RECENT`). Each stub invalidates
-  DeepSeek's prefix cache from that message onward, but the stub lands near
-  the tail so the one-off miss re-read is far smaller than carrying ~7k
-  extra tokens on every remaining turn.
+- **Ref-less dialogs end-to-end (Hof van Oslo).** Current-tab detection via
+  `browser_tabs`, recoverable `click_by_text` timeouts, `fill_by_label` /
+  `select_option_by_label` for typing/selecting where no ref exists; beware
+  the paid "Inschrijven huuraanbod" email-alert upsell (named in the apply
+  prompt). → `docs/lessons/2026-07-02-hof-van-oslo-resolution.md`
+- **Duplicate HTML ids break scoped lookups.** Every raw-DOM tool scopes to
+  the currently open `<dialog>` first (`dialog_scope`); inputs are found by
+  walking up from a text-matched `<label>`, never trusting `for=id`.
+  → `docs/lessons/2026-07-02-duplicate-html-ids-break-scoped-lookups.md`
+- **Custom dropdown options can default to `type="submit"`.**
+  `select_option_by_label` attaches a one-time submit-preventing guard to
+  every form before clicking an option.
+  → `docs/lessons/2026-07-02-dropdown-options-default-to-submit.md`
+- **One site, one listing, several URL shapes.** `dedup.canonical_url`
+  collapses known per-site shapes to a synthetic listing key
+  (`_site_listing_key` — extend it when another site shows the disease);
+  readers re-canonicalize stored keys at load time; prevented duplicates are
+  deliberately visible as `skipped_duplicate` rows.
+  → `docs/lessons/2026-07-02-kaatstraat-one-listing-many-url-shapes.md`
+- **Cross-source dedup gap: same listing, two different keys.**
+  `AgentResult.resolved_url` (the destination an apply run actually reached)
+  is persisted as an extra dedup key, and the agent checks the current tab
+  URL against all known keys once per turn, stopping with `already_applied`.
+  → `docs/lessons/2026-07-02-cross-source-dedup-gap.md`
+- **Stale page dumps in history = quadratic input tokens.**
+  `_prune_stale_page_dumps` stubs all but the newest 2 large tool results
+  in place each turn (`APPLY_PRUNE_MIN_CHARS`/`APPLY_PRUNE_KEEP_RECENT`).
+  → `docs/lessons/2026-07-02-stale-page-dumps-quadratic-tokens.md`
 - **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
   accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
   These are real states to report, not bugs — stop early and label them.
-- **Hard published eligibility gates are readable at poll time.** Full agent
-  runs were spent opening the browser just to read "ALLEEN BESCHIKBAAR VOOR
-  STUDENTEN" (huurportaal, 02-07-2026, twice in one day).
+- **Hard published eligibility gates are readable at poll time.**
   `filters.hard_exclusion` vetoes students-only/seniors-only/short-stay
-  listings deterministically from the title+description (sentence-scoped so
-  "geen studenten" — students *excluded*, fine for us — never triggers), the
-  judge gets the description + matching criteria, and
-  `browser_agent`'s turn budget grants one `APPLY_GRACE_TURNS` extension when
-  the run is demonstrably mid-form (two runs died at turn 60 one dropdown from
-  submitting — under one-attempt, that consumed the listings forever). A
-  deterministic cookie-banner sweep (`dismiss_cookie_banner`) runs after every
-  navigation so consent overlays never cost LLM turns.
+  deterministically (sentence-scoped, negation-aware); `APPLY_GRACE_TURNS`
+  grants one extension when a run is demonstrably mid-form; a deterministic
+  cookie-banner sweep runs after every navigation.
+  → `docs/lessons/2026-07-02-eligibility-gates-readable-at-poll-time.md`
 - **Gmail listing mails:** from `help@stekkies.com`; the listing link is a
   hex-hash `http://www.stekkies.com/.../redirect/<hash>` and the body is
   quoted-printable (must QP-decode before regex).
 - **Documents** are uploaded in a fixed priority order with a one-line purpose
-  each (see `_classify` in `apply.py`): ID → werkgeversverklaring → recent
-  payslips → landlord ref → profile → motivatiebrief → UWV → jaaropgave →
-  bank → degiro. Keep
-  the expired arbeidsovereenkomst OUT; keep the bank statement trimmed.
+  each (see `_classify` in `src/prompts/apply_prompt.py`): ID →
+  werkgeversverklaring → recent payslips → landlord ref → profile →
+  motivatiebrief → UWV → jaaropgave → bank → degiro. Keep the expired
+  arbeidsovereenkomst OUT; keep the bank statement trimmed.

@@ -27,16 +27,17 @@ self-improvement path, let alone the apply pipeline above it.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import eventlog
 from .self_improvement_harness import STATE_DIR, classify_failure, redact_value
+from .settings import settings
 
 INCIDENT_LOG = STATE_DIR / "incidents.jsonl"
 
-SELF_IMPROVEMENT_DEDUP_HOURS = float(os.environ.get("SELF_IMPROVEMENT_DEDUP_HOURS", "24"))
+SELF_IMPROVEMENT_DEDUP_HOURS = settings().self_improvement_dedup_hours
 
 # Failure classes where the site is the story: the same signature on another
 # domain is a different incident. Infrastructure classes (lock contention,
@@ -176,10 +177,10 @@ def post_deploy_status(fp: Fingerprint, *, now: datetime | None = None,
         ts = _parse_ts(rec.get("ts"))
         if ts is None:
             continue
-        if rec.get("event") == "attempt" and rec.get("deployed"):
-            if latest_deploy_ts is None or ts > latest_deploy_ts:
-                latest_deploy_ts = ts
-                latest_deploy = rec
+        if (rec.get("event") == "attempt" and rec.get("deployed")
+                and (latest_deploy_ts is None or ts > latest_deploy_ts)):
+            latest_deploy_ts = ts
+            latest_deploy = rec
     if latest_deploy_ts is None:
         return {"status": "no_deployed_fix", "recurred": False}
     for rec in _read():
@@ -235,16 +236,29 @@ def incident_summary(*, days: float = 7.0, now: datetime | None = None) -> list[
 
 def _append(payload: dict[str, Any]) -> None:
     try:
-        INCIDENT_LOG.parent.mkdir(parents=True, exist_ok=True)
-        rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+        rec = {"ts": eventlog.utc_now_iso(),
                **redact_value(payload, max_string=1000)}
-        with INCIDENT_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        # Dual-write during the store rollout (see src/store.py); the JSONL
+        # append keeps a rollback to a pre-store build lossless.
+        eventlog.append_jsonl(INCIDENT_LOG, rec)
+        from . import store  # late import: store -> models -> dedup, keep leaf-ish
+
+        store.record_incident(rec)
     except Exception:
         return
 
 
 def _read() -> list[dict[str, Any]]:
+    # JSONL stays the primary read path while the store soaks (dual-write
+    # would make a merged read double-count attempts); the store covers
+    # fresh boxes where the JSONL no longer exists.
+    if not INCIDENT_LOG.exists():
+        try:
+            from . import store
+
+            return store.incidents()
+        except Exception:
+            return []
     try:
         with INCIDENT_LOG.open(encoding="utf-8") as f:
             out = []
@@ -261,10 +275,7 @@ def _read() -> list[dict[str, Any]]:
 
 
 def _parse_ts(value: Any) -> datetime | None:
-    try:
-        return datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
+    return eventlog.parse_ts(value)
 
 
 def _domain(url: str) -> str:

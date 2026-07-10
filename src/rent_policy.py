@@ -5,10 +5,11 @@ the user's rent cap, even if a listing otherwise looks eligible.
 """
 from __future__ import annotations
 
-import os
 import re
 
-MAX_RENT = float(os.environ.get("MAX_RENT", os.environ.get("POLL_MAX_PRICE", "1750")))
+from .settings import settings
+
+MAX_RENT = settings().max_rent
 
 _PRICE_RE = re.compile(r"(\d[\d.,\s]*)")
 

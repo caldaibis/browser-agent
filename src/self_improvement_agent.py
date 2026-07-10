@@ -37,46 +37,55 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import incident_store, known_gates, self_improvement_harness
-from . import llm_pricing as _pricing
+from . import eventlog, incident_store, known_gates, self_improvement_harness
+from .self_improvement.browser_tools import (
+    _blocked_click_label as _blocked_click_label,  # re-export: tests target this module
+    _browser_tools,
+    _safe_browser_url as _safe_browser_url,  # re-export: tests target this module
+)
+from .self_improvement.cost import _estimate_deepseek_cost_usd
+from .self_improvement.prompts import _diagnosis_prompt, _patch_prompt
+from .self_improvement.util import _redacted
+from .self_improvement.worktree import (
+    WORKTREE_BASE as WORKTREE_BASE,  # re-export: patched via this module in tests
+    _create_worktree,
+    _remove_worktree,
+)
+from . import settings as settings_module
+from .settings import settings
 from .browser_agent import AgentResult
-from .browser_dom_tools import compact, current_page, evaluate_controls, evaluate_fields
-from .config import CDP_URL, LOG_DIR, PROJECT_ROOT, SCREENSHOT_DIR
+from .config import LOG_DIR, PROJECT_ROOT
 from .dashboard.data import redact
 from .notify import send_alert
-from .poller.browser_lock import browser_lock
 
 
-def _env(name: str, default: str) -> str:
-    """Read SELF_IMPROVEMENT_* env vars, with RECOVERY_* as compatibility aliases."""
-    legacy = "RECOVERY_" + name.removeprefix("SELF_IMPROVEMENT_")
-    return os.environ.get(name, os.environ.get(legacy, default))
-
-
-SELF_IMPROVEMENT_ENABLED = _env("SELF_IMPROVEMENT_ENABLED", "1") != "0"
+# All SELF_IMPROVEMENT_* env knobs (with their RECOVERY_* compatibility
+# aliases) are declared and parsed in src/settings.py; the comments on WHY
+# each default is what it is live there and in AGENTS.md.
+SELF_IMPROVEMENT_ENABLED = settings().self_improvement_enabled
 # Routed through a local LiteLLM proxy (deploy/litellm.config.yaml) backed by
 # DeepSeek, not the real Anthropic API -- see AGENTS.md gotchas for why
 # thinking/effort/output_format are not used on this path.
-SELF_IMPROVEMENT_BASE_URL = _env("SELF_IMPROVEMENT_BASE_URL", "http://127.0.0.1:4000")
-SELF_IMPROVEMENT_PROXY_MODEL = _env("SELF_IMPROVEMENT_PROXY_MODEL", "self-improvement-deepseek")
-SELF_IMPROVEMENT_MAX_TURNS = int(_env("SELF_IMPROVEMENT_MAX_TURNS", "30"))
+SELF_IMPROVEMENT_BASE_URL = settings().self_improvement_base_url
+SELF_IMPROVEMENT_PROXY_MODEL = settings().self_improvement_proxy_model
+SELF_IMPROVEMENT_MAX_TURNS = settings().self_improvement_max_turns
 # The run is split in two phases (verified need: 3 production runs died at
 # "Reached maximum number of turns (30)" because ONE budget had to cover
 # read-conventions + diagnose + patch + verify). Phase 1 diagnoses with
 # read-only tools on a small budget; phase 2 (only on a "fix" verdict)
 # patches with the FULL SELF_IMPROVEMENT_MAX_TURNS budget to itself.
-SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS = int(_env("SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS", "15"))
+SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS = settings().self_improvement_diagnosis_max_turns
 # ClaudeAgentOptions.max_budget_usd is enforced against the SDK's own
 # *client-side* cost estimate, which doesn't recognize a proxied model_name
 # and inflates real DeepSeek-v4-pro spend by ~19.5x (verified: a run that
 # really cost $0.03 was internally accounted as $0.586). Scaled up to match,
 # or a harder run would get cut short on inflated-phantom budget, not real
 # spend. Real spend is what _estimate_deepseek_cost_usd logs, not this cap.
-SELF_IMPROVEMENT_MAX_BUDGET_USD = float(_env("SELF_IMPROVEMENT_MAX_BUDGET_USD", "40.0"))
+SELF_IMPROVEMENT_MAX_BUDGET_USD = settings().self_improvement_max_budget_usd
 # Wall-clock cap for BOTH phases together (diagnosis + optional patch).
-SELF_IMPROVEMENT_TIMEOUT_SECONDS = int(_env("SELF_IMPROVEMENT_TIMEOUT_SECONDS", "1500"))
-SELF_IMPROVEMENT_VERIFY_CMD = _env("SELF_IMPROVEMENT_VERIFY_CMD", "just check")
-SELF_IMPROVEMENT_ALLOW_CODE_CHANGES = _env("SELF_IMPROVEMENT_ALLOW_CODE_CHANGES", "1") != "0"
+SELF_IMPROVEMENT_TIMEOUT_SECONDS = settings().self_improvement_timeout_seconds
+SELF_IMPROVEMENT_VERIFY_CMD = settings().self_improvement_verify_cmd
+SELF_IMPROVEMENT_ALLOW_CODE_CHANGES = settings().self_improvement_allow_code_changes
 # Gates whether a verified fix is pushed straight to `main` (where the
 # existing CI/CD pipeline -- ci.yml -> deploy.yml -- deploys it
 # automatically) or to a review branch for a human to merge by hand. There is
@@ -85,31 +94,13 @@ SELF_IMPROVEMENT_ALLOW_CODE_CHANGES = _env("SELF_IMPROVEMENT_ALLOW_CODE_CHANGES"
 # _DEPLOY_CMD no longer apply -- work always happens in a fresh worktree
 # branched from a freshly-fetched origin/main (see _create_worktree), so
 # there's no shared/dirty checkout and no other branch it could be based on.
-SELF_IMPROVEMENT_ALLOW_DEPLOY = _env("SELF_IMPROVEMENT_ALLOW_DEPLOY", "1") != "0"
-SELF_IMPROVEMENT_PROPOSAL_CANDIDATES = int(_env("SELF_IMPROVEMENT_PROPOSAL_CANDIDATES", "2"))
+SELF_IMPROVEMENT_ALLOW_DEPLOY = settings().self_improvement_allow_deploy
+SELF_IMPROVEMENT_PROPOSAL_CANDIDATES = settings().self_improvement_proposal_candidates
 
-# Sibling directory (never nested inside PROJECT_ROOT) holding one throwaway
-# worktree per self-improvement run.
-WORKTREE_BASE = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}-self-improvement-worktrees"
 
-DEFAULT_SELF_IMPROVEMENT_OUTCOMES = {
-    "blocked",
-    "error",
-    "incomplete",
-    "login_required",
-    "no_source_url",
-    "not_available",
-    "timeout",
-    "unknown",
-}
-SELF_IMPROVEMENT_OUTCOMES = {
-    s.strip()
-    for s in _env(
-        "SELF_IMPROVEMENT_OUTCOMES",
-        ",".join(sorted(DEFAULT_SELF_IMPROVEMENT_OUTCOMES)),
-    ).split(",")
-    if s.strip()
-}
+DEFAULT_SELF_IMPROVEMENT_OUTCOMES = set(
+    settings_module.DEFAULT_SELF_IMPROVEMENT_OUTCOMES)
+SELF_IMPROVEMENT_OUTCOMES = set(settings().self_improvement_outcomes)
 
 RUN_LOG = LOG_DIR / "self_improvement.jsonl"
 _MAX_TOOL_TEXT = 30000
@@ -383,7 +374,7 @@ def run_self_improvement(context: dict) -> SelfImprovementResult:
         ))
         rr.log_path = str(log_path)
         return rr
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return SelfImprovementResult(action="timeout",
                                      summary="Self-improvement agent timed out.",
                                      log_path=str(log_path))
@@ -391,8 +382,8 @@ def run_self_improvement(context: dict) -> SelfImprovementResult:
         logger.close()
 
 
-async def _execute(context: dict, logger: "_Logger") -> SelfImprovementResult:
-    if not os.environ.get("DEEPSEEK_API_KEY"):
+async def _execute(context: dict, logger: _Logger) -> SelfImprovementResult:
+    if not settings().deepseek_api_key:
         logger.line("[self-improvement] DEEPSEEK_API_KEY not set; emailing user")
         send_alert(
             "⚠️ Rental self-improvement needs configuration",
@@ -431,7 +422,7 @@ async def _execute(context: dict, logger: "_Logger") -> SelfImprovementResult:
             "checkout directly; commit_push_deploy pushes it to main (or a "
             "review branch) for the existing CI/CD pipeline to deploy."
         )
-        mcp_servers = {
+        mcp_servers: dict[str, Any] = {
             "browser": _browser_tools(),
             "self_improve": _self_improve_tools(context, logger, worktree_path, branch_name),
         }
@@ -538,7 +529,7 @@ async def _run_patch_candidates(
     context: dict,
     diagnosis: dict,
     root_cause: str,
-    logger: "_Logger",
+    logger: _Logger,
     options_factory,
     worktree_path: Path,
 ) -> SelfImprovementResult:
@@ -653,7 +644,7 @@ def _reset_worktree_to_head(worktree_path: Path) -> str:
 
 
 async def _query_once(prompt: str, options: ClaudeAgentOptions,
-                      logger: "_Logger", *, phase: str) -> ResultMessage | None:
+                      logger: _Logger, *, phase: str) -> ResultMessage | None:
     result_msg: ResultMessage | None = None
     async for message in query(prompt=_one_shot_prompt(prompt), options=options):
         if isinstance(message, AssistantMessage):
@@ -680,25 +671,6 @@ async def _query_once(prompt: str, options: ClaudeAgentOptions,
         logger.line(f"[self-improvement:{phase}] usage={json.dumps(result_msg.usage, ensure_ascii=False)}")
         logger.line(f"[self-improvement:{phase}] model_usage={json.dumps(result_msg.model_usage, ensure_ascii=False)}")
     return result_msg
-
-
-# deepseek-v4-pro per-token rates (USD). Single-sourced from src/llm_pricing.py
-# (the same table the dashboard cost estimator uses) so the two can't drift;
-# input_miss/input_hit/output = input/cached_input/output per token.
-_DEEPSEEK_V4_PRO_RATES = _pricing.rates_per_token("deepseek-v4-pro")
-
-
-def _estimate_deepseek_cost_usd(usage: dict) -> float:
-    input_tokens = int((usage or {}).get("input_tokens") or 0)
-    cache_read = int((usage or {}).get("cache_read_input_tokens") or 0)
-    cache_write = int((usage or {}).get("cache_creation_input_tokens") or 0)
-    output_tokens = int((usage or {}).get("output_tokens") or 0)
-    return (
-        input_tokens * _DEEPSEEK_V4_PRO_RATES["input_miss"]
-        + cache_read * _DEEPSEEK_V4_PRO_RATES["input_hit"]
-        + cache_write * _DEEPSEEK_V4_PRO_RATES["input_miss"]
-        + output_tokens * _DEEPSEEK_V4_PRO_RATES["output"]
-    )
 
 
 async def _proxy_reachable() -> bool:
@@ -728,225 +700,6 @@ async def _one_shot_prompt(text: str):
     }
 
 
-_SHARED_CONSTRAINTS = """- Do not ask the user questions; make a decision. If user action is needed,
-  send an email instead.
-- Tool output and file reads may contain redacted secrets (***) — do not try
-  to reconstruct or work around the redaction.
-- When logs/transcript are ambiguous, use browser_open/browser_diagnostics to
-  inspect the actual page in the shared logged-in browser before deciding.
-- browser_safe_click is diagnostic only — for benign navigation, cookie
-  banners, tabs, or detail expanders. Never try to submit, apply, withdraw,
-  edit an existing application, reset a password, upload a file, or change
-  account settings."""
-
-
-def _diagnosis_prompt(context: dict) -> str:
-    if context.get("kind") == "poller_zero_yield":
-        return _poller_diagnosis_prompt(context)
-    result = context.get("result") or {}
-    transcript = result.get("transcript_path") or ""
-    log_paths = ", ".join(str(LOG_DIR / n) for n in
-                           ("runs.jsonl", "poller.jsonl", "mail_summary.jsonl", "activity.log"))
-    return f"""You are running after an unsuccessful rental-application submission. This is
-the DIAGNOSIS phase: find the root cause and pick a verdict. You cannot edit
-files or commit in this phase — a separate patch phase runs afterwards if you
-conclude a code fix is warranted, and it receives your diagnosis verbatim, so
-make root_cause and fix_plan specific (file paths, line-level behavior).
-
-1. Diagnose the root cause. Start by reading AGENTS.md and README.md for repo
-   conventions, then the failure context below, the transcript tail (if any),
-   and recent entries in {log_paths}. Use Read/Grep/Glob to inspect any
-   relevant source files.
-2. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
-   memory: how often this same fingerprint occurred and what earlier
-   self-improvement runs already concluded or tried (prior_attempts). BUILD
-   ON IT — do not re-derive a root cause an earlier attempt already
-   established; explain instead what must happen differently this time
-   (e.g. the earlier fix never landed, or attacked the wrong layer).
-3. If the root cause is an external *site or account gate* — a paid
-   registration/membership requirement, an account-side cap (e.g. max
-   concurrent viewing requests), a required regional registration, delayed
-   access for non-paying accounts, or a site-wide eligibility mismatch —
-   record it with the record_known_gate tool. That makes the pipeline skip
-   or warn deterministically on this domain from the next listing onward,
-   with no code change. Use expires_ts for temporary caps.
-4. Choose exactly one verdict:
-   - noop: expected external state; nothing useful for code or user to do
-     (record_known_gate, when applicable, still counts as noop).
-   - email_user: user action is needed (login/2FA/manual account issue) —
-     call send_user_email yourself, then report email_sent true.
-   - fix: a code/config bug is likely; name the file(s) and the smallest
-     change in fix_plan. Do NOT attempt the edit here.
-   Be conservative about *scope*, but not about *whether to act*: if you can
-   point to a specific line of code whose behavior caused or will repeat
-   this failure, that is a fix verdict, not a "model capability limitation"
-   or "LLM inefficiency". Reserve noop for failures with no code-side cause
-   at all (site outage, eligibility mismatch, rate limits).
-
-FAILURE_CONTEXT:
-{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
-{"TRANSCRIPT: " + transcript if transcript else ""}
-
-Constraints:
-{_SHARED_CONSTRAINTS}
-
-When done, end your final message with exactly one line in this shape,
-nothing after it:
-DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
-
-
-def _poller_diagnosis_prompt(context: dict) -> str:
-    p = context.get("poller") or {}
-    sample = p.get("sample_path") or ""
-    return f"""You are running because a POLLER SITE stopped yielding listings — it has
-returned zero parsed listings for {p.get('streak')} consecutive polls, which
-almost always means its parser silently broke (the site changed its listing
-URL scheme or markup, dropped its schema.org JSON-LD, or moved its listings
-behind a login). This is the DIAGNOSIS phase: find the cause and pick a
-verdict. You cannot edit files here; a patch phase runs afterwards with your
-diagnosis, so name exact files and the smallest change in fix_plan.
-
-SITE: {p.get('site_name')}  (tier {p.get('tier')})
-LIST URL: {p.get('list_url')}
-CURRENT PARSER: {p.get('parser_desc') or 'see the registry entry'}
-SAVED SAMPLE HTML (what the parser actually saw): {sample}
-
-1. Read the saved sample at the absolute path above (Read accepts absolute
-   paths). Read this site's entry in src/poller/registry.py and the parser it
-   uses in src/poller/parsers.py (usually `make_anchor_parser(<regex>)` keyed
-   on listing-detail link paths, or `parse_jsonld`). Read AGENTS.md's poller
-   section for conventions.
-2. FAILURE_CONTEXT.incident (when present) is cross-run memory: what earlier
-   self-improvement runs already concluded/tried for THIS site. Build on it —
-   if a prior fix didn't stick, do something different, don't repeat it.
-3. Decide which case this is:
-   - PARSER BROKEN: the sample clearly contains listings (detail links, cards,
-     JSON-LD) but the current parser/regex no longer matches them → verdict
-     fix. In fix_plan, give the corrected regex/parse approach, justified by
-     concrete strings you found in the sample.
-   - SITE NOW GATED/GONE: the sample is a login wall, a paywall, an empty
-     "no results" page that is clearly the site's real current state, a 404,
-     or a JS-only shell with no listings in the HTML → verdict fix to DISABLE
-     the site in registry.py (`enabled=False`) with a one-line comment saying
-     why and the date, OR email_user if it needs a credential/paid decision
-     only a human can make.
-   - GENUINELY EMPTY RIGHT NOW: the sample is a valid, working listings page
-     that simply has no offers at the moment → verdict noop.
-   Be decisive: a parser you can see is mis-matching the sample is a fix, not
-   a "temporary" noop.
-
-FAILURE_CONTEXT:
-{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
-
-Constraints:
-{_SHARED_CONSTRAINTS}
-
-When done, end your final message with exactly one line in this shape,
-nothing after it:
-DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
-
-
-def _poller_patch_prompt(context: dict, diagnosis: dict,
-                         candidate_strategy: str = "") -> str:
-    p = context.get("poller") or {}
-    return f"""You are the PATCH phase for a broken POLLER PARSER. A diagnosis phase
-already ran and concluded a code fix is warranted for site
-{p.get('site_name')}. Trust its verdict as your starting point; verify against
-the sample and the code before editing.
-
-DIAGNOSIS (from the diagnosis phase):
-{json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
-
-CANDIDATE STRATEGY:
-{candidate_strategy or "parser_control_policy"} — keep the fix bounded to this
-angle unless the code proves it impossible. Preserve known-good parser behavior
-for unrelated sites; do not broaden a regex so far that it captures navigation,
-blog, or account links.
-
-SAVED SAMPLE HTML: {p.get('sample_path')}
-LIST URL: {p.get('list_url')}
-
-Steps:
-1. Read the sample and the site's entry in src/poller/registry.py (+ the
-   parser in src/poller/parsers.py). Confirm the diagnosis at the code level;
-   if it is wrong, stop with action fix_failed rather than improvising.
-2. Make the SMALLEST change that fixes it — typically an updated
-   `make_anchor_parser(<regex>)` pattern on this site's registry entry, a
-   switch to `parse_jsonld`/a different parser, or `enabled=False` if the site
-   is genuinely no longer pollable. Match the surrounding style (note the
-   `# VALIDATED: <n>` comments other entries carry) and keep the change scoped
-   to this one site.
-3. VERIFY the parser actually extracts listings now: run the run_verification
-   tool (`just check` — the deploy gate), and additionally confirm your parser
-   matches the sample (e.g. a quick `uv run python -c` that runs the parser
-   over the saved sample file, or `just poll-once {p.get('site_name')}`).
-   Unit tests do NOT cover this site's live markup, so a green `just check`
-   alone is not proof the parser works — check the sample.
-4. Call commit_push_deploy with a conventional-commit message
-   (e.g. `fix(poller): repair {p.get('site_name')} parser`). Never run git
-   directly. After deploy the poller restarts and picks up the parser.
-5. If a tool refuses the change, email the user with the root cause instead of
-   working around it.
-
-Constraints:
-{_SHARED_CONSTRAINTS}
-
-When done, end your final message with exactly one line in this shape,
-nothing after it:
-SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
-
-
-def _patch_prompt(context: dict, diagnosis: dict,
-                  candidate_strategy: str = "") -> str:
-    if context.get("kind") == "poller_zero_yield":
-        return _poller_patch_prompt(context, diagnosis, candidate_strategy)
-    result = context.get("result") or {}
-    transcript = result.get("transcript_path") or ""
-    return f"""You are the PATCH phase of the self-improvement agent. A diagnosis phase
-already ran on this failure and concluded a code fix is warranted. Its
-verdict is below — trust it as your starting point, verify the named code
-with Read/Grep before editing, and implement the SMALLEST change that
-addresses the evidence.
-
-DIAGNOSIS (from the diagnosis phase):
-{json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
-
-CANDIDATE STRATEGY:
-{candidate_strategy or "smallest_fix"} — treat this as the proposed surface for
-this candidate. If this is a recurrent incident, other candidates may try other
-surfaces; keep this candidate narrow and make the validation evidence decide.
-Preserve passing behavior: do not weaken rent/eligibility/payment/already-
-applied safeguards to make the failing trace look better.
-
-FAILURE_CONTEXT:
-{json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
-{"TRANSCRIPT: " + transcript if transcript else ""}
-
-Steps:
-1. Read the code the diagnosis names (plus AGENTS.md if you need repo
-   conventions). If the diagnosis turns out to be wrong at the code level,
-   say so and stop with action fix_failed — do not improvise a different fix
-   the diagnosis gives no evidence for.
-2. Patch with Read/Edit/Write. Patch only this repo, smallest change that
-   addresses the evidence. Match the surrounding code's style.
-3. Run the run_verification tool; iterate until it passes.
-4. Call commit_push_deploy with a conventional-commit message. Never run
-   `git commit`, `git push`, or `git reset` directly (Bash is blocked from
-   doing this) — commit_push_deploy enforces verification and the
-   push-to-main-or-review-branch policy, and it emails the user
-   automatically after a commit, even if push fails or deploy is disabled.
-5. If a tool refuses the change (policy or verification failure), email the
-   user with the root cause and the refused action instead of retrying
-   around it.
-
-Constraints:
-{_SHARED_CONSTRAINTS}
-
-When done, end your final message with exactly one line in this shape,
-nothing after it:
-SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fix_failed|error","root_cause":"...","summary":"...","email_sent":false,"code_changed":false,"deployed":false}}"""
-
-
 async def _can_use_tool(
     tool_name: str,
     tool_input: dict,
@@ -965,69 +718,8 @@ async def _can_use_tool(
     return PermissionResultAllow()
 
 
-def _browser_tools() -> McpSdkServerConfig:
-    @tool("browser_open", (
-        "Open a URL in the shared CDP browser under the browser lock and "
-        "return safe diagnostics. Use this to verify listing/page state."
-    ), {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string"},
-            "settle_ms": {"type": "integer", "default": 2500},
-        },
-        "required": ["url"],
-    })
-    async def browser_open(args: dict) -> dict:
-        text = await _browser_open(str(args.get("url") or ""), int(args.get("settle_ms") or 2500))
-        return {"content": [{"type": "text", "text": text}]}
-
-    @tool("browser_diagnostics", (
-        "Inspect the current shared-browser page under the browser lock and "
-        "return URL/title/text excerpt/buttons/links/forms/errors."
-    ), {
-        "type": "object",
-        "properties": {"settle_ms": {"type": "integer", "default": 1000}},
-        "required": [],
-    })
-    async def browser_diagnostics(args: dict) -> dict:
-        text = await _browser_diagnostics(int(args.get("settle_ms") or 1000))
-        return {"content": [{"type": "text", "text": text}]}
-
-    @tool("browser_safe_click", (
-        "Click visible text only for benign navigation or cookie banners. "
-        "Refuses submit/apply/withdraw/password/account-destructive labels."
-    ), {
-        "type": "object",
-        "properties": {
-            "text": {"type": "string"},
-            "settle_ms": {"type": "integer", "default": 1500},
-        },
-        "required": ["text"],
-    })
-    async def browser_safe_click(args: dict) -> dict:
-        text = await _browser_safe_click(str(args.get("text") or ""), int(args.get("settle_ms") or 1500))
-        return {"content": [{"type": "text", "text": text}]}
-
-    @tool("browser_screenshot", (
-        "Save a screenshot of the current shared-browser page and return "
-        "the file path plus diagnostics."
-    ), {
-        "type": "object",
-        "properties": {"full_page": {"type": "boolean", "default": True}},
-        "required": [],
-    })
-    async def browser_screenshot(args: dict) -> dict:
-        text = await _browser_screenshot(bool(args.get("full_page", True)))
-        return {"content": [{"type": "text", "text": text}]}
-
-    return create_sdk_mcp_server(
-        name="browser",
-        tools=[browser_open, browser_diagnostics, browser_safe_click, browser_screenshot],
-    )
-
-
 def _self_improve_tools(
-    context: dict, logger: "_Logger", worktree_path: Path, branch_name: str,
+    context: dict, logger: _Logger, worktree_path: Path, branch_name: str,
 ) -> McpSdkServerConfig:
     @tool("run_verification", "Run the configured verification command and return its output.", {
         "type": "object",
@@ -1106,183 +798,6 @@ def _self_improve_tools(
         tools=[run_verification, commit_push_deploy, send_user_email,
                record_known_gate],
     )
-
-
-_BLOCKED_CLICK_RE = re.compile(
-    r"("
-    r"submit|send|apply|verzend|verstuur|reageer|solliciteer|"
-    r"aanvraag|aanvragen|bezichtiging|inschrijven|"
-    r"wijzig|modify|change|intrekken|withdraw|cancel|delete|remove|"
-    r"wachtwoord|password|forgot|reset|account verwijderen"
-    r")",
-    re.IGNORECASE,
-)
-
-
-async def _browser_open(url: str, settle_ms: int) -> str:
-    if not _safe_browser_url(url):
-        return f"REFUSED: unsafe browser URL: {url!r}"
-    return await asyncio.to_thread(_browser_open_locked, url, _clamp_settle(settle_ms))
-
-
-async def _browser_diagnostics(settle_ms: int) -> str:
-    return await asyncio.to_thread(_browser_diagnostics_locked, _clamp_settle(settle_ms))
-
-
-async def _browser_safe_click(text: str, settle_ms: int) -> str:
-    label = " ".join(str(text or "").split())
-    if not label:
-        return "REFUSED: empty click text"
-    if _blocked_click_label(label):
-        return f"REFUSED: click label is potentially submitting/destructive: {label!r}"
-    return await asyncio.to_thread(_browser_safe_click_locked, label, _clamp_settle(settle_ms))
-
-
-async def _browser_screenshot(full_page: bool) -> str:
-    return await asyncio.to_thread(_browser_screenshot_locked, full_page)
-
-
-def _safe_browser_url(url: str) -> bool:
-    return bool(re.match(r"^https?://[^\s]+$", str(url or ""), re.IGNORECASE))
-
-
-def _blocked_click_label(text: str) -> bool:
-    return bool(_BLOCKED_CLICK_RE.search(text or ""))
-
-
-def _clamp_settle(ms: int) -> int:
-    return max(0, min(int(ms or 0), 10000))
-
-
-def _browser_open_locked(url: str, settle_ms: int) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
-        return asyncio.run(_browser_open_async(url, settle_ms))
-
-
-def _browser_diagnostics_locked(settle_ms: int) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
-        return asyncio.run(_browser_diagnostics_async(settle_ms))
-
-
-def _browser_safe_click_locked(text: str, settle_ms: int) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
-        return asyncio.run(_browser_safe_click_async(text, settle_ms))
-
-
-def _browser_screenshot_locked(full_page: bool) -> str:
-    with browser_lock(timeout=120, holder="self-improvement"):
-        return asyncio.run(_browser_screenshot_async(full_page))
-
-
-async def _browser_open_async(url: str, settle_ms: int) -> str:
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
-        try:
-            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = await ctx.new_page()
-            events = _attach_browser_event_collectors(page)
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            if settle_ms:
-                await page.wait_for_timeout(settle_ms)
-            return await _page_report(page, events, include_screenshot=False)
-        finally:
-            await browser.close()
-
-
-async def _browser_diagnostics_async(settle_ms: int) -> str:
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
-        try:
-            page = await current_page(browser)
-            events = _attach_browser_event_collectors(page)
-            if settle_ms:
-                await page.wait_for_timeout(settle_ms)
-            return await _page_report(page, events, include_screenshot=False)
-        finally:
-            await browser.close()
-
-
-async def _browser_safe_click_async(text: str, settle_ms: int) -> str:
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
-        try:
-            page = await current_page(browser)
-            events = _attach_browser_event_collectors(page)
-            await page.get_by_text(text, exact=False).first.click(timeout=7000)
-            if settle_ms:
-                await page.wait_for_timeout(settle_ms)
-            return await _page_report(page, events, include_screenshot=False)
-        finally:
-            await browser.close()
-
-
-async def _browser_screenshot_async(full_page: bool) -> str:
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(CDP_URL)
-        try:
-            page = await current_page(browser)
-            path = SCREENSHOT_DIR / f"self_improvement_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            await page.screenshot(path=str(path), full_page=full_page, timeout=30000)
-            report = json.loads(await _page_report(
-                page,
-                {"console": [], "network": []},
-                include_screenshot=False,
-            ))
-            report["screenshot_path"] = str(path)
-            return redact(json.dumps(report, ensure_ascii=False, indent=2))
-        finally:
-            await browser.close()
-
-
-def _attach_browser_event_collectors(page) -> dict[str, list[str]]:
-    events: dict[str, list[str]] = {"console": [], "network": []}
-
-    def on_console(msg) -> None:
-        if msg.type in {"error", "warning"}:
-            events["console"].append(f"{msg.type}: {msg.text}"[:500])
-
-    def on_response(resp) -> None:
-        if resp.status >= 400:
-            events["network"].append(f"{resp.status} {resp.url}"[:500])
-
-    page.on("console", on_console)
-    page.on("response", on_response)
-    return events
-
-
-async def _page_report(page, events: dict[str, list[str]], *, include_screenshot: bool) -> str:
-    body_text = ""
-    try:
-        body_text = await page.locator("body").inner_text(timeout=5000)
-    except Exception:
-        pass
-
-    controls = await evaluate_controls(page)
-    fields = await evaluate_fields(page)
-    report = {
-        "url": page.url,
-        "title": await page.title(),
-        "text_excerpt": compact(body_text, 6000),
-        "buttons_and_links": controls[:80],
-        "form_fields": fields[:80],
-        "console_errors": events.get("console", [])[-20:],
-        "network_errors": events.get("network", [])[-30:],
-    }
-    if include_screenshot:
-        path = SCREENSHOT_DIR / f"self_improvement_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        await page.screenshot(path=str(path), full_page=True, timeout=30000)
-        report["screenshot_path"] = str(path)
-    return redact(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def _commit_push_deploy(
@@ -1470,46 +985,6 @@ def _run_shell(command: str, timeout: int, cwd: Path = PROJECT_ROOT) -> str:
     return redact(f"rc={r.returncode}\n{r.stdout}{r.stderr}")[:_MAX_TOOL_TEXT]
 
 
-def _create_worktree() -> tuple[Path, str]:
-    WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "worktree", "prune"], cwd=PROJECT_ROOT,
-                   capture_output=True, text=True, timeout=30)
-    subprocess.run(["git", "fetch", "origin", "main"], cwd=PROJECT_ROOT,
-                   capture_output=True, text=True, timeout=60)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = WORKTREE_BASE / ts
-    branch = f"self-improvement/{ts}"
-    r = subprocess.run(
-        ["git", "worktree", "add", str(path), "-b", branch, "origin/main"],
-        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {r.stdout}{r.stderr}")
-    # Symlink (not copy) the main checkout's already-synced .venv so
-    # run_verification's `uv run` calls find a fully-installed environment
-    # with no sync at all -- uv follows the symlink transparently and the
-    # worktree's pyproject.toml/uv.lock are byte-identical at checkout time.
-    # Verified empirically (including the full `just check` pipeline).
-    # Removing the worktree later only deletes this symlink, never the real
-    # venv it points at.
-    main_venv = PROJECT_ROOT / ".venv"
-    if main_venv.exists():
-        (path / ".venv").symlink_to(main_venv)
-    return path, branch
-
-
-def _remove_worktree(path: Path, branch: str, logger: "_Logger") -> None:
-    try:
-        r = subprocess.run(["git", "worktree", "remove", "--force", str(path)],
-                           cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            logger.line(f"[self-improvement] worktree remove failed: {r.stdout}{r.stderr}")
-        subprocess.run(["git", "branch", "-D", branch], cwd=PROJECT_ROOT,
-                       capture_output=True, text=True, timeout=10)
-    except Exception as e:  # noqa: BLE001 - cleanup must never raise
-        logger.line(f"[self-improvement] worktree cleanup error: {type(e).__name__}: {e}")
-
-
 def _parse_marker(msg: ResultMessage, marker_re: re.Pattern[str]) -> dict | None:
     # DeepSeek via the LiteLLM proxy doesn't honor structured output, so the
     # final result comes from a text marker (see the phase prompts) instead
@@ -1541,24 +1016,6 @@ def _parse_result(msg: ResultMessage) -> SelfImprovementResult:
     )
 
 
-def _redacted(value: Any) -> Any:
-    if isinstance(value, dict):
-        out = {}
-        for k, v in value.items():
-            if str(k).lower() in {"password", "passwd", "secret", "token", "api_key"}:
-                out[k] = "***"
-            else:
-                out[k] = _redacted(v)
-        return out
-    if isinstance(value, list):
-        return [_redacted(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_redacted(v) for v in value)
-    if isinstance(value, str):
-        return redact(value)
-    return value
-
-
 def _safe_args(args: dict) -> str:
     try:
         rendered = json.dumps(args, ensure_ascii=False)
@@ -1581,10 +1038,8 @@ def _new_log_path() -> Path:
 
 
 def _log(event: str, **kw) -> None:
-    RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **_redacted(kw)}
-    with RUN_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    rec = {"ts": eventlog.utc_now_iso(), "event": event, **_redacted(kw)}
+    eventlog.append_jsonl(RUN_LOG, rec)
     print(f"[self-improvement] {event}: " + " ".join(f"{k}={v}" for k, v in rec.items() if k != "event"))
 
 

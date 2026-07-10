@@ -33,26 +33,25 @@ import urllib.request
 from .config import LOG_DIR, PROJECT_ROOT, CDP_URL
 from .notify import send_alert
 from .poller.browser_lock import browser_lock
+from .settings import settings
+from .eventlog import get_logger
+
+_LOG = get_logger("health")
 
 ALERTS_FILE = PROJECT_ROOT / "state" / "alerts.json"
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-CREDIT_CURRENCY = os.environ.get("CREDIT_CURRENCY", "USD").upper()
-CREDIT_THRESHOLD = float(os.environ.get("CREDIT_THRESHOLD", os.environ.get("CREDIT_THRESHOLD_USD", "2")))
+DEEPSEEK_BASE_URL = settings().deepseek_base_url
+CREDIT_CURRENCY = settings().credit_currency
+CREDIT_THRESHOLD = settings().credit_threshold
 CREDIT_THRESHOLD_USD = CREDIT_THRESHOLD  # backward-compatible import for older code
-SERVER_HINT = os.environ.get("SERVER_SSH", "root@your-server-ip")
+SERVER_HINT = settings().server_ssh_hint
 
 # systemd units that must be active for the pipeline to work at all.
-SERVICES = tuple(
-    s.strip() for s in os.environ.get(
-        "HEALTHCHECK_SERVICES",
-        "orchestrator,poller,browser-host,litellm-proxy").split(",")
-    if s.strip()
-)
+SERVICES = settings().healthcheck_services
 
 # Dead-man's-switch: GET this URL at the end of every healthcheck run (e.g. a
 # healthchecks.io check). The monitoring service alerts when pings STOP —
 # covering the failure class nothing on this box can report: the box itself.
-PING_URL = os.environ.get("HEALTHCHECK_PING_URL", "")
+PING_URL = settings().healthcheck_ping_url
 
 # Sites whose logged-in session the apply agent depends on. Each probe opens
 # an account-only page in the REAL shared browser (so it sees the profile's
@@ -67,9 +66,9 @@ SITE_PROBES: dict[str, str] = {
     "kamernet.nl": "https://kamernet.nl/en/my-kamernet",
 }
 try:
-    SITE_PROBES.update(json.loads(os.environ.get("HEALTHCHECK_SITE_PROBES", "{}")))
+    SITE_PROBES.update(json.loads(settings().healthcheck_site_probes_json))
 except (json.JSONDecodeError, TypeError):
-    print("[health] ignoring malformed HEALTHCHECK_SITE_PROBES")
+    _LOG.info("ignoring malformed HEALTHCHECK_SITE_PROBES")
 
 
 def _load() -> dict:
@@ -90,7 +89,7 @@ def remaining_credit() -> tuple[float, str] | None:
     Returns ``(amount, currency)`` for the configured CREDIT_CURRENCY when
     present, otherwise the first balance returned by DeepSeek.
     """
-    key = os.environ.get("DEEPSEEK_API_KEY")
+    key = settings().deepseek_api_key
     if not key:
         return None
     try:
@@ -108,17 +107,17 @@ def remaining_credit() -> tuple[float, str] | None:
         )
         return float(selected["total_balance"]), str(selected["currency"]).upper()
     except Exception as e:
-        print(f"[health] credit check error: {e}")
+        _LOG.info(f"credit check error: {e}")
         return None
 
 
 def check_credits(state: dict) -> None:
     credit = remaining_credit()
     if credit is None:
-        print("[health] credit unavailable; skipping credit check")
+        _LOG.info("credit unavailable; skipping credit check")
         return
     remaining, currency = credit
-    print(f"[health] DeepSeek credit remaining: {currency} {remaining:.2f} (threshold {CREDIT_THRESHOLD:.2f})")
+    _LOG.info(f"DeepSeek credit remaining: {currency} {remaining:.2f} (threshold {CREDIT_THRESHOLD:.2f})")
     if remaining < CREDIT_THRESHOLD_USD:
         if not state.get("low_credit_sent"):
             send_alert(
@@ -139,7 +138,7 @@ def check_services(state: dict) -> None:
     # non-systemd host (local WSL dev) reads the bus failure as "everything
     # is down" and fires alerts for services that were never supposed to run.
     if not os.path.isdir("/run/systemd/system"):
-        print("[health] not a systemd host; skipping service checks")
+        _LOG.info("not a systemd host; skipping service checks")
         return
     for svc in SERVICES:
         try:
@@ -148,14 +147,14 @@ def check_services(state: dict) -> None:
                 timeout=15,
             ).returncode
         except FileNotFoundError:
-            print("[health] systemctl not available; skipping service checks")
+            _LOG.info("systemctl not available; skipping service checks")
             return
         except Exception as e:  # noqa: BLE001 - one check must not kill the run
-            print(f"[health] service check error for {svc}: {e}")
+            _LOG.info(f"service check error for {svc}: {e}")
             continue
         key = f"service_down_sent:{svc}"
         if rc != 0:
-            print(f"[health] service {svc} NOT active (rc={rc})")
+            _LOG.info(f"service {svc} NOT active (rc={rc})")
             if not state.get(key):
                 send_alert(
                     f"🚨 Stekkies bot: service {svc} is DOWN",
@@ -210,20 +209,20 @@ def check_site_logins(state: dict) -> None:
                             page.wait_for_timeout(1500)
                             results[name] = _logged_out_heuristic(page)
                         except Exception as e:  # noqa: BLE001 - per-site best effort
-                            print(f"[health] login probe error for {name}: {e}")
+                            _LOG.info(f"login probe error for {name}: {e}")
                         finally:
                             page.close()
                 finally:
                     browser.close()
     except TimeoutError:
-        print("[health] browser busy (apply in progress?); skipping login checks")
+        _LOG.info("browser busy (apply in progress?); skipping login checks")
         return
     except Exception as e:
-        print(f"[health] login checks error: {e}")
+        _LOG.info(f"login checks error: {e}")
         return
 
     for name, logged_out in results.items():
-        print(f"[health] {name} logged_out={logged_out}")
+        _LOG.info(f"{name} logged_out={logged_out}")
         key = f"logout_sent:{name}"
         if logged_out:
             if not state.get(key):
@@ -246,7 +245,7 @@ def check_site_logins(state: dict) -> None:
 
 # Alert when the last N self-improvement runs ALL failed (crash, fix_failed,
 # timeout, incomplete). Skips/dedup records are neither success nor failure.
-SELF_IMPROVEMENT_HEALTH_WINDOW = int(os.environ.get("SELF_IMPROVEMENT_HEALTH_WINDOW", "5"))
+SELF_IMPROVEMENT_HEALTH_WINDOW = settings().self_improvement_health_window
 _SI_FAILURE_ACTIONS = {"error", "fix_failed", "timeout", "incomplete"}
 
 
@@ -268,7 +267,7 @@ def check_self_improvement(state: dict) -> None:
         return
     recent = runs[-SELF_IMPROVEMENT_HEALTH_WINDOW:]
     all_failing = (len(recent) >= SELF_IMPROVEMENT_HEALTH_WINDOW and all(recent))
-    print(f"[health] self-improvement recent failures: "
+    _LOG.info(f"self-improvement recent failures: "
           f"{sum(recent)}/{len(recent)} (window {SELF_IMPROVEMENT_HEALTH_WINDOW})")
     if all_failing:
         if not state.get("si_failing_sent"):
@@ -288,7 +287,7 @@ def check_self_improvement(state: dict) -> None:
 
 # Weekly outcome digest, piggybacked on the healthcheck timer (30 min) so it
 # needs no extra systemd unit. 0 disables.
-DIGEST_INTERVAL_DAYS = float(os.environ.get("DIGEST_INTERVAL_DAYS", "7"))
+DIGEST_INTERVAL_DAYS = settings().digest_interval_days
 
 
 def maybe_send_digest(state: dict) -> None:
@@ -302,11 +301,11 @@ def maybe_send_digest(state: dict) -> None:
 
         body = build_digest(days=DIGEST_INTERVAL_DAYS)
     except Exception as e:  # noqa: BLE001 - digest must never fail the healthcheck
-        print(f"[health] digest build failed: {e}")
+        _LOG.info(f"digest build failed: {e}")
         return
     send_alert("📊 Stekkies bot: weekly digest", body)
     state["digest_sent_ts"] = time.time()
-    print("[health] weekly digest sent")
+    _LOG.info("weekly digest sent")
 
 
 def ping_deadman() -> None:
@@ -317,9 +316,9 @@ def ping_deadman() -> None:
         return
     try:
         urllib.request.urlopen(PING_URL, timeout=10)
-        print("[health] dead-man ping sent")
+        _LOG.info("dead-man ping sent")
     except Exception as e:  # noqa: BLE001 - the ping must never fail the run
-        print(f"[health] dead-man ping failed: {e}")
+        _LOG.info(f"dead-man ping failed: {e}")
 
 
 def main() -> int:
