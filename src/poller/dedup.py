@@ -2,9 +2,9 @@
 
 The same flat surfaces on pararius + huurwoningen + a makelaar site; keying on
 the tracking-stripped source URL collapses them to one apply. Seen keys are
-persisted in their own JSONL and ALSO cross-checked against the orchestrator's
-``state/processed_listings.jsonl`` so a listing already handled via the Stekkies
-path is never re-applied by the poller.
+persisted in their own JSONL and ALSO cross-checked against the shared SQLite
+store so a listing already handled via the Stekkies path is never re-applied by
+the poller.
 """
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from ..settings import settings
 from ..eventlog import utc_now_iso
 
 SEEN_FILE = PROJECT_ROOT / "state" / "poller_seen.jsonl"
-PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
 CLAIMS_FILE = PROJECT_ROOT / "state" / "listing_claims.jsonl"
 LOCK_FILE = PROJECT_ROOT / "state" / "dedup.lock"
 CLAIM_TTL_SECONDS = settings().listing_claim_ttl_seconds
@@ -208,29 +207,17 @@ def known_processed_urls() -> set[str]:
 
 
 def _processed_urls_canonical() -> set[str]:
-    """Canonical keys of every processed listing: UNION of the SQLite store
-    and the legacy JSONL while the store soaks (a record present in only one
-    must still dedup — sets make the overlap free). Raw keys are
-    canonicalized at read time so stored keys keep matching as
-    canonicalization rules evolve."""
-    urls: set[str] = set()
+    """Canonical keys of every processed listing in the SQLite store.
+
+    Raw keys are canonicalized at read time so stored keys keep matching as
+    canonicalization rules evolve.
+    """
     try:
         from .. import store  # late import: store imports models imports this module
 
-        urls |= {canonical_url(k) for k in store.processed_keys()}
+        return {canonical_url(k) for k in store.processed_keys()}
     except Exception:
-        pass
-    if PROCESSED_FILE.exists():
-        for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            for field in ("source_url", "stekkies_url", "resolved_url"):
-                value = rec.get(field)
-                if value:
-                    urls.add(canonical_url(value))
-    return urls
+        return set()
 
 
 class SeenStore:
@@ -278,7 +265,7 @@ class SeenStore:
         """Reserve a URL before queueing/applying it.
 
         This closes the long window where an apply is in progress but the URL is
-        not yet terminal in ``processed_listings.jsonl``. Reservations are
+        not yet terminal in the processed-listing store. Reservations are
         process-local immediately and persisted as short-lived claims so the
         separate orchestrator process can also skip the same source URL.
         """

@@ -152,8 +152,7 @@ SiteConfig:
 Key = the **canonical source listing URL**, stripped of tracking/query cruft
 (utm_*, ref, session params → normalize to scheme+host+path, drop trailing
 slash). The same flat on pararius + huurwoningen + a makelaar site dedupes to
-one apply. Persist seen keys alongside the existing
-`state/processed_listings.jsonl`.
+one apply. Persist processed-listing keys in the shared `state/store.db`.
 
 ### Block / challenge detection
 

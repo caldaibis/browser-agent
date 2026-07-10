@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from src import store as state_store
+from src.models import ProcessedRecord
 from src.poller import dedup
 
 
@@ -49,15 +50,13 @@ class TestCanonicalUrlHuurwoningen(unittest.TestCase):
 
 
 class TestSeenStore(unittest.TestCase):
-    def test_is_new_refreshes_processed_file(self):
+    def test_is_new_refreshes_processed_store(self):
         with tempfile.TemporaryDirectory() as td:
             seen = Path(td) / "seen.jsonl"
-            processed = Path(td) / "processed.jsonl"
             claims = Path(td) / "claims.jsonl"
             lock = Path(td) / "dedup.lock"
             with (
                 patch.object(dedup, "SEEN_FILE", seen),
-                patch.object(dedup, "PROCESSED_FILE", processed),
                 patch.object(dedup, "CLAIMS_FILE", claims),
                 patch.object(dedup, "LOCK_FILE", lock),
             ):
@@ -65,21 +64,18 @@ class TestSeenStore(unittest.TestCase):
                 url = "https://www.huurwoningen.nl/huren/utrecht/abc/?utm_source=mail"
                 self.assertTrue(store.is_new(url))
 
-                processed.write_text(
-                    json.dumps({"source_url": "https://www.huurwoningen.nl/huren/utrecht/abc/"}) + "\n",
-                    encoding="utf-8",
-                )
+                state_store.record_processed(ProcessedRecord.from_json({
+                    "source_url": "https://www.huurwoningen.nl/huren/utrecht/abc/",
+                }))
                 self.assertFalse(store.is_new(url))
 
     def test_reserve_blocks_duplicate_until_release(self):
         with tempfile.TemporaryDirectory() as td:
             seen = Path(td) / "seen.jsonl"
-            processed = Path(td) / "processed.jsonl"
             claims = Path(td) / "claims.jsonl"
             lock = Path(td) / "dedup.lock"
             with (
                 patch.object(dedup, "SEEN_FILE", seen),
-                patch.object(dedup, "PROCESSED_FILE", processed),
                 patch.object(dedup, "CLAIMS_FILE", claims),
                 patch.object(dedup, "LOCK_FILE", lock),
             ):
@@ -102,12 +98,10 @@ class TestSeenStore(unittest.TestCase):
     def test_release_count_tracks_repeated_non_terminal_failures(self):
         with tempfile.TemporaryDirectory() as td:
             seen = Path(td) / "seen.jsonl"
-            processed = Path(td) / "processed.jsonl"
             claims = Path(td) / "claims.jsonl"
             lock = Path(td) / "dedup.lock"
             with (
                 patch.object(dedup, "SEEN_FILE", seen),
-                patch.object(dedup, "PROCESSED_FILE", processed),
                 patch.object(dedup, "CLAIMS_FILE", claims),
                 patch.object(dedup, "LOCK_FILE", lock),
             ):

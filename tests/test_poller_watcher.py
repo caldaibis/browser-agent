@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from src import store
 from src.poller import dedup, watcher
 from src.listing_context import ListingContext
 from src.poller.models import RawListing, SiteConfig
@@ -26,10 +27,8 @@ class _FakeResult:
 def _worker_env(td: str, apply_mock):
     patches = [
         patch.object(dedup, "SEEN_FILE", Path(td) / "seen.jsonl"),
-        patch.object(dedup, "PROCESSED_FILE", Path(td) / "processed.jsonl"),
         patch.object(dedup, "CLAIMS_FILE", Path(td) / "claims.jsonl"),
         patch.object(dedup, "LOCK_FILE", Path(td) / "dedup.lock"),
-        patch.object(watcher, "PROCESSED_FILE", Path(td) / "processed.jsonl"),
         patch.object(watcher, "priority_pending", lambda: False),
         patch.object(watcher, "_summary",
                      return_value={"status": "incomplete", "message": "x"}),
@@ -90,8 +89,7 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(calls[0].get("yield_to_priority"))
             self.assertFalse(seen.is_new(listing.source_url))
             self.assertEqual(dedup.release_count(listing.source_url), 0)
-            processed = (Path(td) / "processed.jsonl").read_text(encoding="utf-8")
-            self.assertIn('"incomplete"', processed)
+            self.assertEqual(store.processed_records()[0].outcome, "incomplete")
 
     async def test_yielded_outcome_requeues_without_consuming_an_attempt(self):
         """A run aborted to hand the browser to a priority mail apply is not a
@@ -115,9 +113,9 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(calls), 2)
             self.assertFalse(seen.is_new(listing.source_url))
-            processed = (Path(td) / "processed.jsonl").read_text(encoding="utf-8")
-            self.assertIn('"submitted"', processed)
-            self.assertNotIn('"yielded"', processed)
+            outcomes = [rec.outcome for rec in store.processed_records()]
+            self.assertIn("submitted", outcomes)
+            self.assertNotIn("yielded", outcomes)
 
     async def test_exception_during_apply_consumes_the_listing(self):
         """A crash mid-apply may already have spent real agent turns — same
@@ -134,8 +132,7 @@ class TestApplyWorkerNoRetries(unittest.IsolatedAsyncioTestCase):
             await _run_worker_until_drained(seen, queue)
 
             self.assertFalse(seen.is_new(listing.source_url))
-            processed = (Path(td) / "processed.jsonl").read_text(encoding="utf-8")
-            self.assertIn('"error"', processed)
+            self.assertEqual(store.processed_records()[0].outcome, "error")
 
 
 class TestEnrich(unittest.IsolatedAsyncioTestCase):

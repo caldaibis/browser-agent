@@ -8,8 +8,8 @@ Each run cost real tokens and none knew the previous ones existed.
 
 This module gives every failure a deterministic *fingerprint* (the
 `classify_failure` signature from `self_improvement_harness`, scoped to the
-listing's domain only when the failure class is site-specific) and keeps an
-append-only event log in `state/self_improvement/incidents.jsonl`:
+listing's domain only when the failure class is site-specific) and keeps the
+events in the shared SQLite state store:
 
 - `occurrence` events: a failure matched this fingerprint (always recorded,
   even when the run is skipped — prevented spend must stay observable).
@@ -26,16 +26,13 @@ self-improvement path, let alone the apply pipeline above it.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 from . import eventlog
-from .self_improvement_harness import STATE_DIR, classify_failure, redact_value
+from .self_improvement_harness import classify_failure, redact_value
 from .settings import settings
-
-INCIDENT_LOG = STATE_DIR / "incidents.jsonl"
 
 SELF_IMPROVEMENT_DEDUP_HOURS = settings().self_improvement_dedup_hours
 
@@ -238,9 +235,6 @@ def _append(payload: dict[str, Any]) -> None:
     try:
         rec = {"ts": eventlog.utc_now_iso(),
                **redact_value(payload, max_string=1000)}
-        # Dual-write during the store rollout (see src/store.py); the JSONL
-        # append keeps a rollback to a pre-store build lossless.
-        eventlog.append_jsonl(INCIDENT_LOG, rec)
         from . import store  # late import: store -> models -> dedup, keep leaf-ish
 
         store.record_incident(rec)
@@ -249,28 +243,11 @@ def _append(payload: dict[str, Any]) -> None:
 
 
 def _read() -> list[dict[str, Any]]:
-    # JSONL stays the primary read path while the store soaks (dual-write
-    # would make a merged read double-count attempts); the store covers
-    # fresh boxes where the JSONL no longer exists.
-    if not INCIDENT_LOG.exists():
-        try:
-            from . import store
-
-            return store.incidents()
-        except Exception:
-            return []
     try:
-        with INCIDENT_LOG.open(encoding="utf-8") as f:
-            out = []
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(rec, dict):
-                    out.append(rec)
-            return out
-    except OSError:
+        from . import store
+
+        return store.incidents()
+    except Exception:
         return []
 
 

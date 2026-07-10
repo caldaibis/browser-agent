@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import patch
 
-from src import incident_store, self_improvement_agent as sia
+from src import incident_store, self_improvement_agent as sia, store
 
 
 class TestPollerFingerprint(unittest.TestCase):
@@ -19,16 +17,6 @@ class TestPollerFingerprint(unittest.TestCase):
 
 
 class TestImprovePollerZeroYield(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.log = Path(self.tmp.name) / "incidents.jsonl"
-        self._p = patch.object(incident_store, "INCIDENT_LOG", self.log)
-        self._p.start()
-
-    def tearDown(self):
-        self._p.stop()
-        self.tmp.cleanup()
-
     def test_disabled_returns_none(self):
         with patch.object(sia, "SELF_IMPROVEMENT_ENABLED", False):
             self.assertIsNone(sia.improve_poller_zero_yield(site_name="mijndak.nl"))
@@ -69,11 +57,9 @@ class TestImprovePollerZeroYield(unittest.TestCase):
         fp = incident_store.fingerprint_poller_zero_yield("mijndak.nl")
         old = (datetime.now() - timedelta(
             hours=incident_store.SELF_IMPROVEMENT_DEDUP_HOURS + 2)).isoformat(timespec="seconds")
-        import json
-        with self.log.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": old, "event": "attempt", "fingerprint": fp.key,
-                                "action": "fix_failed", "root_cause": "regex still off",
-                                "summary": "prev"}) + "\n")
+        store.record_incident({"ts": old, "event": "attempt", "fingerprint": fp.key,
+                               "action": "fix_failed", "root_cause": "regex still off",
+                               "summary": "prev"})
         captured = {}
 
         def _fake_run(ctx):
@@ -98,9 +84,7 @@ class TestNonResultReturnGuard(unittest.TestCase):
         with patch.object(sia, "SELF_IMPROVEMENT_ENABLED", True), \
              patch.object(sia, "run_self_improvement", return_value={"action": "x"}), \
              patch.object(sia, "_log"), \
-             patch.object(sia, "send_alert") as send_alert, \
-             patch.object(sia.incident_store, "INCIDENT_LOG",
-                          Path(tempfile.mkdtemp()) / "i.jsonl"):
+             patch.object(sia, "send_alert") as send_alert:
             rr = sia.improve_poller_zero_yield(site_name="mijndak.nl", streak=120)
         self.assertEqual(rr.action, "error")
         send_alert.assert_not_called()  # a transient skew must not alarm the user

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from src import digest, incident_store
+from src import digest
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -25,14 +25,12 @@ class TestDigest(unittest.TestCase):
         self.si = root / "self_improvement.jsonl"
         self.traj = root / "trajectories"
         self.patches = root / "pending_patches"
-        self.incidents = root / "incidents.jsonl"
         self.gates = root / "known_gates.json"
         self._patches = [
             patch.object(digest, "MAIL_SUMMARY_LOG", self.mail),
             patch.object(digest, "SELF_IMPROVEMENT_LOG", self.si),
             patch.object(digest, "TRAJECTORY_DIR", self.traj),
             patch.object(digest, "PENDING_PATCH_DIR", self.patches),
-            patch.object(incident_store, "INCIDENT_LOG", self.incidents),
             patch.object(digest.known_gates, "GATES_PATH", self.gates),
         ]
         for p in self._patches:

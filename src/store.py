@@ -14,14 +14,8 @@ exactly how the duplicate REBO submission of 02-07-2026 happened. Here the
 key set comes from `models.ProcessedRecord.keys()` once, and membership is
 one indexed query.
 
-Rollout safety:
-- **One-time migration**: on first open (empty table + legacy JSONL
-  present) the existing records are imported.
-- **Dual-write**: writers append the legacy JSONL too (see callers), so
-  rolling back to a pre-store build loses nothing. Drop the JSONL writes
-  once a release has soaked.
-- **Fail-open reads at call sites**: callers treat store errors like a
-  missing file (empty set), same as the JSONL behavior before.
+SQLite is the authoritative store. Processed-listing and incident state is
+read and written only here; append-only operational logs remain files.
 
 Keys are stored RAW; readers canonicalize at query time — canonicalization
 rules still evolve (e.g. the huurwoningen.nl collapse), and re-deriving on
@@ -31,20 +25,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .config import PROJECT_ROOT
-from .eventlog import get_logger, utc_now_iso
+from .eventlog import utc_now_iso
 from .models import ProcessedRecord
 
 DB_PATH = PROJECT_ROOT / "state" / "store.db"
-LEGACY_PROCESSED = PROJECT_ROOT / "state" / "processed_listings.jsonl"
-LEGACY_INCIDENTS = PROJECT_ROOT / "state" / "self_improvement" / "incidents.jsonl"
-
-_LOG = get_logger("store")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS processed_listings (
@@ -81,7 +71,6 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
-    _migrate_once(conn)
     return conn
 
 
@@ -97,41 +86,14 @@ def _conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _migrate_once(conn: sqlite3.Connection) -> None:
-    """Import the legacy JSONL files the first time the store comes up."""
-    if conn.execute("SELECT 1 FROM processed_listings LIMIT 1").fetchone() is None \
-            and LEGACY_PROCESSED.exists():
-        n = 0
-        for rec in _iter_jsonl(LEGACY_PROCESSED):
-            _insert_processed(conn, ProcessedRecord.from_json(rec))
-            n += 1
-        conn.commit()
-        _LOG.info(f"migrated {n} processed listings from {LEGACY_PROCESSED.name}")
-    if conn.execute("SELECT 1 FROM incidents LIMIT 1").fetchone() is None \
-            and LEGACY_INCIDENTS.exists():
-        n = 0
-        for rec in _iter_jsonl(LEGACY_INCIDENTS):
-            _insert_incident(conn, rec)
-            n += 1
-        conn.commit()
-        _LOG.info(f"migrated {n} incident events from {LEGACY_INCIDENTS.name}")
-
-
-def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(rec, dict):
-            yield rec
-
-
 # ---------------------------------------------------------------- processed --
 def _insert_processed(conn: sqlite3.Connection, rec: ProcessedRecord) -> None:
+    ts = rec.ts or utc_now_iso()
+    payload = rec.to_json()
+    payload.setdefault("ts", ts)
     cur = conn.execute(
         "INSERT INTO processed_listings (ts, payload) VALUES (?, ?)",
-        (rec.ts or utc_now_iso(), json.dumps(rec.to_json(), ensure_ascii=False)))
+        (ts, json.dumps(payload, ensure_ascii=False)))
     rowid = cur.lastrowid
     for url in (rec.stekkies_url, rec.source_url, rec.resolved_url):
         if url:
@@ -159,6 +121,17 @@ def processed_records(limit: int | None = None) -> list[ProcessedRecord]:
     with _conn() as conn:
         return [ProcessedRecord.from_json(json.loads(row[0]))
                 for row in conn.execute(sql)]
+
+
+def delete_processed(key: str) -> int:
+    """Forget records associated with an exact raw URL key for manual retry."""
+    with _conn() as conn:
+        ids = [row[0] for row in conn.execute(
+            "SELECT processed_id FROM listing_keys WHERE key = ?", (key,))]
+        for processed_id in ids:
+            conn.execute("DELETE FROM listing_keys WHERE processed_id = ?", (processed_id,))
+            conn.execute("DELETE FROM processed_listings WHERE id = ?", (processed_id,))
+        return len(ids)
 
 
 # ---------------------------------------------------------------- incidents --

@@ -104,7 +104,7 @@ def log_event(path: Path, event: str, *, echo: str | None = None,
 
 def record(path: Path, **fields: Any) -> dict[str, Any]:
     """Stamp + redact + append a record with no `event` discriminator
-    (mail_summary.jsonl / processed_listings.jsonl shapes)."""
+    (for example, the mail_summary.jsonl shape)."""
     rec = {"ts": utc_now_iso(), **_redacted_fields(fields)}
     return append_jsonl(path, rec)
 

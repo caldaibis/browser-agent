@@ -15,7 +15,7 @@ poller-triggered run had no way to know a Stekkies-triggered run had already
 succeeded under a different URL. Fixed two ways: (1) `apply.py`/
 `browser_agent.py` now capture `AgentResult.resolved_url` — the actual
 external destination an apply run reaches mid-flight — and persist it as an
-extra dedup key in `processed_listings.jsonl` (`orchestrator.py`,
+extra dedup key in `state/store.db` (`orchestrator.py`,
 `poller/watcher.py`); `dedup.known_processed_urls()` reads all of
 `source_url`/`stekkies_url`/`resolved_url` across both the poller's and the
 orchestrator's records. (2) since an aggregator's real destination can't be

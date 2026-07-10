@@ -8,7 +8,7 @@ per week from data that already exists:
 - listing outcomes by status and trigger  (logs/mail_summary.jsonl)
 - guard firings in the apply loop         (logs/trajectories/*.jsonl)
 - self-improvement actions + landing rate (logs/self_improvement.jsonl)
-- incident fingerprints and dedup savings (state/self_improvement/incidents.jsonl)
+- incident fingerprints and dedup savings (state/store.db)
 - unlanded verified fixes                 (state/pending_patches/*.patch)
 - recorded known gates                    (state/known_gates.json)
 

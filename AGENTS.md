@@ -64,7 +64,7 @@ form, uploads docs, submits).
   `src/models.py` — typed `Listing`/`ProcessedRecord` with the ONE
   `dedup_keys()`/`keys()` identity derivation; `src/store.py` — SQLite
   state store (`state/store.db`, WAL) for processed listings + dedup keys +
-  incidents, dual-written with the legacy JSONL while it soaks;
+  incidents, authoritative for both reads and writes;
   `src/eventlog.py` — UTC timestamps, shared JSONL append + activity log,
   redaction-before-write (`src/redaction.py` holds the one `redact()`);
   `src/self_improvement/` — the SI agent's split-out prompts / worktree /
@@ -88,7 +88,7 @@ form, uploads docs, submits).
   deterministic pre-filter (price/city/surface/room), `judge.py` is the cheap-LLM
   judgment (distance-to-centre + roommates, fail-open), `dedup.py` keys on the
   canonical (tracking-stripped) source URL and cross-checks
-  `processed_listings.jsonl` (both `source_url` and `resolved_url` — the
+  `state/store.db` (both `source_url` and `resolved_url` — the
   latter is the real external destination an apply run discovered mid-flight,
   e.g. after in-page redirect dialogs on an aggregator page; needed because
   the poller discovers a listing at whatever URL it found it while the
@@ -153,7 +153,7 @@ form, uploads docs, submits).
   hours). Every failure gets a deterministic fingerprint
   (`classify_failure` signature, domain-scoped for site-specific classes,
   global for infrastructure classes so cross-listing infra failures collapse
-  into one incident); `state/self_improvement/incidents.jsonl` records every
+  into one incident); `state/store.db` records every
   occurrence and attempt. `improve_after_apply` skips the run when the
   fingerprint already had one within `SELF_IMPROVEMENT_DEDUP_HOURS` (24h
   default — the occurrence is still recorded, so prevented spend stays

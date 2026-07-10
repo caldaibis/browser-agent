@@ -26,11 +26,10 @@ from fastapi.templating import Jinja2Templates
 
 from ..config import PROJECT_ROOT, LOG_DIR
 from ..settings import settings
-from .. import push_notify
+from .. import push_notify, store
 from . import costs, data, funnel, healthinfo, si, trajectories
 
 BASE_DIR = Path(__file__).resolve().parent
-PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
 APPLY_LOCK = PROJECT_ROOT / "state" / "apply.lock"
 
 @asynccontextmanager
@@ -367,10 +366,7 @@ def action_retry(request: Request, url: str = ""):
         return _action(request, False, "invalid url")
     # Remove from dedup so the listing is re-attempted.
     try:
-        if PROCESSED_FILE.exists():
-            kept = [ln for ln in PROCESSED_FILE.read_text(encoding="utf-8").splitlines()
-                    if url not in ln]
-            PROCESSED_FILE.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        store.delete_processed(url)
     except Exception as e:
         return _action(request, False, f"dedup edit failed: {e}")
     # Serialize with a lock so we never share the browser with the live watcher's apply.

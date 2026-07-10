@@ -85,8 +85,8 @@ class Listing:
 
 @dataclass(frozen=True)
 class ProcessedRecord:
-    """One line of processed_listings.jsonl / row of the store's
-    processed_listings table: a listing some path finished handling."""
+    """One row of the store's processed_listings table: a listing some path
+    finished handling."""
     ts: str = ""
     trigger: str = ""
     msg_id: str = ""

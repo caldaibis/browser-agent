@@ -15,7 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src import orchestrator
+from src import orchestrator, store
+from src.models import ProcessedRecord
 
 FRONTEND_URL = ("https://www.huurwoningen.nl/frontend/listing/"
                 "8a2c2540-5928-5d33-8e48-f976e65692d0/?alt=x&utm_medium=email")
@@ -26,11 +27,8 @@ RESOLVED_URL = ("https://www.eenhoornmanagement.nl/nl/woning/utrecht/"
 
 class TestPreflightDuplicateGuard(unittest.TestCase):
     def _keys_from(self, record: dict) -> set[str]:
-        with tempfile.TemporaryDirectory() as td:
-            processed = Path(td) / "processed.jsonl"
-            processed.write_text(json.dumps(record) + "\n", encoding="utf-8")
-            with patch.object(orchestrator, "PROCESSED_FILE", processed):
-                return orchestrator._processed_keys()
+        store.record_processed(ProcessedRecord.from_json(record))
+        return orchestrator._processed_keys()
 
     def test_resolved_url_is_a_preflight_key(self):
         """A mail pointing straight at the real landlord site must be caught

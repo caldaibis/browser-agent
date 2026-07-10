@@ -1,25 +1,15 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import patch
 
-from src import incident_store
+from src import incident_store, store
 
 
 class _TempLog(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.log = Path(self.tmp.name) / "incidents.jsonl"
-        self._patch = patch.object(incident_store, "INCIDENT_LOG", self.log)
-        self._patch.start()
-
-    def tearDown(self):
-        self._patch.stop()
-        self.tmp.cleanup()
+    pass
 
 
 class TestFingerprinting(_TempLog):
@@ -143,7 +133,7 @@ class TestAttemptHistory(_TempLog):
             fp, action="noop", summary="the password hunter2 leaked into a summary")
         # value-level redaction is the dashboard redact()'s job; key-level
         # secrets must be stripped by redact_value — verify the plumbing runs.
-        text = self.log.read_text(encoding="utf-8")
+        text = json.dumps(store.incidents())
         self.assertIn("attempt", text)
 
 
@@ -181,12 +171,11 @@ class TestImproveAfterApplyIntegration(_TempLog):
         old_ts = (datetime.now() - timedelta(
             hours=incident_store.SELF_IMPROVEMENT_DEDUP_HOURS + 2)
         ).isoformat(timespec="seconds")
-        with self.log.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": old_ts, "event": "attempt", "fingerprint": fp.key,
-                "action": "fix_failed", "root_cause": "known cause",
-                "summary": "old try", "code_changed": True, "deployed": False,
-            }) + "\n")
+        store.record_incident({
+            "ts": old_ts, "event": "attempt", "fingerprint": fp.key,
+            "action": "fix_failed", "root_cause": "known cause",
+            "summary": "old try", "code_changed": True, "deployed": False,
+        })
         fake = self_improvement_agent.SelfImprovementResult(
             action="noop", summary="diagnosed")
         with patch.object(self_improvement_agent, "run_self_improvement",

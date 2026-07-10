@@ -1,7 +1,6 @@
-"""SQLite state store + typed records: migration, dedup keys, incidents."""
+"""SQLite state store + typed records: dedup keys, deletion, incidents."""
 from __future__ import annotations
 
-import json
 import unittest
 
 from src import store
@@ -63,6 +62,7 @@ class TestStore(unittest.TestCase):
         self.assertIn("https://landlord.nl/woning/1", keys)
         records = store.processed_records()
         self.assertEqual(records[0].outcome, "submitted")
+        self.assertTrue(records[0].ts)
 
     def test_duplicate_keys_do_not_error(self):
         rec = ProcessedRecord.from_json({"source_url": "https://example.nl/1"})
@@ -70,22 +70,17 @@ class TestStore(unittest.TestCase):
         store.record_processed(rec)  # INSERT OR IGNORE on listing_keys
         self.assertEqual(len(store.processed_records()), 2)
 
-    def test_one_time_migration_imports_legacy_jsonl(self):
-        store.LEGACY_PROCESSED.write_text(
-            json.dumps({"ts": "2026-07-01T10:00:00",
-                        "source_url": "https://old.example.nl/1",
-                        "outcome": "submitted"}) + "\n",
-            encoding="utf-8")
-        store.LEGACY_INCIDENTS.parent.mkdir(parents=True, exist_ok=True)
-        store.LEGACY_INCIDENTS.write_text(
-            json.dumps({"ts": "2026-07-01T10:00:00", "event": "occurrence",
-                        "fingerprint": "browser-lock-contention"}) + "\n",
-            encoding="utf-8")
-        self.assertIn("https://old.example.nl/1", store.processed_keys())
-        self.assertEqual(
-            store.incidents("browser-lock-contention")[0]["event"], "occurrence")
-        # Re-open: migration must not double-import.
-        self.assertEqual(len(store.processed_records()), 1)
+    def test_delete_processed_removes_record_and_all_keys(self):
+        rec = ProcessedRecord.from_json({
+            "source_url": "https://example.nl/1",
+            "stekkies_url": "https://stekkies.com/redirect/abc",
+            "resolved_url": "https://landlord.nl/1",
+        })
+        store.record_processed(rec)
+        self.assertEqual(store.delete_processed(rec.stekkies_url), 1)
+        self.assertEqual(store.processed_records(), [])
+        self.assertEqual(store.processed_keys(), set())
+        self.assertEqual(store.delete_processed(rec.stekkies_url), 0)
 
     def test_incidents_filter_by_fingerprint(self):
         store.record_incident({"event": "occurrence", "fingerprint": "a"})

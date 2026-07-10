@@ -11,7 +11,7 @@ from dataclasses import asdict
 
 from . import eventlog, store
 from .apply_priority import priority_claim
-from .config import LOG_DIR, PROJECT_ROOT
+from .config import LOG_DIR
 from .models import Listing, ProcessedRecord
 from .stekkies import extract_listing
 from .apply import apply
@@ -38,7 +38,6 @@ def _alert_no_credit() -> None:
     )
 
 
-PROCESSED_FILE = PROJECT_ROOT / "state" / "processed_listings.jsonl"
 ACTIVITY_LOG = LOG_DIR / "activity.log"
 MAIL_SUMMARY_LOG = LOG_DIR / "mail_summary.jsonl"
 
@@ -62,30 +61,18 @@ def _processed_keys() -> set[str]:
     at the real site sails past this pre-flight check). Key derivation lives
     in models.ProcessedRecord.keys(); membership in the SQLite store."""
     keys: set[str] = set()
-    # UNION of store + legacy JSONL while the store soaks: a record present
-    # in only one of them (rollback build, failed store write) must still
-    # dedup. Sets make the overlap free; drop the JSONL scan with dual-write.
     try:
         for value in store.processed_keys():
             keys.add(value)
             keys.add(canonical_url(value))
     except Exception as e:
         _log("store_read_failed", error=f"{type(e).__name__}: {e}")
-    if PROCESSED_FILE.exists():
-        for line in PROCESSED_FILE.read_text(encoding="utf-8").splitlines():
-            try:
-                keys |= ProcessedRecord.from_json(json.loads(line)).keys()
-            except (json.JSONDecodeError, ValueError):
-                continue
     return keys
 
 
 def _remember_processed(**kw) -> None:
-    # Dual-write during the store rollout: SQLite is the queryable copy, the
-    # JSONL append keeps a rollback to a pre-store build lossless.
-    rec = eventlog.record(PROCESSED_FILE, **kw)
     try:
-        store.record_processed(ProcessedRecord.from_json(rec))
+        store.record_processed(ProcessedRecord.from_json(kw))
     except Exception as e:
         _log("store_write_failed", error=f"{type(e).__name__}: {e}")
 

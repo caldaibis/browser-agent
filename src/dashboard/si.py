@@ -7,7 +7,7 @@ disk?) is exactly what the maintainer needs to steer it. This module
 aggregates the SI layer's existing on-disk state for `/self-improvement`:
 
 - runs        logs/self_improvement.jsonl (+ per-run logs/self_improvement/*.log for cost)
-- incidents   state/self_improvement/incidents.jsonl (via incident_store)
+- incidents   state/store.db (via incident_store)
 - gates       state/known_gates.json (via known_gates)
 - patches     state/pending_patches/*.patch
 - guards      logs/trajectories/*.jsonl (via digest._guard_stats)

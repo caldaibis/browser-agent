@@ -38,7 +38,7 @@ from ..listing_context import fetch_context
 from ..notify import send_alert, send_alert_dedup, send_status_email
 from . import filters, judge
 from .browser_lock import browser_lock
-from .dedup import PROCESSED_FILE, SeenStore
+from .dedup import SeenStore
 from .fetch import Blocked, fetch
 from .models import RawListing, SiteConfig
 from .parsers import parse_jsonld
@@ -151,10 +151,8 @@ def _remember_processed(listing: RawListing, outcome: str, resolved_url: str = "
     # URL. See poller.dedup.known_processed_urls.
     if resolved_url:
         rec["resolved_url"] = resolved_url
-    # Dual-write during the store rollout (see src/store.py).
-    written = eventlog.record(PROCESSED_FILE, **rec)
     try:
-        store.record_processed(ProcessedRecord.from_json(written))
+        store.record_processed(ProcessedRecord.from_json(rec))
     except Exception as e:
         _log("store_write_failed", error=f"{type(e).__name__}: {e}")
 

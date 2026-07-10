@@ -12,7 +12,7 @@ context. **Update the Status column as items land.**
 | R2 | Rust-built type checker in `just check` | done (08-07-2026: ty 0.0.57 gates `src/`; ruff widened to F,B,UP,ASYNC,SIM) |
 | R3 | Central typed settings module | done (08-07-2026: `src/settings.py`, all 60+ knobs; `just settings` prints resolved values; APPLICANT_* stays in applicant_profile.py by design) |
 | R4 | Structured logging + shared event log + UTC timestamps | done (08-07-2026: `src/eventlog.py` + `src/redaction.py`; all persisted stamps UTC-aware; readers accept both forms via `eventlog.parse_ts`; service prints → shared logger) |
-| R5 | SQLite state store | done (08-07-2026: `src/store.py` — processed listings + dedup keys + incidents; one-time JSONL migration; dual-write + union reads while soaking, flip reads to store-only in a later session; mail events deliberately left as a log file) |
+| R5 | SQLite state store | done (08-07-2026: `src/store.py` — processed listings + dedup keys + incidents; initial JSONL data migrated; SQLite-only reads/writes since 10-07-2026; mail events deliberately remain a log file) |
 | R6 | Split the two monoliths; prompts out of code | done (08-07-2026: apply prompt → `src/prompts/` (byte-identical output); SI agent 1607→1065 lines + `src/self_improvement/{prompts,worktree,cost,browser_tools,util}.py`; browser_agent tool schemas → `src/agent_tools.py`. Full package-split of browser_agent's loop deferred — tests patch its module globals; do it with a test refactor) |
 | R7a | pytest as the one test runner + coverage ratchet | done (08-07-2026: pytest-cov, fail_under=55, floor noted in pyproject) |
 | R7b | CI/deploy hardening (SHA pinning, host-key pinning, rollback) | done (08-07-2026: actions SHA-pinned; deploy uses `VPS_HOST_KEY` secret when set (loud warning + keyscan fallback until the user adds it); smoke check (units active + dashboard HTTP 200 on :8000) with automatic `git reset` rollback + restart on failure) |
@@ -81,10 +81,9 @@ caches) compensates for the lack of a queryable store.
 **Fix.** `src/store.py`: one SQLite DB `state/store.db` (WAL mode,
 `busy_timeout`), schema: `processed_listings` (rowid, ts, json payload) +
 `listing_keys` (key TEXT PRIMARY KEY, canonical, listing rowid) for O(1)
-multi-key dedup; `incidents`; `mail_events`. Transparent one-time migration:
-on first open, import existing JSONL files (idempotent, keyed). **Writers
-dual-write** (SQLite + legacy JSONL append) for one release so a rollback
-loses nothing; readers prefer SQLite. Boundary rule: *state* (dedup keys,
+multi-key dedup; `incidents`; `mail_events`. The initial deployment imported
+the existing JSONL state. After a brief dual-write rollout, SQLite became the
+sole read/write path on 10-07-2026. Boundary rule: *state* (dedup keys,
 processed records, incidents) → SQLite; *logs* (trajectories, poller.jsonl,
 transcripts) stay append-only files — logs are logs.
 
@@ -141,11 +140,9 @@ agent context while keeping the crown jewels durable.
 
 ## Follow-ups queued for later sessions
 
-- **Flip store reads to SQLite-only + drop dual-writes** after a soak
-  release (store first deployed 10-07-2026 — give it days of real traffic):
-  `orchestrator._processed_keys` / `dedup._processed_urls_canonical` drop
-  the JSONL union; `incident_store._read` prefers the store; then retire
-  the JSONL appends.
+- ~~Flip store reads to SQLite-only + drop dual-writes~~ — done 10-07-2026:
+  processed records and incidents now use `state/store.db` exclusively;
+  retry deletion also removes the corresponding SQLite record and keys.
 - ~~Add the `VPS_HOST_KEY` GitHub secret~~ — done 10-07-2026 (scanned key
   verified against the locally-trusted known_hosts entry before pinning).
 - **R7c rename** (`src/` → `stekkies/`) per the recipe above, ideally with a
@@ -168,3 +165,5 @@ agent context while keeping the crown jewels durable.
 - 10-07-2026: everything committed/pushed/deployed (store migrated 184
   processed listings + 30 incidents on the VPS). Follow-ups: VPS_HOST_KEY
   pinned, browser_agent package split landed, playbooks typed, ratchet → 58.
+- 10-07-2026: ended the store soak early by owner decision; removed legacy
+  JSONL state reads/writes and made SQLite authoritative.
