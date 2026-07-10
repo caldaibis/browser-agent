@@ -317,22 +317,23 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     )
 
 
-_settings: Settings | None = None
-
-
 def settings() -> Settings:
-    """The process-wide Settings, loaded once from os.environ on first use."""
-    global _settings
-    if _settings is None:
-        _settings = load_settings()
-    return _settings
+    """The current Settings, read fresh from os.environ.
+
+    Deliberately NOT cached for the process lifetime: call-time reads (the
+    API keys especially) must see env changes the way the old inline
+    `os.environ.get(...)` calls did — tests patch os.environ around a call
+    (verified: caching broke 9 tests on CI, masked locally by a real key in
+    the dev env), and loading is microseconds. Module-level constants bind
+    once at import either way.
+    """
+    return load_settings()
 
 
 def reload_settings() -> Settings:
-    """Re-read os.environ (test hook; production processes restart instead)."""
-    global _settings
-    _settings = load_settings()
-    return _settings
+    """Kept for symmetry with earlier revisions; settings() is already
+    read-through, so this is just an explicit re-read."""
+    return load_settings()
 
 
 _REDACTED_FIELDS = {"deepseek_api_key"}
