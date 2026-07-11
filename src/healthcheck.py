@@ -33,9 +33,9 @@ from datetime import datetime
 
 from . import eventlog, session_keeper
 from .config import LOG_DIR, PROJECT_ROOT, CDP_URL
+from .agent_browser_runtime import startup_check
 from .notify import send_alert
 from .browser_lock import browser_lock
-from .playwright_mcp_runtime import initialize_check, runtime_check
 from .settings import settings
 from .eventlog import get_logger
 
@@ -173,21 +173,19 @@ def check_services(state: dict) -> None:
             state[key] = False
 
 
-def check_playwright_mcp(state: dict) -> None:
+def check_agent_browser(state: dict) -> None:
     """Functional runtime probe: active units can still have a dead MCP."""
-    ok, detail = runtime_check()
-    if ok:
-        ok, detail = initialize_check(CDP_URL)
-    _LOG.info(f"Playwright MCP runtime ok={ok}: {detail}")
-    key = "playwright_mcp_runtime_sent"
+    ok, detail = startup_check()
+    _LOG.info(f"agent-browser MCP runtime ok={ok}: {detail}")
+    key = "agent_browser_runtime_sent"
     if not ok:
         if not state.get(key):
             send_alert(
-                "🚨 Stekkies bot: Playwright MCP cannot start",
+                "🚨 Stekkies bot: agent-browser cannot start",
                 f"The browser automation runtime failed its startup probe:\n\n"
                 f"{detail}\n\nApplications will fail before their first turn. "
-                "Run deploy/ensure-self-improvement.sh to enforce Node 20+ "
-                "and reinstall the pinned MCP package.",
+                "Run deploy/ensure-self-improvement.sh to reinstall the pinned "
+                "agent-browser runtime.",
             )
             state[key] = True
     else:
@@ -398,7 +396,7 @@ def main() -> int:
     state = _load()
     check_credits(state)
     check_services(state)
-    check_playwright_mcp(state)
+    check_agent_browser(state)
     check_site_logins(state)
     check_self_improvement(state)
     maybe_send_digest(state)

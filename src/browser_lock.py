@@ -1,6 +1,6 @@
 """Exclusive lock on the shared CDP browser.
 
-Only ONE component may drive the browser via the Playwright MCP at a time. The
+Only ONE component may drive the browser via the agent-browser MCP at a time. The
 applier (apply.py) holds this for a whole submission; healthcheck's site
 probes and the self-improvement agent's browser diagnostics must acquire it
 before touching the browser and yield while it is held.

@@ -18,9 +18,7 @@ APP_USER="${APP_USER:-deploy}"
 APP_HOME="/home/${APP_USER}"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-PLAYWRIGHT_MCP_VERSION="$(tr -d '[:space:]' < "${APP_DIR}/deploy/playwright-mcp.version")"
-
-echo "==> Node.js 20+ (Playwright MCP runtime)"
+echo "==> Node.js 20+ (agent-browser + Claude runtime)"
 NODE_MAJOR="$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true)"
 if [ -z "${NODE_MAJOR}" ] || [ "${NODE_MAJOR}" -lt 20 ]; then
   apt-get update -qq
@@ -50,9 +48,8 @@ else
   echo "==> agent-browser ${AGENT_BROWSER_VERSION} already installed"
 fi
 
-echo "==> pinned Playwright MCP ${PLAYWRIGHT_MCP_VERSION}"
-npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" >/dev/null
-npx --yes "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" --help >/dev/null
+echo "==> agent-browser MCP startup"
+agent-browser mcp --help >/dev/null
 
 echo "==> litellm-proxy.service"
 sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__APP_HOME__|${APP_HOME}|g" \

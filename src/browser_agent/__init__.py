@@ -1,6 +1,6 @@
 """Browser agent package — the apply loop, split by responsibility.
 
-loop.py holds `_run`/`run_agent` (the tool-calling loop over the Playwright
+loop.py holds `_run`/`run_agent` (the tool-calling loop over agent-browser
 MCP); guards.py the deterministic in-loop guards; result.py the
 AgentResult/outcome contract; transport.py the MCP/OpenAI plumbing, Logger,
 and teardown watchdog. This facade re-exports the public + test-visible

@@ -1,10 +1,9 @@
-"""Browser-backend plumbing for the apply loop.
+"""agent-browser MCP plumbing for the apply loop.
 
-agent-browser is the production default.  Its full MCP profile is started so
-uploads, semantic locators, snapshot diffs, dialogs, and stable tabs are
-available, but the model only sees the small normalized surface below.  This
-keeps upstream administrative/eval/state tools out of context and preserves a
-stable tool contract if we explicitly roll back to Playwright MCP.
+The full agent-browser MCP profile is started so uploads, semantic locators,
+snapshot diffs, dialogs, and stable tabs are available, but the model only
+sees the small normalized surface below. This keeps upstream administrative,
+eval, and state tools out of context.
 """
 from __future__ import annotations
 
@@ -20,16 +19,10 @@ from urllib.parse import urlparse
 
 from mcp import ClientSession, StdioServerParameters
 
-from ..agent_tools import BLOCKED_TOOLS
 from ..config import DOCS_DIR, PROJECT_ROOT
-from ..playwright_mcp_runtime import PLAYWRIGHT_MCP_PACKAGE
 from ..settings import settings
 
 AGENT_BROWSER_ACTION_POLICY = PROJECT_ROOT / "deploy" / "agent-browser-action-policy.json"
-
-
-def _browser_backend() -> str:
-    return settings().apply_browser_backend
 
 
 def _agent_browser_cdp(cdp_url: str) -> str:
@@ -43,32 +36,21 @@ def _agent_browser_cdp(cdp_url: str) -> str:
     return cdp_url
 
 
-def _mcp_params(cdp_url: str, backend: str | None = None,
-                namespace: str | None = None) -> StdioServerParameters:
-    backend = backend or _browser_backend()
-    if backend == "agent_browser":
-        s = settings()
-        return StdioServerParameters(
-            command=s.agent_browser_command,
-            args=["mcp", "--tools", "all"],
-            # MCP tools invoke the CLI internally. Environment settings are
-            # inherited by those invocations; top-level global flags are not.
-            env={
-                **os.environ,
-                "AGENT_BROWSER_CDP": _agent_browser_cdp(cdp_url),
-                "AGENT_BROWSER_NAMESPACE": namespace or s.agent_browser_namespace,
-                "AGENT_BROWSER_CONTENT_BOUNDARIES": "true",
-                "AGENT_BROWSER_MAX_OUTPUT": str(s.agent_browser_max_output_chars),
-                "AGENT_BROWSER_ACTION_POLICY": str(AGENT_BROWSER_ACTION_POLICY),
-            },
-        )
+def _mcp_params(cdp_url: str, namespace: str | None = None) -> StdioServerParameters:
+    s = settings()
     return StdioServerParameters(
-        command="npx",
-        args=[
-            "--yes", PLAYWRIGHT_MCP_PACKAGE,
-            "--cdp-endpoint", cdp_url,
-            "--allow-unrestricted-file-access",
-        ],
+        command=s.agent_browser_command,
+        args=["mcp", "--tools", "all"],
+        # MCP tools invoke the CLI internally. Environment settings are
+        # inherited by those invocations; top-level global flags are not.
+        env={
+            **os.environ,
+            "AGENT_BROWSER_CDP": _agent_browser_cdp(cdp_url),
+            "AGENT_BROWSER_NAMESPACE": namespace or s.agent_browser_namespace,
+            "AGENT_BROWSER_CONTENT_BOUNDARIES": "true",
+            "AGENT_BROWSER_MAX_OUTPUT": str(s.agent_browser_max_output_chars),
+            "AGENT_BROWSER_ACTION_POLICY": str(AGENT_BROWSER_ACTION_POLICY),
+        },
     )
 
 
@@ -231,8 +213,8 @@ _TOOL_PARAM_TYPES: dict[str, dict[str, str]] = {
 def _normalize_tool_args(name: str, args: dict) -> dict:
     """Coerce boolean/integer/number arguments the model sent as strings,
     per that tool's own declared schema type. A no-op for tools/fields not in
-    _AGENT_BROWSER_TOOLS (e.g. the Playwright-backend tool names, or the
-    local raw-DOM fallback tools, which never showed this failure mode)."""
+    _AGENT_BROWSER_TOOLS (or local raw-DOM fallback tools, which never showed
+    this failure mode)."""
     types = _TOOL_PARAM_TYPES.get(name)
     if not types or not isinstance(args, dict):
         return args
@@ -242,31 +224,15 @@ def _normalize_tool_args(name: str, args: dict) -> dict:
     }
 
 
-def _to_openai_tools(mcp_tools, backend: str | None = None) -> list[dict]:
-    backend = backend or _browser_backend()
-    if backend == "agent_browser":
-        discovered = {t.name for t in mcp_tools}
-        missing = sorted(_AGENT_REMOTE_REQUIRED - discovered)
-        if missing:
-            raise RuntimeError(f"agent-browser MCP missing required tools: {', '.join(missing)}")
-        return [{
-            "type": "function",
-            "function": {"name": name, "description": description, "parameters": schema},
-        } for name, description, schema in _AGENT_BROWSER_TOOLS]
-
-    out = []
-    for t in mcp_tools:
-        if t.name in BLOCKED_TOOLS:
-            continue
-        out.append({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": (t.description or "")[:1024],
-                "parameters": t.inputSchema or {"type": "object", "properties": {}},
-            },
-        })
-    return out
+def _to_openai_tools(mcp_tools) -> list[dict]:
+    discovered = {t.name for t in mcp_tools}
+    missing = sorted(_AGENT_REMOTE_REQUIRED - discovered)
+    if missing:
+        raise RuntimeError(f"agent-browser MCP missing required tools: {', '.join(missing)}")
+    return [{
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": schema},
+    } for name, description, schema in _AGENT_BROWSER_TOOLS]
 
 
 def _result_text(result) -> str:
@@ -317,14 +283,9 @@ def _allowed_document_paths(paths: list) -> list[str]:
     return allowed
 
 
-async def _call_browser_tool(session: ClientSession, backend: str, name: str,
+async def _call_browser_tool(session: ClientSession, name: str,
                              args: dict) -> tuple[str, bool]:
-    """Execute one normalized model tool call against the selected backend."""
-    if backend != "agent_browser":
-        if name == "browser_file_upload" and args.get("paths"):
-            args = {**args, "paths": _allowed_document_paths(args["paths"])}
-        return await _remote_call(session, name, args)
-
+    """Execute one normalized model tool call against agent-browser."""
     direct = {
         "browser_navigate": "agent_browser_open",
         "browser_find": "agent_browser_find",
@@ -458,11 +419,9 @@ def _credential_profile_name(site: str, current_url: str) -> str:
     return f"stekkies-{digest}"
 
 
-async def _secure_login(session: ClientSession, backend: str, site: str,
+async def _secure_login(session: ClientSession, site: str,
                         current_url: str, credential: dict,
                         selectors: dict[str, str]) -> tuple[str, bool]:
-    if backend != "agent_browser":
-        return "Secure local login is only available with agent-browser.", False
     profile = _credential_profile_name(site, current_url)
     save_args = {
         "name": profile, "url": current_url,
@@ -487,41 +446,33 @@ async def _secure_login(session: ClientSession, backend: str, site: str,
     return text, ok
 
 
-_CURRENT_TAB_RE = re.compile(r"^- \d+: \(current\).*\((https?://[^)]+)\)\s*$", re.MULTILINE)
-
-
-async def _current_tab_url(session: ClientSession, backend: str | None = None) -> str | None:
+async def _current_tab_url(session: ClientSession) -> str | None:
     """Ask the MCP itself which tab is current (browser_tabs marks it with
     "(current)") so dom_scan/click_by_text -- which connect over CDP on a
     separate Playwright client and can't see the MCP's own tab pointer --
     look at the same tab the model has been looking at, not just the
     last-created one. See browser_dom_tools.current_page for why that
     fallback is unreliable here."""
-    backend = backend or _browser_backend()
     try:
-        if backend == "agent_browser":
-            result = await session.call_tool("agent_browser_get_url", {})
-            text = _result_text(result)
-            match = re.search(r"https?://[^\s<>]+", text)
-            return match.group(0).rstrip(")]},.'\"") if match else None
-        result = await session.call_tool("browser_tabs", {"action": "list"})
+        result = await session.call_tool("agent_browser_get_url", {})
     except Exception:
         return None
-    m = _CURRENT_TAB_RE.search(_result_text(result))
-    return m.group(1) if m else None
+    text = _result_text(result)
+    match = re.search(r"https?://[^\s<>]+", text)
+    return match.group(0).rstrip(")]},.'\"") if match else None
 
 
 # How long after the wall-clock timeout the teardown may take before the
 # watchdog assumes the MCP subprocess is wedged and kills it. asyncio.wait_for
 # only CANCELS the task; the cancellation still has to unwind stdio_client's
-# __aexit__, which waits on the npx/node MCP process -- if that process
+# __aexit__, which waits on the agent-browser MCP process -- if that process
 # ignores its closed stdin, asyncio.run() blocks forever with the browser
 # flock still held. That is the one failure mode the timeout cannot cover
 # (03-07-2026: the lock stayed held for 9+ hours, starving eight consecutive
 # mail-triggered applies).
 TEARDOWN_GRACE_SECONDS = settings().apply_teardown_grace_seconds
 
-_CHILD_MARKERS = (b"playwright", b"mcp", b"node", b"npx", b"agent-browser")
+_CHILD_MARKERS = (b"mcp", b"agent-browser")
 
 
 def _descendant_pids(root_pid: int) -> list[int]:
@@ -546,8 +497,8 @@ def _descendant_pids(root_pid: int) -> list[int]:
 
 
 def _kill_wedged_children(root_pid: int) -> list[int]:
-    """SIGKILL descendant processes that look like the MCP/Playwright stack
-    (node/npx). Killing them closes the stdio pipes a hung teardown is
+    """SIGKILL descendant processes that look like the agent-browser MCP
+    stack. Killing them closes the stdio pipes a hung teardown is
     blocked on, letting asyncio.run() finally return and release the browser
     flock."""
     killed: list[int] = []

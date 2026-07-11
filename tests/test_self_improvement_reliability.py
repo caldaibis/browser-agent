@@ -10,7 +10,6 @@ from unittest.mock import patch
 from src import self_improvement_agent as sia
 from src import self_improvement_queue as queue
 from src.browser_agent import AgentResult
-from src.playwright_mcp_runtime import node_major
 from src.self_improvement_harness import classify_failure
 
 
@@ -134,13 +133,6 @@ class TestWorktreePolicy(unittest.TestCase):
                 root, "patch", "Bash", {
                     "command": f"cd {sia.PROJECT_ROOT} && git status"}).behavior,
                 "deny")
-
-
-class TestRuntimeContract(unittest.TestCase):
-    def test_node_major(self):
-        self.assertEqual(node_major("v20.19.1\n"), 20)
-        self.assertEqual(node_major("22"), 22)
-        self.assertIsNone(node_major("unknown"))
 
 
 class TestQueueFacade(unittest.TestCase):

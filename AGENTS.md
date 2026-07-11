@@ -18,8 +18,8 @@ form, uploads docs, submits).
   dialogs. A deny-by-default daemon policy independently blocks eval, state and
   network mutation, downloads, and administration; uploads are confined to
   `DOCS_DIR`. `login_with_credential` uses agent-browser's encrypted local auth
-  vault so passwords do not enter model context. Playwright MCP remains an
-  explicit `APPLY_BROWSER_BACKEND=playwright` rollback. The loop has a
+  vault so passwords do not enter model context. agent-browser is the sole
+  browser MCP backend. The loop has a
   repeat-action guard + capped nudges, a
   one-shot nudge when `browser_snapshot` dominates the turns so far
   (`_should_nudge_snapshot_overuse` — the exact/short-cycle repeat guard
@@ -332,13 +332,10 @@ form, uploads docs, submits).
   `tar czf <backup> documents state` first, reset, then `tar xzf <backup>
   documents`. Run git as the deploy user (the repo is deploy-owned).
 - The pinned agent-browser version in `deploy/agent-browser.version` is required
-  at runtime (`just ensure-agent-browser`). Node/npx remains for the Playwright
-  rollback path and the Claude CLI.
-- Node 20+/npx is required at runtime for the pinned Playwright MCP
-  (`@playwright/mcp@0.0.78`). Never use `@latest`: it raised its Node engine
-  requirement on 10-07-2026 and every apply began failing before turn 1 while
-  all systemd units still reported active. Deploy and healthcheck run a
-  functional startup/initialize probe.
+  at runtime (`just ensure-agent-browser`). Deploy and healthcheck verify the
+  agent-browser MCP subcommand before applications are allowed to run.
+- Node 20+ is required by the Claude CLI used by self-improvement. The apply
+  browser contract itself is agent-browser only; there is no rollback backend.
 - The self-improvement agent needs the **`claude` CLI on PATH**
   (`npm install -g @anthropic-ai/claude-code` — `claude-agent-sdk` shells out
   to it) and the **LiteLLM proxy running** (`litellm-proxy.service` on the

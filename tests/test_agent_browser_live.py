@@ -93,17 +93,17 @@ class TestAgentBrowserLive(unittest.IsolatedAsyncioTestCase):
         async def call(name: str, args: dict) -> tuple[str, bool]:
             return await asyncio.wait_for(
                 transport._call_browser_tool(
-                    session, "agent_browser", name, args),
+                    session, name, args),
                 timeout=15,
             )
 
         async with stdio_client(transport._mcp_params(
-                f"http://127.0.0.1:{self.cdp_port}", "agent_browser",
+                f"http://127.0.0.1:{self.cdp_port}",
                 namespace=self.namespace)) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await transport._list_mcp_tools(session)
-                model_tools = transport._to_openai_tools(tools, "agent_browser")
+                model_tools = transport._to_openai_tools(tools)
                 names = {tool["function"]["name"] for tool in model_tools}
                 self.assertIn("browser_file_upload", names)
                 self.assertNotIn("agent_browser_eval", names)
@@ -165,7 +165,7 @@ class TestAgentBrowserLive(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(ok, tabs)
                 self.assertIn("t", tabs)
                 self.assertEqual(
-                    await transport._current_tab_url(session, "agent_browser"), url)
+                    await transport._current_tab_url(session), url)
 
 if __name__ == "__main__":
     unittest.main()

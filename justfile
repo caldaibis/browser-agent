@@ -45,8 +45,7 @@ doctor:
     echo "preflight:"
     chk "uv installed"                 "command -v uv"
     chk "agent-browser pinned runtime" 'test "$(agent-browser --version 2>/dev/null | awk '\''{print $2}'\'')" = "$(tr -d '\''[:space:]'\'' < deploy/agent-browser.version)"'
-    chk "Node 20+ present (MCP)"       "node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 20 ? 0 : 1)'"
-    chk "pinned Playwright MCP starts" "uv run python -c 'from src.playwright_mcp_runtime import runtime_check; raise SystemExit(0 if runtime_check()[0] else 1)'"
+    chk "agent-browser MCP starts"     "uv run python -c 'from src.agent_browser_runtime import startup_check; raise SystemExit(0 if startup_check()[0] else 1)'"
     chk "DEEPSEEK_API_KEY set"         '[ -n "${DEEPSEEK_API_KEY:-}" ]'
     chk "claude CLI present (self-improvement)" "command -v claude"
     chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
@@ -74,10 +73,6 @@ ensure-agent-browser:
 # Real CDP/MCP regression on a disposable local page and Chromium profile.
 agent-browser-smoke:
     RUN_AGENT_BROWSER_LIVE=1 uv run pytest -q tests/test_agent_browser_live.py -vv
-
-# Deterministic before/after metrics from both pinned MCP tool contracts.
-browser-backend-metrics output="":
-    uv run python -m src.browser_backend_metrics {{ if output == "" { "" } else { "--output " + output } }}
 
 # Empirical token distributions grouped by browser backend/version and model.
 browser-token-metrics path="logs/trajectories":

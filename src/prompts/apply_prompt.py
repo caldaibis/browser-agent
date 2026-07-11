@@ -121,13 +121,6 @@ click_by_text if aggregator_hop itself reports failure.
 
 
 def _tool_use_clause() -> str:
-    if settings().apply_browser_backend == "playwright":
-        return """TOOL USE - BE EFFICIENT AND CORRECT:
-- Use browser_snapshot, then act on exact refs from the latest snapshot.
-- Fill several fields at once with browser_fill_form and upload documents with browser_file_upload.
-- Never use browser_evaluate or browser_run_code_unsafe.
-- Re-snapshot only after a real page/modal change. If an expected HTML dialog is missing, use dom_scan and its narrow click/fill/select fallback tools.
-"""
     return """TOOL USE - AGENT-BROWSER (BE EFFICIENT AND CORRECT):
 - Start with browser_snapshot. It defaults to a compact INTERACTIVE-only tree with refs such as `@e37` and link URLs. For the eligibility gate, validation errors, status, or submission confirmation, call it with interactive=false so important static text is included. Scope large pages with selector (for example `main` or `dialog[open]`) and/or depth.
 - Pass the exact latest ref as target to browser_click/browser_type/browser_fill_form/browser_select_option/browser_file_upload. Refs become stale after navigation or a dynamic re-render; take one fresh snapshot instead of guessing an old ref.
@@ -156,13 +149,9 @@ def build_prompt(listing: Listing | dict) -> str:
     )
     credential_tool = (
         "`login_with_credential` tool; it uses the encrypted local vault and "
-        "never reveals the password" if settings().apply_browser_backend == "agent_browser"
-        else "`lookup_credential` tool; it returns the username/password to fill"
+        "never reveals the password"
     )
-    missing_result = (
-        "login_with_credential" if settings().apply_browser_backend == "agent_browser"
-        else "lookup_credential"
-    )
+    missing_result = "login_with_credential"
     login_clause = (
         f"{sso}\n"
         f"For email/password login, do NOT guess credentials: call the {credential_tool}. "

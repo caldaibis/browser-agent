@@ -1,8 +1,7 @@
 """Minimal browser agent loop - our lightweight replacement for Hermes.
 
-Connects to the selected browser MCP backend over stdio, attached to our shared
-CDP browser, and runs a DeepSeek tool-calling loop. agent-browser is the default;
-Playwright MCP remains an explicit rollback backend.
+Connects to the agent-browser MCP over stdio, attached to our shared CDP
+browser, and runs a DeepSeek tool-calling loop.
 
 What this gives us over Hermes: full control, our logging, no 1.2 GB harness —
 just the agentic loop + MCP client, with a curated browser interface and local
@@ -32,7 +31,6 @@ from .. import browser_dom_tools, credentials
 from ..agent_tools import (
     AGGREGATOR_HOP_TOOL,
     CLICK_BY_TEXT_TOOL,
-    CREDENTIAL_TOOL,
     DOM_SCAN_TOOL,
     FILL_BY_LABEL_TOOL,
     LOGIN_WITH_CREDENTIAL_TOOL,
@@ -51,7 +49,6 @@ from .result import NO_CREDIT_RC, AgentResult, _extract_outcome, _parse_outcome
 from .transport import (
     TEARDOWN_GRACE_SECONDS,
     Logger,
-    _browser_backend,
     _call_browser_tool,
     _current_tab_url,
     _kill_wedged_children,
@@ -111,27 +108,21 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
     known_urls = dedup.known_processed_urls()
 
     client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=api_key)
-    backend = _browser_backend()
-
-    async with stdio_client(_mcp_params(cdp_url, backend)) as (read, write):
+    async with stdio_client(_mcp_params(cdp_url)) as (read, write):
         async with ClientSession(read, write) as session:
             server = await session.initialize()
             server_version = getattr(getattr(server, "serverInfo", None), "version", "?")
             mcp_tools = await _list_mcp_tools(session)
-            credential_tool = (
-                LOGIN_WITH_CREDENTIAL_TOOL if backend == "agent_browser"
-                else CREDENTIAL_TOOL
-            )
-            tools = _to_openai_tools(mcp_tools, backend) + [
-                credential_tool, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL,
+            tools = _to_openai_tools(mcp_tools) + [
+                LOGIN_WITH_CREDENTIAL_TOOL, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL,
                 FILL_BY_LABEL_TOOL, SELECT_OPTION_BY_LABEL_TOOL,
                 AGGREGATOR_HOP_TOOL,
             ]
-            log.line(f"[agent] model={model} backend={backend}@{server_version} "
+            log.line(f"[agent] model={model} backend=agent_browser@{server_version} "
                      f"tools={len(tools)} cdp={cdp_url}")
             _record_trajectory(trajectory_id, "run_start", {
                 "model": model,
-                "browser_backend": backend,
+                "browser_backend": "agent_browser",
                 "browser_backend_version": server_version,
                 "tool_count": len(tools),
                 "source_url": source_url,
@@ -440,7 +431,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             )
                             ok = False
                         else:
-                            current_url = await _current_tab_url(session, backend)
+                            current_url = await _current_tab_url(session)
                             if not current_url:
                                 current_url = site if "://" in site else f"https://{site}"
                             selectors = {
@@ -449,7 +440,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             }
                             try:
                                 text, ok = await _secure_login(
-                                    session, backend, site, current_url, cred, selectors)
+                                    session, site, current_url, cred, selectors)
                             except Exception as e:
                                 text, ok = f"Secure login failed: {type(e).__name__}: {e}", False
                         log.line(f"[agent]   -> secure credential login for "
@@ -473,7 +464,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         # not kill the whole run.
                         observation_calls += 1
                         try:
-                            current_url = await _current_tab_url(session, backend)
+                            current_url = await _current_tab_url(session)
                             text = await browser_dom_tools.dom_scan(cdp_url, current_url=current_url)
                             log.line(f"[agent]   -> dom_scan ({len(text)} chars)")
                             _record_trajectory(trajectory_id, "tool_result", {
@@ -498,7 +489,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                     if name == "click_by_text":
                         click_text = str(args.get("text", ""))
                         try:
-                            current_url = await _current_tab_url(session, backend)
+                            current_url = await _current_tab_url(session)
                             text = await browser_dom_tools.click_by_text(
                                 cdp_url, click_text, current_url=current_url)
                             log.line(f"[agent]   -> click_by_text {click_text!r}")
@@ -525,7 +516,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         field_label = str(args.get("label", ""))
                         value = str(args.get("value", ""))
                         try:
-                            current_url = await _current_tab_url(session, backend)
+                            current_url = await _current_tab_url(session)
                             text = await browser_dom_tools.fill_by_label(
                                 cdp_url, field_label, value, current_url=current_url)
                             log.line(f"[agent]   -> fill_by_label {field_label!r}")
@@ -552,7 +543,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         field_label = str(args.get("label", ""))
                         option = str(args.get("option", ""))
                         try:
-                            current_url = await _current_tab_url(session, backend)
+                            current_url = await _current_tab_url(session)
                             text = await browser_dom_tools.select_option_by_label(
                                 cdp_url, field_label, option, current_url=current_url)
                             log.line(f"[agent]   -> select_option_by_label {field_label!r} -> {option!r}")
@@ -577,7 +568,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         continue
                     if name == "aggregator_hop":
                         try:
-                            current_url = await _current_tab_url(session, backend)
+                            current_url = await _current_tab_url(session)
                             text = await browser_dom_tools.aggregator_hop(
                                 cdp_url, current_url=current_url)
                             log.line(f"[agent]   -> aggregator_hop ({len(text)} chars)")
@@ -604,7 +595,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         observation_calls += 1
                     try:
                         text, ok = await _call_browser_tool(
-                            session, backend, name, args)
+                            session, name, args)
                         _record_trajectory(trajectory_id, "tool_result", {
                             "turn": turn,
                             "tool": name,
@@ -619,7 +610,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             try:
                                 note = await browser_dom_tools.dismiss_cookie_banner(
                                     cdp_url,
-                                    current_url=await _current_tab_url(session, backend))
+                                    current_url=await _current_tab_url(session))
                                 if note:
                                     log.line(f"[agent]   -> auto {note}")
                                     text += f"\n[auto] {note}"
@@ -663,7 +654,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                 # manual retest of this exact agent via huurwoningen.nl,
                 # because nothing cross-checked the two paths' URLs against
                 # each other before this existed.
-                current_url = await _current_tab_url(session, backend)
+                current_url = await _current_tab_url(session)
                 if current_url and _is_payment_url(current_url):
                     # HARD MONEY GUARD (see _PAYMENT_HOST_MARKERS): the browser
                     # reached a payment processor. Stop NOW, before the model

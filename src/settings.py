@@ -102,7 +102,6 @@ class Settings:
 
     # --- Apply agent (src/apply.py, src/browser_agent/)
     apply_model: str
-    apply_browser_backend: str       # agent_browser | playwright
     agent_browser_command: str
     agent_browser_namespace: str
     agent_browser_max_output_chars: int
@@ -208,9 +207,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         deepseek_base_url=_str(e, "DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 
         apply_model=apply_model,
-        apply_browser_backend=_choice(
-            e, "APPLY_BROWSER_BACKEND", "agent_browser",
-            frozenset({"agent_browser", "playwright"})),
         agent_browser_command=_str(e, "AGENT_BROWSER_COMMAND", "agent-browser"),
         agent_browser_namespace=_str(
             e, "AGENT_BROWSER_NAMESPACE", "stekkies-apply"),

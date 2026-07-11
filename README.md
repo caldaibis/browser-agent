@@ -19,7 +19,7 @@ with a CDP debugging port. Both the Stekkies extractor and the apply agent
 **attach to it over CDP**, so every session lives in one profile you sign into
 once: Google (enables "Sign in with Google" SSO on Funda etc.), Stekkies, and all
 rental sites. The apply agent drives it through pinned `agent-browser` attached
-to the same CDP endpoint. Playwright MCP remains an explicit rollback backend.
+to the same CDP endpoint. agent-browser is the sole apply browser backend.
 The agent also needs `DEEPSEEK_API_KEY` set.
 
 ## Layout
@@ -71,9 +71,8 @@ just litellm-proxy       # own terminal/service, like `just host` — routes the
 `just doctor` checks both. See `AGENTS.md` for the full architecture (isolated
 git worktrees, push-to-main-triggers-CI/CD deploy, cost caveats).
 
-The browser backend defaults to `APPLY_BROWSER_BACKEND=agent_browser`. Set it
-to `playwright` only for rollback. `just agent-browser-smoke` runs the real MCP
-contract against a disposable local page and Chromium profile.
+`just agent-browser-smoke` runs the real agent-browser MCP contract against a
+disposable local page and Chromium profile.
 
 ## Run
 ```bash

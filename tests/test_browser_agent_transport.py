@@ -71,7 +71,7 @@ class TestNormalizeToolArgs(unittest.TestCase):
 class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
     def test_mcp_is_pinned_to_policy_and_existing_cdp(self):
         params = transport._mcp_params(
-            "http://127.0.0.1:9222", "agent_browser", namespace="test-run")
+            "http://127.0.0.1:9222", namespace="test-run")
         self.assertEqual(params.command, "agent-browser")
         self.assertEqual(params.env["AGENT_BROWSER_CDP"], "9222")
         self.assertNotIn("http://127.0.0.1:9222", params.args)
@@ -96,15 +96,10 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
             transport._agent_browser_cdp("wss://browser.example/cdp?token=x"),
             "wss://browser.example/cdp?token=x")
 
-    def test_playwright_rollback_is_version_pinned(self):
-        params = transport._mcp_params("http://127.0.0.1:9222", "playwright")
-        self.assertEqual(params.command, "npx")
-        self.assertIn("@playwright/mcp@0.0.78", params.args)
-
     def test_model_surface_is_curated_and_normalized(self):
         discovered = [SimpleNamespace(name=name) for name in transport._AGENT_REMOTE_REQUIRED]
         discovered += [SimpleNamespace(name="agent_browser_eval")]
-        tools = transport._to_openai_tools(discovered, "agent_browser")
+        tools = transport._to_openai_tools(discovered)
         names = {tool["function"]["name"] for tool in tools}
         self.assertIn("browser_snapshot", names)
         self.assertIn("browser_snapshot_diff", names)
@@ -115,20 +110,12 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
 
     def test_missing_required_remote_tool_fails_fast(self):
         with self.assertRaisesRegex(RuntimeError, "missing required tools"):
-            transport._to_openai_tools([], "agent_browser")
-
-    def test_playwright_surface_keeps_schema_and_filters_raw_javascript(self):
-        tools = [
-            SimpleNamespace(name="browser_click", description="click", inputSchema={"type": "object"}),
-            SimpleNamespace(name="browser_evaluate", description="eval", inputSchema={}),
-        ]
-        exposed = transport._to_openai_tools(tools, "playwright")
-        self.assertEqual([t["function"]["name"] for t in exposed], ["browser_click"])
+            transport._to_openai_tools([])
 
     async def test_snapshot_defaults_are_compact_interactive_and_include_urls(self):
         session = _Session()
         text, ok = await transport._call_browser_tool(
-            session, "agent_browser", "browser_snapshot", {})
+            session, "browser_snapshot", {})
         self.assertTrue(ok)
         self.assertIn("agent_browser_snapshot", text)
         self.assertEqual(session.calls, [("agent_browser_snapshot", {
@@ -136,7 +123,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         })])
         session.calls.clear()
         await transport._call_browser_tool(
-            session, "agent_browser", "browser_snapshot",
+            session, "browser_snapshot",
             {"depth": 4, "selector": "main", "interactive": False,
              "compact": False, "include_urls": False})
         self.assertEqual(session.calls[0][1], {
@@ -147,7 +134,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
     async def test_fill_form_batches_without_another_model_turn(self):
         session = _Session()
         text, ok = await transport._call_browser_tool(
-            session, "agent_browser", "browser_fill_form", {"fields": [
+            session, "browser_fill_form", {"fields": [
                 {"name": "Email", "target": "@e1", "type": "textbox", "value": "a@example.test"},
                 {"name": "Consent", "target": "@e2", "type": "checkbox", "value": True},
             ]})
@@ -161,7 +148,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
     async def test_fill_form_maps_every_field_kind_and_stops_on_error(self):
         session = _Session(errors={"agent_browser_select"})
         text, ok = await transport._call_browser_tool(
-            session, "agent_browser", "browser_fill_form", {"fields": [
+            session, "browser_fill_form", {"fields": [
                 {"target": "@radio", "type": "radio", "value": "yes"},
                 {"target": "@check", "type": "checkbox", "value": False},
                 {"target": "@select", "type": "combobox", "value": ["a", "b"]},
@@ -196,7 +183,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         for public, args, remote, remote_args in cases:
             session.calls.clear()
             _text, ok = await transport._call_browser_tool(
-                session, "agent_browser", public, args)
+                session, public, args)
             self.assertTrue(ok)
             self.assertEqual(session.calls, [(remote, remote_args)])
 
@@ -213,11 +200,11 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         ]
         for args, remote, remote_args in cases:
             session.calls.clear()
-            await transport._call_browser_tool(session, "agent_browser", "browser_tabs", args)
+            await transport._call_browser_tool(session, "browser_tabs", args)
             self.assertEqual(session.calls, [(remote, remote_args)])
         with self.assertRaisesRegex(ValueError, "unsupported tab action"):
             await transport._call_browser_tool(
-                session, "agent_browser", "browser_tabs", {"action": "destroy"})
+                session, "browser_tabs", {"action": "destroy"})
 
     async def test_wait_variants_map_to_typed_native_tools(self):
         session = _Session()
@@ -233,7 +220,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         for args, remote, remote_args in cases:
             session.calls.clear()
             await transport._call_browser_tool(
-                session, "agent_browser", "browser_wait_for", args)
+                session, "browser_wait_for", args)
             self.assertEqual(session.calls, [(remote, remote_args)])
 
     async def test_find_defaults_missing_action_to_text(self):
@@ -242,7 +229,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         the call succeed instead of costing a wasted turn on the error."""
         session = _Session()
         await transport._call_browser_tool(
-            session, "agent_browser", "browser_find",
+            session, "browser_find",
             {"locator": "text", "value": "Ga verder"})
         self.assertEqual(session.calls, [(
             "agent_browser_find", {"locator": "text", "value": "Ga verder", "action": "text"},
@@ -250,7 +237,7 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         session.calls.clear()
         # An explicit action must not be overridden.
         await transport._call_browser_tool(
-            session, "agent_browser", "browser_find",
+            session, "browser_find",
             {"locator": "text", "value": "Ga verder", "action": "click"})
         self.assertEqual(session.calls, [(
             "agent_browser_find", {"locator": "text", "value": "Ga verder", "action": "click"},
@@ -259,12 +246,12 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
     async def test_scroll_dialog_and_diff_mapping(self):
         session = _Session()
         await transport._call_browser_tool(
-            session, "agent_browser", "browser_scroll",
+            session, "browser_scroll",
             {"direction": "down", "pixels": 450, "selector": "main"})
         self.assertEqual(session.calls[-1], (
             "agent_browser_scroll", {"direction": "down", "amount": 450, "selector": "main"}))
         await transport._call_browser_tool(
-            session, "agent_browser", "browser_snapshot_diff",
+            session, "browser_snapshot_diff",
             {"compact": False, "depth": 3, "selector": "dialog[open]"})
         self.assertEqual(session.calls[-1], (
             "agent_browser_diff_snapshot",
@@ -273,30 +260,16 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
                                ("accept", "agent_browser_dialog_accept"),
                                ("dismiss", "agent_browser_dialog_dismiss")):
             await transport._call_browser_tool(
-                session, "agent_browser", "browser_handle_dialog",
+                session, "browser_handle_dialog",
                 {"action": action, "text": "yes"})
             expected = {"text": "yes"} if action == "accept" else {}
             self.assertEqual(session.calls[-1], (remote, expected))
         with self.assertRaisesRegex(ValueError, "unsupported dialog action"):
             await transport._call_browser_tool(
-                session, "agent_browser", "browser_handle_dialog", {"action": "click"})
+                session, "browser_handle_dialog", {"action": "click"})
         with self.assertRaisesRegex(ValueError, "not allowed"):
             await transport._call_browser_tool(
-                session, "agent_browser", "agent_browser_eval", {})
-
-    async def test_playwright_calls_stay_compatible_and_restrict_uploads(self):
-        session = _Session()
-        text, ok = await transport._call_browser_tool(
-            session, "playwright", "browser_click", {"target": "e1"})
-        self.assertTrue(ok)
-        self.assertIn("browser_click", text)
-        with tempfile.TemporaryDirectory() as tmp:
-            document = Path(tmp) / "id.pdf"
-            document.write_bytes(b"x")
-            with patch.object(transport, "DOCS_DIR", Path(tmp)):
-                await transport._call_browser_tool(
-                    session, "playwright", "browser_file_upload", {"paths": [str(document)]})
-        self.assertEqual(session.calls[-1][0], "browser_file_upload")
+                session, "agent_browser_eval", {})
 
     async def test_upload_is_restricted_to_documents_directory(self):
         session = _Session()
@@ -308,42 +281,27 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
             outside.write_text("secret")
             with patch.object(transport, "DOCS_DIR", root):
                 _text, ok = await transport._call_browser_tool(
-                    session, "agent_browser", "browser_file_upload",
+                    session, "browser_file_upload",
                     {"target": "@e9", "paths": [str(document)]})
                 self.assertTrue(ok)
                 with self.assertRaisesRegex(ValueError, "outside DOCS_DIR"):
                     await transport._call_browser_tool(
-                        session, "agent_browser", "browser_file_upload",
+                        session, "browser_file_upload",
                         {"target": "@e9", "paths": [str(outside)]})
                 missing = root / "missing.pdf"
                 with self.assertRaisesRegex(ValueError, "does not exist"):
                     transport._allowed_document_paths([str(missing)])
 
-    async def test_current_url_uses_backend_active_tab_without_tab_parsing(self):
+    async def test_current_url_uses_agent_browser_active_tab(self):
         session = _Session()
         self.assertEqual(
-            await transport._current_tab_url(session, "agent_browser"),
+            await transport._current_tab_url(session),
             "https://example.test/apply")
-
-    async def test_playwright_current_tab_parser_and_failure_are_preserved(self):
-        class Tabs(_Session):
-            async def call_tool(self, name, args):
-                return _Result("- 2: (current) Portal (https://portal.test/apply)")
-
-        self.assertEqual(
-            await transport._current_tab_url(Tabs(), "playwright"),
-            "https://portal.test/apply")
-
-        class Broken(_Session):
-            async def call_tool(self, name, args):
-                raise RuntimeError("gone")
-
-        self.assertIsNone(await transport._current_tab_url(Broken(), "playwright"))
 
     async def test_secure_login_keeps_secret_inside_mcp_calls(self):
         session = _Session()
         text, ok = await transport._secure_login(
-            session, "agent_browser", "rental.test",
+            session, "rental.test",
             "https://auth.test/login",
             {"username": "me@example.test", "password": "top-secret"},
             {"username_selector": "#email", "password_selector": "", "submit_selector": ""},
@@ -355,14 +313,10 @@ class TestAgentBrowserTransport(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.calls[1][1]["password"], "top-secret")
         self.assertEqual(session.calls[2][0], "agent_browser_auth_login")
 
-    async def test_secure_login_rejects_other_backends_and_save_failure(self):
-        text, ok = await transport._secure_login(
-            _Session(), "playwright", "x", "https://x", {}, {})
-        self.assertFalse(ok)
-        self.assertIn("only available", text)
+    async def test_secure_login_reports_save_failure(self):
         session = _Session(errors={"agent_browser_auth_save"})
         text, ok = await transport._secure_login(
-            session, "agent_browser", "x", "https://x",
+            session, "x", "https://x",
             {"username": "u", "password": "p"}, {})
         self.assertFalse(ok)
         self.assertIn("Could not store", text)
@@ -416,7 +370,7 @@ class TestToolPagination(unittest.IsolatedAsyncioTestCase):
 class TestPinnedMcpContract(unittest.IsolatedAsyncioTestCase):
     async def test_real_server_exposes_every_required_pinned_tool(self):
         params = transport._mcp_params(
-            "http://127.0.0.1:1", "agent_browser", namespace="contract-test")
+            "http://127.0.0.1:1", namespace="contract-test")
         with tempfile.TemporaryDirectory() as sockets:
             params.env = {**(params.env or {}), "AGENT_BROWSER_SOCKET_DIR": sockets}
             async with stdio_client(params) as (read, write):
@@ -427,7 +381,7 @@ class TestPinnedMcpContract(unittest.IsolatedAsyncioTestCase):
                     ).read_text().strip()
                     self.assertEqual(info.serverInfo.version, expected)
                     discovered = await transport._list_mcp_tools(session)
-                    exposed = transport._to_openai_tools(discovered, "agent_browser")
+                    exposed = transport._to_openai_tools(discovered)
                     self.assertEqual(len(exposed), len(transport._AGENT_BROWSER_TOOLS))
 
 

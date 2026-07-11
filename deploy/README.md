@@ -30,8 +30,8 @@ cat ~/.ssh/id_ed25519.pub
 git clone git@github.com:caldaibis/browser-agent.git
 bash browser-agent/deploy/setup.sh
 ```
-Installs uv + Chromium + Xvfb + VNC + **Node 20+/npx**, the pinned
-**agent-browser** backend, and the pinned Playwright MCP rollback backend +
+Installs uv + Chromium + Xvfb + VNC + **Node 20+**, the pinned
+**agent-browser** backend +
 **Caddy**; deploys all systemd units; starts `xvfb`, `browser-host`,
 `healthcheck.timer`, `dashboard` (but NOT `orchestrator` yet). To render the
 Caddyfile, run with `DASHBOARD_DOMAIN`, `DASHBOARD_USER`, `DASHBOARD_HASH` set
