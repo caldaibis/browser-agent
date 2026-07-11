@@ -2,7 +2,7 @@
 
 These are the OpenAI-format tool definitions for the four raw-DOM
 fallback tools (implemented in `browser_dom_tools.py`) and the
-credential lookup, plus the Playwright MCP tools the model must never
+credential lookup, plus browser MCP tools the model must never
 see. Pure data — the loop in `browser_agent.py` wires them up.
 """
 from __future__ import annotations
@@ -40,7 +40,47 @@ CREDENTIAL_TOOL = {
     },
 }
 
-# Local (non-MCP) fallback tools for when the Playwright MCP's accessibility-
+# agent-browser's encrypted auth vault performs the actual fill/submit locally.
+# The model chooses the stored site and may supply selectors after inspecting an
+# unusual login form, but the username/password never enter model context.
+LOGIN_WITH_CREDENTIAL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "login_with_credential",
+        "description": (
+            "Log into the CURRENT page with a stored rental-site credential "
+            "without revealing its password. Pass the originating rental-site "
+            "domain even when the current page is a shared authentication "
+            "provider. The secure local vault fills and submits the login. "
+            "Usually only site is needed; after a failure, inspect the page and "
+            "optionally provide CSS selectors for unusual login forms."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "site": {
+                    "type": "string",
+                    "description": "Stored originating site domain or URL.",
+                },
+                "username_selector": {
+                    "type": "string",
+                    "description": "Optional CSS selector for the username/email input.",
+                },
+                "password_selector": {
+                    "type": "string",
+                    "description": "Optional CSS selector for the password input.",
+                },
+                "submit_selector": {
+                    "type": "string",
+                    "description": "Optional CSS selector for the login submit control.",
+                },
+            },
+            "required": ["site"],
+        },
+    },
+}
+
+# Local (non-MCP) fallback tools for when the browser MCP's accessibility-
 # tree snapshot doesn't show something known to be on the page -- seen
 # repeatedly on real listings: an HTML dialog/overlay built without proper
 # ARIA roles never gets a browser_snapshot ref, so browser_click can't target
@@ -120,6 +160,25 @@ FILL_BY_LABEL_TOOL = {
         },
     },
 }
+AGGREGATOR_HOP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "aggregator_hop",
+        "description": (
+            "FAST PATH for the huurwoningen.nl style aggregator gateway. In "
+            "ONE call: clicks the \"Contact met de verhuurder\" control "
+            "(visible text varies: \"Bekijk opnieuw\", \"Reageer op deze "
+            "woning\", or \"Reageer\"), then clicks \"Ga verder\" in the "
+            "dialog that opens (leave its \"Hou me op de hoogte...\" "
+            "checkbox unchecked -- it is a promotional opt-in, not required) "
+            "to land on the real external provider. Use this INSTEAD OF "
+            "browser_find/dom_scan/click_by_text trial-and-error when the "
+            "prompt's AGGREGATOR NOTE says this listing is on an aggregator "
+            "site. If it fails, fall back to dom_scan + click_by_text."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 SELECT_OPTION_BY_LABEL_TOOL = {
     "type": "function",
     "function": {
@@ -151,5 +210,8 @@ SELECT_OPTION_BY_LABEL_TOOL = {
     },
 }
 
-# Playwright MCP tools we never want the model to use (raw JS = token bleed).
-BLOCKED_TOOLS = {"browser_evaluate", "browser_run_code_unsafe"}
+# Browser MCP tools we never want the model to use (raw JS = token bleed).
+BLOCKED_TOOLS = {
+    "browser_evaluate", "browser_run_code_unsafe",
+    "agent_browser_eval", "agent_browser_close",
+}

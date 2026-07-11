@@ -1,12 +1,12 @@
-"""Minimal browser agent loop — our lightweight replacement for Hermes.
+"""Minimal browser agent loop - our lightweight replacement for Hermes.
 
-Connects to the Playwright MCP server (stdio) attached to our shared CDP browser,
-exposes its tools to a DeepSeek-hosted LLM, and runs a tool-calling loop until
-the model produces a final text answer or the turn budget is hit.
+Connects to the selected browser MCP backend over stdio, attached to our shared
+CDP browser, and runs a DeepSeek tool-calling loop. agent-browser is the default;
+Playwright MCP remains an explicit rollback backend.
 
 What this gives us over Hermes: full control, our logging, no 1.2 GB harness —
-just the agentic loop + MCP client. The Playwright MCP (the genuinely valuable
-piece: snapshot/click/fill_form/file_upload) is unchanged.
+just the agentic loop + MCP client, with a curated browser interface and local
+deterministic safety/fallback tools.
 
 Env:
   DEEPSEEK_API_KEY   required — your DeepSeek key.
@@ -30,10 +30,12 @@ from mcp.client.stdio import stdio_client
 
 from .. import browser_dom_tools, credentials
 from ..agent_tools import (
+    AGGREGATOR_HOP_TOOL,
     CLICK_BY_TEXT_TOOL,
     CREDENTIAL_TOOL,
     DOM_SCAN_TOOL,
     FILL_BY_LABEL_TOOL,
+    LOGIN_WITH_CREDENTIAL_TOOL,
     SELECT_OPTION_BY_LABEL_TOOL,
 )
 from .guards import (
@@ -49,10 +51,14 @@ from .result import NO_CREDIT_RC, AgentResult, _extract_outcome, _parse_outcome
 from .transport import (
     TEARDOWN_GRACE_SECONDS,
     Logger,
+    _browser_backend,
+    _call_browser_tool,
     _current_tab_url,
     _kill_wedged_children,
+    _list_mcp_tools,
     _mcp_params,
-    _result_text,
+    _normalize_tool_args,
+    _secure_login,
     _to_openai_tools,
 )
 from .. import dedup
@@ -105,18 +111,28 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
     known_urls = dedup.known_processed_urls()
 
     client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=api_key)
+    backend = _browser_backend()
 
-    async with stdio_client(_mcp_params(cdp_url)) as (read, write):
+    async with stdio_client(_mcp_params(cdp_url, backend)) as (read, write):
         async with ClientSession(read, write) as session:
-            await session.initialize()
-            mcp_tools = (await session.list_tools()).tools
-            tools = _to_openai_tools(mcp_tools) + [
-                CREDENTIAL_TOOL, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL,
+            server = await session.initialize()
+            server_version = getattr(getattr(server, "serverInfo", None), "version", "?")
+            mcp_tools = await _list_mcp_tools(session)
+            credential_tool = (
+                LOGIN_WITH_CREDENTIAL_TOOL if backend == "agent_browser"
+                else CREDENTIAL_TOOL
+            )
+            tools = _to_openai_tools(mcp_tools, backend) + [
+                credential_tool, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL,
                 FILL_BY_LABEL_TOOL, SELECT_OPTION_BY_LABEL_TOOL,
+                AGGREGATOR_HOP_TOOL,
             ]
-            log.line(f"[agent] model={model} tools={len(tools)} cdp={cdp_url}")
+            log.line(f"[agent] model={model} backend={backend}@{server_version} "
+                     f"tools={len(tools)} cdp={cdp_url}")
             _record_trajectory(trajectory_id, "run_start", {
                 "model": model,
+                "browser_backend": backend,
+                "browser_backend_version": server_version,
                 "tool_count": len(tools),
                 "source_url": source_url,
                 "max_turns": max_turns,
@@ -127,8 +143,17 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
             trunc_retries_left = 4  # tolerate transient truncated/empty completions
             sig_history: list[tuple] = []  # detect degenerate repeated-action loops
             repeat_nudged = False
-            snapshot_calls = 0  # detect excessive re-snapshotting (see _should_nudge_snapshot_overuse)
-            snapshot_nudged = False
+            # Detect excessive re-observing (see _should_nudge_snapshot_overuse):
+            # browser_snapshot, browser_snapshot_diff, browser_read_page, and
+            # dom_scan all read the page without acting on it, so a run that
+            # leans on any mix of them instead of clicking/typing forward
+            # looks the same to the model -- turns burned inspecting, not
+            # progressing. A paired replay (10-07-2026) found 44 of 97 tool
+            # calls in the sample were exactly this mix (28 snapshots, 10
+            # diffs, 3 reads, 3 scans) while only the plain-snapshot count was
+            # ever guarded against.
+            observation_calls = 0
+            observation_nudged = False
             turn = 0
             budget = max_turns
             grace_granted = False
@@ -360,6 +385,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         args = json.loads(tc.function.arguments or "{}")
                     except json.JSONDecodeError:
                         args = {}
+                    args = _normalize_tool_args(name, args)
                     # Keep urls/refs intact; only clamp obviously long free text so
                     # the log doesn't mislead (a 60-char clamp made full URLs look
                     # truncated, masking real failures during debugging).
@@ -404,16 +430,50 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             "role": "tool", "tool_call_id": tc.id, "content": text,
                         })
                         continue
+                    if name == "login_with_credential":
+                        site = str(args.get("site", ""))
+                        cred = credentials.lookup(site)
+                        if not cred:
+                            text = (
+                                f"No stored credential for {site!r}. Stored sites: "
+                                f"{', '.join(credentials.available_domains()) or '(none)'}."
+                            )
+                            ok = False
+                        else:
+                            current_url = await _current_tab_url(session, backend)
+                            if not current_url:
+                                current_url = site if "://" in site else f"https://{site}"
+                            selectors = {
+                                key: str(args.get(key, ""))
+                                for key in ("username_selector", "password_selector", "submit_selector")
+                            }
+                            try:
+                                text, ok = await _secure_login(
+                                    session, backend, site, current_url, cred, selectors)
+                            except Exception as e:
+                                text, ok = f"Secure login failed: {type(e).__name__}: {e}", False
+                        log.line(f"[agent]   -> secure credential login for "
+                                 f"{site!r}: {'ok' if ok else 'failed'}")
+                        _record_trajectory(trajectory_id, "tool_result", {
+                            "turn": turn, "tool": name, "ok": ok,
+                            "summary": f"secure login for {site!r}",
+                        })
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": _clamp_tool_result(text),
+                        })
+                        continue
                     if name == "dom_scan":
-                        # Local fallback, not routed through the Playwright MCP:
+                        # Local fallback, not routed through the browser MCP:
                         # see DOM_SCAN_TOOL for when this is appropriate. Ask
                         # the MCP which tab is current so we report on the
                         # same one the model has been looking at (see
                         # _current_tab_url). Caught broadly like the generic
                         # MCP call below -- a CDP/connection hiccup here must
                         # not kill the whole run.
+                        observation_calls += 1
                         try:
-                            current_url = await _current_tab_url(session)
+                            current_url = await _current_tab_url(session, backend)
                             text = await browser_dom_tools.dom_scan(cdp_url, current_url=current_url)
                             log.line(f"[agent]   -> dom_scan ({len(text)} chars)")
                             _record_trajectory(trajectory_id, "tool_result", {
@@ -438,7 +498,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                     if name == "click_by_text":
                         click_text = str(args.get("text", ""))
                         try:
-                            current_url = await _current_tab_url(session)
+                            current_url = await _current_tab_url(session, backend)
                             text = await browser_dom_tools.click_by_text(
                                 cdp_url, click_text, current_url=current_url)
                             log.line(f"[agent]   -> click_by_text {click_text!r}")
@@ -465,7 +525,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         field_label = str(args.get("label", ""))
                         value = str(args.get("value", ""))
                         try:
-                            current_url = await _current_tab_url(session)
+                            current_url = await _current_tab_url(session, backend)
                             text = await browser_dom_tools.fill_by_label(
                                 cdp_url, field_label, value, current_url=current_url)
                             log.line(f"[agent]   -> fill_by_label {field_label!r}")
@@ -492,7 +552,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         field_label = str(args.get("label", ""))
                         option = str(args.get("option", ""))
                         try:
-                            current_url = await _current_tab_url(session)
+                            current_url = await _current_tab_url(session, backend)
                             text = await browser_dom_tools.select_option_by_label(
                                 cdp_url, field_label, option, current_url=current_url)
                             log.line(f"[agent]   -> select_option_by_label {field_label!r} -> {option!r}")
@@ -515,15 +575,40 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
                         })
                         continue
-                    if name == "browser_snapshot":
-                        snapshot_calls += 1
+                    if name == "aggregator_hop":
+                        try:
+                            current_url = await _current_tab_url(session, backend)
+                            text = await browser_dom_tools.aggregator_hop(
+                                cdp_url, current_url=current_url)
+                            log.line(f"[agent]   -> aggregator_hop ({len(text)} chars)")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "chars": len(text),
+                            })
+                        except Exception as e:
+                            text = f"### Tool error\n{type(e).__name__}: {e}"
+                            log.line(f"[agent]   -> aggregator_hop error: {e}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "error": f"{type(e).__name__}: {e}",
+                            })
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
+                        })
+                        continue
+                    if name in ("browser_snapshot", "browser_snapshot_diff", "browser_read_page"):
+                        observation_calls += 1
                     try:
-                        result = await session.call_tool(name, args)
-                        text = _result_text(result)
+                        text, ok = await _call_browser_tool(
+                            session, backend, name, args)
                         _record_trajectory(trajectory_id, "tool_result", {
                             "turn": turn,
                             "tool": name,
-                            "ok": True,
+                            "ok": ok,
                             "chars": len(text),
                         })
                         # Deterministic cookie-banner sweep right after every
@@ -534,7 +619,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             try:
                                 note = await browser_dom_tools.dismiss_cookie_banner(
                                     cdp_url,
-                                    current_url=await _current_tab_url(session))
+                                    current_url=await _current_tab_url(session, backend))
                                 if note:
                                     log.line(f"[agent]   -> auto {note}")
                                     text += f"\n[auto] {note}"
@@ -578,7 +663,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                 # manual retest of this exact agent via huurwoningen.nl,
                 # because nothing cross-checked the two paths' URLs against
                 # each other before this existed.
-                current_url = await _current_tab_url(session)
+                current_url = await _current_tab_url(session, backend)
                 if current_url and _is_payment_url(current_url):
                     # HARD MONEY GUARD (see _PAYMENT_HOST_MARKERS): the browser
                     # reached a payment processor. Stop NOW, before the model
@@ -640,27 +725,27 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                             "paragraph (no page snapshots)."
                         ),
                     })
-                if not snapshot_nudged and _should_nudge_snapshot_overuse(snapshot_calls, turn):
-                    snapshot_nudged = True
-                    log.line(f"[agent] snapshot-overuse nudge "
-                             f"({snapshot_calls} snapshots in {turn} turns)")
+                if not observation_nudged and _should_nudge_snapshot_overuse(observation_calls, turn):
+                    observation_nudged = True
+                    log.line(f"[agent] observation-overuse nudge "
+                             f"({observation_calls} snapshot/diff/read/scan calls in {turn} turns)")
                     _record_trajectory(trajectory_id, "guard", {
                         "name": "snapshot_overuse_nudge",
                         "turn": turn,
-                        "snapshot_calls": snapshot_calls,
+                        "observation_calls": observation_calls,
                     })
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"You've taken {snapshot_calls} snapshots in {turn} turns. "
-                            "A click/type result usually already tells you whether it "
-                            "worked -- you rarely need a fresh browser_snapshot right "
-                            "after every action. Only re-snapshot when the page has "
-                            "genuinely changed (new URL, a dialog opened/closed) and you "
-                            "need new refs. If a dialog or overlay seems to have opened "
-                            "but browser_snapshot doesn't show it, use dom_scan (raw DOM, "
-                            "not the accessibility tree) instead of re-snapshotting "
-                            "repeatedly."
+                            f"You've made {observation_calls} inspection calls "
+                            "(browser_snapshot / browser_snapshot_diff / browser_read_page / "
+                            f"dom_scan combined) in {turn} turns. A click/type result usually "
+                            "already tells you whether it worked -- you rarely need to "
+                            "re-inspect right after every action. Only re-inspect when the "
+                            "page has genuinely changed (new URL, a dialog opened/closed) and "
+                            "you need new refs or state. If you are stuck on an aggregator "
+                            "gateway (huurwoningen.nl-style), stop inspecting and try "
+                            "aggregator_hop instead of another snapshot/scan."
                         ),
                     })
 

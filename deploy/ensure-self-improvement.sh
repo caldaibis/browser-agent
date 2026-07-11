@@ -38,6 +38,18 @@ node -e 'const n=Number(process.versions.node.split(".")[0]); if(n<20) process.e
 echo "==> claude CLI (self-improvement agent, via claude-agent-sdk)"
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code >/dev/null
 
+# The apply agent uses the native Rust binary and attaches it to browser-host's
+# existing CDP profile. Install an exact version: this boundary submits real
+# rental applications, so an unreviewed `latest` upgrade is not acceptable.
+AGENT_BROWSER_VERSION="$(tr -d '[:space:]' < "${APP_DIR}/deploy/agent-browser.version")"
+CURRENT_AGENT_BROWSER="$(agent-browser --version 2>/dev/null | awk '{print $2}' || true)"
+if [ "${CURRENT_AGENT_BROWSER}" != "${AGENT_BROWSER_VERSION}" ]; then
+  echo "==> agent-browser ${AGENT_BROWSER_VERSION} (apply agent)"
+  npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" >/dev/null
+else
+  echo "==> agent-browser ${AGENT_BROWSER_VERSION} already installed"
+fi
+
 echo "==> pinned Playwright MCP ${PLAYWRIGHT_MCP_VERSION}"
 npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" >/dev/null
 npx --yes "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" --help >/dev/null

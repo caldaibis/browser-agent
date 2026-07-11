@@ -20,7 +20,9 @@ apt-get install -y -qq \
   >/dev/null
 # Node 20+/npx is installed and version-checked by the shared runtime ensure
 # step below. Ubuntu's default Node 18 silently became incompatible with the
-# Playwright MCP in production on 2026-07-10.
+# pinned Playwright MCP in production on 2026-07-10. The same step installs the
+# pinned agent-browser binary used by the apply runtime; npx remains available
+# for the explicit APPLY_BROWSER_BACKEND=playwright rollback path.
 
 echo "==> [2/8] app user '${APP_USER}'"
 if ! id "${APP_USER}" >/dev/null 2>&1; then

@@ -2,7 +2,7 @@
 
 Builds a precise task prompt (source URL, reference message, document list,
 auto-submit instruction) and runs the lightweight agent loop in
-`src.browser_agent` (DeepSeek LLM + Playwright MCP over our shared CDP
+`src.browser_agent` (DeepSeek LLM + agent-browser MCP over our shared CDP
 browser). The agent adapts to whatever application form the source site shows.
 
 Run standalone:  python -m src.apply logs/last_listing.json

@@ -319,7 +319,6 @@ def _parse_token_usage_file(path: str, mtime_ns: int) -> TokenUsage | None:
     except Exception:
         return None
 
-
 def token_usage_for_submission(sub: Submission) -> TokenUsage | None:
     p = find_transcript(sub)
     if not p:
@@ -497,4 +496,3 @@ def load_transcript(sub: Submission) -> str | None:
         return redact(p.read_text(encoding="utf-8"))
     except Exception:
         return None
-

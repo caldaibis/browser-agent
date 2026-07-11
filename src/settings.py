@@ -80,6 +80,15 @@ def _csv(env: Mapping[str, str], name: str, default: tuple[str, ...],
     return tuple(s.strip() for s in value.split(",") if s.strip())
 
 
+def _choice(env: Mapping[str, str], name: str, default: str,
+            choices: frozenset[str]) -> str:
+    value = _str(env, name, default).strip().lower().replace("-", "_")
+    if value not in choices:
+        expected = ", ".join(sorted(choices))
+        raise SettingsError(f"{name}: expected one of {expected}, got {value!r}")
+    return value
+
+
 # Self-improvement knobs keep their RECOVERY_* compatibility aliases.
 def _si_legacy(name: str) -> str:
     return "RECOVERY_" + name.removeprefix("SELF_IMPROVEMENT_")
@@ -91,8 +100,12 @@ class Settings:
     deepseek_api_key: str | None
     deepseek_base_url: str
 
-    # --- Apply agent (src/apply.py, src/browser_agent.py)
+    # --- Apply agent (src/apply.py, src/browser_agent/)
     apply_model: str
+    apply_browser_backend: str       # agent_browser | playwright
+    agent_browser_command: str
+    agent_browser_namespace: str
+    agent_browser_max_output_chars: int
     apply_max_turns: int
     apply_timeout_seconds: int
     apply_fastpath_enabled: bool
@@ -195,6 +208,14 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         deepseek_base_url=_str(e, "DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 
         apply_model=apply_model,
+        apply_browser_backend=_choice(
+            e, "APPLY_BROWSER_BACKEND", "agent_browser",
+            frozenset({"agent_browser", "playwright"})),
+        agent_browser_command=_str(e, "AGENT_BROWSER_COMMAND", "agent-browser"),
+        agent_browser_namespace=_str(
+            e, "AGENT_BROWSER_NAMESPACE", "stekkies-apply"),
+        agent_browser_max_output_chars=max(
+            1000, _int(e, "AGENT_BROWSER_MAX_OUTPUT_CHARS", 20000)),
         apply_max_turns=_int(e, "APPLY_MAX_TURNS", 60),
         apply_timeout_seconds=_int(e, "APPLY_TIMEOUT_SECONDS", 900),
         apply_fastpath_enabled=_flag(e, "APPLY_FASTPATH_ENABLED", True),

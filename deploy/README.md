@@ -2,8 +2,9 @@
 
 Always-on responder: headful Chromium under **Xvfb**, **systemd**-managed, with
 **VNC** (over SSH tunnel) for the one-time interactive logins, plus a **Caddy**
-dashboard (HTTPS + Basic Auth). No Hermes — the agent is `src/browser_agent.py`
-(DeepSeek + Playwright MCP). Most steps below are wrapped as `just` commands.
+dashboard (HTTPS + Basic Auth). No Hermes - the agent is `src/browser_agent/`
+(DeepSeek + pinned agent-browser MCP). Most steps below are wrapped as `just`
+commands.
 
 Box: **Hetzner Cloud CX23** (2 vCPU / 4 GB, EU region — an EU IP reduces
 Google/rental-site bot-flagging and is low-latency to the NL sites).
@@ -29,8 +30,8 @@ cat ~/.ssh/id_ed25519.pub
 git clone git@github.com:caldaibis/browser-agent.git
 bash browser-agent/deploy/setup.sh
 ```
-Installs uv + Chromium + Xvfb + VNC + **Node 20+/npx** (for the pinned
-Playwright MCP) +
+Installs uv + Chromium + Xvfb + VNC + **Node 20+/npx**, the pinned
+**agent-browser** backend, and the pinned Playwright MCP rollback backend +
 **Caddy**; deploys all systemd units; starts `xvfb`, `browser-host`,
 `healthcheck.timer`, `dashboard` (but NOT `orchestrator` yet). To render the
 Caddyfile, run with `DASHBOARD_DOMAIN`, `DASHBOARD_USER`, `DASHBOARD_HASH` set

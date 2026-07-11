@@ -44,6 +44,7 @@ doctor:
     chk(){ if eval "$2" >/dev/null 2>&1; then printf "  ok    %s\n" "$1"; else printf "  FAIL  %s\n" "$1"; rc=1; fi; }
     echo "preflight:"
     chk "uv installed"                 "command -v uv"
+    chk "agent-browser pinned runtime" 'test "$(agent-browser --version 2>/dev/null | awk '\''{print $2}'\'')" = "$(tr -d '\''[:space:]'\'' < deploy/agent-browser.version)"'
     chk "Node 20+ present (MCP)"       "node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 20 ? 0 : 1)'"
     chk "pinned Playwright MCP starts" "uv run python -c 'from src.playwright_mcp_runtime import runtime_check; raise SystemExit(0 if runtime_check()[0] else 1)'"
     chk "DEEPSEEK_API_KEY set"         '[ -n "${DEEPSEEK_API_KEY:-}" ]'
@@ -51,12 +52,36 @@ doctor:
     chk "documents/ non-empty"         '[ -n "$(ls -A documents 2>/dev/null)" ]'
     chk "CDP browser reachable :9222"  "curl -sf http://127.0.0.1:9222/json/version"
     chk "LiteLLM proxy reachable :4000 (self-improvement)" "curl -sf http://127.0.0.1:4000/health/liveliness"
-    [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (start the host with 'just host', the claude CLI with 'just ensure-claude-cli', the proxy with 'just litellm-proxy')"
+    [ $rc -eq 0 ] && echo "all good" || echo "see FAILs above (run 'just ensure-agent-browser', start the host with 'just host', the claude CLI with 'just ensure-claude-cli', and the proxy with 'just litellm-proxy')"
     exit $rc
 
 # install the claude CLI locally if missing (self-improvement agent; no sudo attempted -- if your npm needs it, run this yourself)
 ensure-claude-cli:
     command -v claude >/dev/null 2>&1 && echo "claude CLI already present: $(command -v claude)" || npm install -g @anthropic-ai/claude-code
+
+# Install exactly the browser interface version reviewed with this checkout.
+ensure-agent-browser:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(tr -d '[:space:]' < deploy/agent-browser.version)"
+    current="$(agent-browser --version 2>/dev/null | awk '{print $2}' || true)"
+    if [ "$current" = "$version" ]; then
+      echo "agent-browser $version already installed"
+    else
+      npm install -g "agent-browser@$version"
+    fi
+
+# Real CDP/MCP regression on a disposable local page and Chromium profile.
+agent-browser-smoke:
+    RUN_AGENT_BROWSER_LIVE=1 uv run pytest -q tests/test_agent_browser_live.py -vv
+
+# Deterministic before/after metrics from both pinned MCP tool contracts.
+browser-backend-metrics output="":
+    uv run python -m src.browser_backend_metrics {{ if output == "" { "" } else { "--output " + output } }}
+
+# Empirical token distributions grouped by browser backend/version and model.
+browser-token-metrics path="logs/trajectories":
+    uv run python -m src.browser_token_metrics {{path}}
 
 # print the exact apply prompt for a saved listing JSON, without running anything.
 dry-prompt path="logs/last_listing.json":

@@ -4,7 +4,7 @@ Fully-autonomous responder for Stekkies rental matches.
 
 **Pipeline:** Gmail (new Stekkies mail) → open Stekkies listing with your saved
 login, extract listing metadata + external "Go to listing" URL → hand off to
-our **browser agent** (`src/browser_agent.py`), which opens the source site
+our **browser agent** (`src/browser_agent/`), which opens the source site
 (Ik Wil Huren, Pararius, Funda, …), writes a customized message from the
 reference template, fills the application form, uploads your documents, and
 submits.
@@ -18,8 +18,9 @@ A single persistent Chromium — the **browser host** (`src.browser_host`) — r
 with a CDP debugging port. Both the Stekkies extractor and the apply agent
 **attach to it over CDP**, so every session lives in one profile you sign into
 once: Google (enables "Sign in with Google" SSO on Funda etc.), Stekkies, and all
-rental sites. The apply agent drives it via the Playwright MCP (`--cdp-endpoint`),
-and needs `DEEPSEEK_API_KEY` set.
+rental sites. The apply agent drives it through pinned `agent-browser` attached
+to the same CDP endpoint. Playwright MCP remains an explicit rollback backend.
+The agent also needs `DEEPSEEK_API_KEY` set.
 
 ## Layout
 - `src/config.py`       — paths, URLs, `CDP_URL`.
@@ -30,7 +31,7 @@ and needs `DEEPSEEK_API_KEY` set.
 - `src/import_passwords.py` — load a Google Password Manager CSV into the creds JSON.
 - `src/message_template.py` — reference application message the agent customizes.
 - `src/apply.py`        — build the task prompt (SSO-first, creds, docs), run the agent.
-- `src/browser_agent.py` — the agent loop (DeepSeek + Playwright MCP); returns a structured outcome.
+- `src/browser_agent/` — the agent loop, browser-backend adapter, guards, and structured result.
 - `src/gmail_watch.py`  — detect new Stekkies mails, extract the listing link.
 - `src/orchestrator.py` — ties it all together.
 - `state/`              — Chromium profile, creds, Gmail token, agent.env (do not commit).
@@ -42,6 +43,7 @@ Uses [uv](https://docs.astral.sh/uv/). `uv sync` creates `.venv` from
 ```bash
 uv sync
 uv run playwright install chromium
+just ensure-agent-browser
 
 # 1. Start the shared browser host and log into everything ONCE:
 uv run python -m src.browser_host --login   # opens Google, Stekkies, rental sites
@@ -68,6 +70,10 @@ just litellm-proxy       # own terminal/service, like `just host` — routes the
 ```
 `just doctor` checks both. See `AGENTS.md` for the full architecture (isolated
 git worktrees, push-to-main-triggers-CI/CD deploy, cost caveats).
+
+The browser backend defaults to `APPLY_BROWSER_BACKEND=agent_browser`. Set it
+to `playwright` only for rollback. `just agent-browser-smoke` runs the real MCP
+contract against a disposable local page and Chromium profile.
 
 ## Run
 ```bash

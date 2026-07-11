@@ -10,11 +10,17 @@ form, uploads docs, submits).
   port 9222. The Stekkies extractor and the apply agent both attach over CDP, so
   all logins (Google SSO + rental sites) live in one profile signed into once.
 - `src/stekkies.py` — attach over CDP, extract listing/source URL (deterministic).
-- `src/browser_agent.py` — our own lightweight agent loop (replaced Hermes):
-  AsyncOpenAI (DeepSeek) tool-calling over the **Playwright MCP**
-  (`npx @playwright/mcp@latest --cdp-endpoint http://127.0.0.1:9222`) for
-  snapshot/click/fill_form/file_upload. Filters raw-JS tools (browser_evaluate,
-  browser_run_code_unsafe), has a repeat-action guard + capped nudges, a
+- `src/browser_agent/` — our own lightweight agent loop (replaced Hermes):
+  AsyncOpenAI (DeepSeek) tool-calling over pinned **agent-browser MCP**, attached
+  to `http://127.0.0.1:9222`. `transport.py` exposes a small normalized surface
+  instead of its 150+ raw tools: compact/full/scoped snapshots, snapshot diffs,
+  semantic find, stable tabs, click/fill/batched-fill/select/upload, waits, and
+  dialogs. A deny-by-default daemon policy independently blocks eval, state and
+  network mutation, downloads, and administration; uploads are confined to
+  `DOCS_DIR`. `login_with_credential` uses agent-browser's encrypted local auth
+  vault so passwords do not enter model context. Playwright MCP remains an
+  explicit `APPLY_BROWSER_BACKEND=playwright` rollback. The loop has a
+  repeat-action guard + capped nudges, a
   one-shot nudge when `browser_snapshot` dominates the turns so far
   (`_should_nudge_snapshot_overuse` — the exact/short-cycle repeat guard
   can't catch this: the *type* of call repeats, not its arguments, since
@@ -24,7 +30,7 @@ form, uploads docs, submits).
   on the latest snapshot; without this cumulative input tokens grow
   quadratically with turns — see the hard-won lesson below), and returns a
   structured
-  `AgentResult(rc, outcome, summary, resolved_url)`. Four local (non-MCP)
+  `AgentResult(rc, outcome, summary, resolved_url)`. Five local (non-MCP)
   fallback tools (`src/browser_dom_tools.py`, shared with self-improvement's
   own browser diagnostics) give the model a way past HTML dialogs/overlays
   that lack proper ARIA roles and never get a `browser_snapshot` ref:
@@ -32,20 +38,37 @@ form, uploads docs, submits).
   `fill_by_label` (type into a text/email/tel/textarea input by its `<label>`
   text — there is no other way to reach a ref-less input at all, since
   `browser_type`/`browser_fill_form` need a snapshot ref and `click_by_text`
-  only clicks), and `select_option_by_label` (operate a custom dropdown whose
+  only clicks), `select_option_by_label` (operate a custom dropdown whose
   toggle has no text of its own, so `click_by_text` can't target it — clicks
   the nearest ancestor-with-a-button, then the option text; guards every
   `<form>` against a premature real submit first, since option buttons on
-  real sites often default to `type="submit"`). All four are scoped to the
-  currently *open* `<dialog>` first when one exists (`dialog_scope`) — sites
-  can reuse the same field ids across several hidden dialogs on one page
+  real sites often default to `type="submit"`), and `aggregator_hop` (a
+  composite fast path for the huurwoningen.nl aggregator gateway: clicks the
+  "Contact met de verhuurder" control — its visible text varies, "Bekijk
+  opnieuw"/"Reageer op deze woning"/"Reageer" all seen — then "Ga verder" in
+  the dialog it opens, as ONE tool call instead of the 7-19 turns of
+  `browser_find`/`dom_scan` trial-and-error a paired replay measured,
+  10-07-2026, one session ballooning from 85k to 211k tokens on exactly this
+  gateway). The first four are scoped to the currently *open* `<dialog>`
+  first when one exists (`dialog_scope`) — sites can reuse the same field ids
+  across several hidden dialogs on one page
   (verified: REBO Groep's viewing-request, brochure-download, and
   email-upsell dialogs all use `id="first_name"` etc), so an unscoped
   `getElementById`/`get_by_label`/`get_by_text` silently resolves to a hidden
   duplicate — a 0×0 bounding box for a fill, or a `click_by_text` timeout for
   a click, not an error pointing at the real cause. None of this is arbitrary
   JS: each is one fixed, narrow operation, unlike the still-blocked
-  `browser_evaluate`. `_run()` also does a cross-source duplicate check once
+  `browser_evaluate`. The DeepSeek adapter also normalizes tool-call
+  arguments against each agent-browser tool's own declared schema
+  (`transport._normalize_tool_args`) before dispatch — the same paired replay
+  found DeepSeek emitting booleans/numbers as strings (`interactive="True"`,
+  26 times in a 10-session sample) and `browser_find` calls omitting
+  `action` entirely (defaulted to `"text"`, a safe read, instead of erroring)
+  — and the snapshot-overuse guard now counts `browser_snapshot`,
+  `browser_snapshot_diff`, `browser_read_page`, and `dom_scan` together
+  (`observation_calls`), since a run leaning on any mix of those four to
+  avoid a plain-snapshot-only counter looks identical in effect. `_run()`
+  also does a cross-source duplicate check once
   per turn: if the browser's current tab lands on a URL already recorded as
   processed under a *different* URL than this run's input (see
   `dedup.py`'s `known_processed_urls`), it stops immediately with
@@ -308,6 +331,9 @@ form, uploads docs, submits).
   a hard reset to a tree where they're absent deletes them. Always
   `tar czf <backup> documents state` first, reset, then `tar xzf <backup>
   documents`. Run git as the deploy user (the repo is deploy-owned).
+- The pinned agent-browser version in `deploy/agent-browser.version` is required
+  at runtime (`just ensure-agent-browser`). Node/npx remains for the Playwright
+  rollback path and the Claude CLI.
 - Node 20+/npx is required at runtime for the pinned Playwright MCP
   (`@playwright/mcp@0.0.78`). Never use `@latest`: it raised its Node engine
   requirement on 10-07-2026 and every apply began failing before turn 1 while
@@ -376,9 +402,11 @@ The standing rules are below; each dated incident's full postmortem lives in
   empty turns (`finish_reason=length`) are retried, never treated as a
   conclusion; per-turn `finish_reason` + token counts are logged.
   → `docs/lessons/2026-06-29-reasoning-truncation-silent-stall.md`
-- **Use the Playwright MCP high-level tools** (snapshot→ref→click/fill_form);
-  the raw-JS path (`browser_cdp`/`browser_evaluate`) caused 50+ calls +
-  full-page dumps for one task. They stay filtered out.
+- **Use the normalized agent-browser high-level tools** (compact/full/scoped
+  snapshot -> ref -> click/fill_form, snapshot diff after same-page changes,
+  semantic find when refs are absent). Raw JavaScript remains blocked by both
+  tool filtering and daemon policy; it previously caused 50+ calls and
+  full-page dumps for one task.
 - **Accessibility-tree snapshots miss dialogs built without proper ARIA
   roles.** `dom_scan`/`click_by_text`/`fill_by_label`/
   `select_option_by_label` (`src/browser_dom_tools.py`) are the narrow,
