@@ -13,6 +13,7 @@ class TestLoadSettings(unittest.TestCase):
         self.assertEqual(s.apply_model, "deepseek-v4-pro")
         self.assertEqual(s.agent_browser_max_output_chars, 20000)
         self.assertEqual(s.apply_max_turns, 60)
+        self.assertEqual(s.self_improvement_diagnosis_max_turns, 20)
         self.assertEqual(s.max_rent, 1750.0)
         self.assertTrue(s.notify_enabled_flag)
         self.assertEqual(s.web_push_outcomes, frozenset({"submitted"}))

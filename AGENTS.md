@@ -182,8 +182,9 @@ form, uploads docs, submits).
   always removes it in a `finally` (`_remove_worktree`), even on timeout.
   **Two phases** (07-07-2026 — 3 production runs died at "Reached maximum
   number of turns (30)" because ONE budget had to cover diagnose+patch+verify):
-  a read-only diagnosis run (`SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS`, 15) ends
-  with a `DIAGNOSIS_JSON` verdict (noop / email_user / fix, plus
+  a read-only, evidence-first diagnosis run
+  (`SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS`, 20) ends with a `DIAGNOSIS_JSON`
+  verdict (noop / email_user / fix, plus
   `record_known_gate` for external gates); only a `fix` verdict starts the
   patch run, which gets the full `SELF_IMPROVEMENT_MAX_TURNS` budget to
   itself and the diagnosis injected. Diagnoses the failure from the redacted

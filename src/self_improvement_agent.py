@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 import traceback
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -78,8 +78,11 @@ SELF_IMPROVEMENT_MAX_TURNS = settings().self_improvement_max_turns
 # The run is split in two phases (verified need: 3 production runs died at
 # "Reached maximum number of turns (30)" because ONE budget had to cover
 # read-conventions + diagnose + patch + verify). Phase 1 diagnoses with
-# read-only tools on a small budget; phase 2 (only on a "fix" verdict)
-# patches with the FULL SELF_IMPROVEMENT_MAX_TURNS budget to itself.
+# read-only tools on a bounded budget; phase 2 (only on a "fix" verdict)
+# patches with the FULL SELF_IMPROVEMENT_MAX_TURNS budget to itself. Twenty
+# turns gives diagnosis enough room to verify a direct causal error and submit
+# its authoritative verdict, while the prompt explicitly stops broad research
+# once that evidence exists.
 SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS = settings().self_improvement_diagnosis_max_turns
 # ClaudeAgentOptions.max_budget_usd is enforced against the SDK's own
 # *client-side* cost estimate, which doesn't recognize a proxied model_name
@@ -321,15 +324,28 @@ def _improve_after_apply_now(
              error=f"{type(e).__name__}: {e}")
 
     def _ctx(incident: dict) -> dict:
+        result_context = {
+            "outcome": result.outcome,
+            "rc": result.rc,
+            "summary": result.summary,
+            "transcript_path": result.transcript_path,
+        }
+        try:
+            failure_record = asdict(self_improvement_harness.build_failure_record(
+                json.dumps(
+                    {"result": result_context, "extra": extra or {}},
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                outcome=result.outcome,
+            ))
+        except Exception:  # noqa: BLE001 - evidence is fail-open
+            failure_record = {}
         return {
             "kind": "apply",
             "listing": listing,
-            "result": {
-                "outcome": result.outcome,
-                "rc": result.rc,
-                "summary": result.summary,
-                "transcript_path": result.transcript_path,
-            },
+            "result": result_context,
+            "failure_record": failure_record,
             "trigger": trigger,
             "msg_id": msg_id,
             "extra": extra or {},

@@ -23,11 +23,18 @@ _SHARED_CONSTRAINTS = """- Do not ask the user questions; make a decision. If us
   edit an existing application, reset a password, upload a file, or change
   account settings."""
 
-_STOP_RULE = """STOP RULE: once one root cause is supported by direct evidence and you
-can state a bounded verdict/fix plan, call submit_diagnosis immediately. Do
-not research package histories, alternative implementations, deployment
-mechanics, or extra corroboration after the causal error is known. The tool's
-record is authoritative even if the SDK later reaches its turn limit."""
+_STOP_RULE = """EVIDENCE-FIRST STOP RULE: inspect the failure context and direct failure
+evidence before broad repository research. Once one root cause is supported
+and you can state a bounded verdict/fix plan, call submit_diagnosis in your
+very next tool call. Do not read whole documentation files or research package
+histories, alternative implementations, deployment mechanics, or extra
+corroboration after the causal error is known. The apply path's only MCP
+backend is agent-browser; Playwright MCP is retired, so a historical
+Playwright-MCP error is evidence about an old deployed revision/runtime, not a
+reason to investigate or reintroduce that backend. The tool's record is
+authoritative even if the SDK later reaches its turn limit. If eight targeted
+investigative tool calls do not establish a stronger cause, submit the most
+supported conservative verdict rather than spending the entire budget."""
 
 
 def _diagnosis_prompt(context: dict) -> str:
@@ -43,24 +50,30 @@ files or commit in this phase — a separate patch phase runs afterwards if you
 conclude a code fix is warranted, and it receives your diagnosis verbatim, so
 make root_cause and fix_plan specific (file paths, line-level behavior).
 
-1. Diagnose the root cause. Start by reading AGENTS.md and README.md for repo
-   conventions, then the failure context below, the transcript tail (if any),
-   and recent entries in {log_paths}. Use Read/Grep/Glob to inspect any
-   relevant source files.
-2. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
+1. Diagnose the root cause from the FAILURE_CONTEXT below. Start with its
+   result, extra evidence, failure_record, transcript tail (if any), and
+   recent entries in {log_paths}; inspect the exact causal error before broad
+   repository research. Use Read/Grep/Glob to inspect only relevant source
+   files.
+2. FAILURE_CONTEXT.failure_record (when present) is a deterministic,
+   fail-open hypothesis from the offline harness. Verify it against the raw
+   evidence; do not spend turns re-deriving a weaker generic explanation.
+3. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
    memory: how often this same fingerprint occurred and what earlier
    self-improvement runs already concluded or tried (prior_attempts). BUILD
    ON IT — do not re-derive a root cause an earlier attempt already
    established; explain instead what must happen differently this time
    (e.g. the earlier fix never landed, or attacked the wrong layer).
-3. If the root cause is an external *site or account gate* — a paid
+4. Read AGENTS.md and README.md only as needed for the relevant repository
+   convention after inspecting the failure evidence.
+5. If the root cause is an external *site or account gate* — a paid
    registration/membership requirement, an account-side cap (e.g. max
    concurrent viewing requests), a required regional registration, delayed
    access for non-paying accounts, or a site-wide eligibility mismatch —
    record it with the record_known_gate tool. That makes the pipeline skip
    or warn deterministically on this domain from the next listing onward,
    with no code change. Use expires_ts for temporary caps.
-4. Choose exactly one verdict:
+6. Choose exactly one verdict:
    - noop: expected external state; nothing useful for code or user to do
      (record_known_gate, when applicable, still counts as noop).
    - email_user: user action is needed (login/2FA/manual account issue) —
@@ -72,7 +85,7 @@ make root_cause and fix_plan specific (file paths, line-level behavior).
    this failure, that is a fix verdict, not a "model capability limitation"
    or "LLM inefficiency". Reserve noop for failures with no code-side cause
    at all (site outage, eligibility mismatch, rate limits).
-5. {_STOP_RULE}
+7. {_STOP_RULE}
 
 FAILURE_CONTEXT:
 {json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
@@ -107,14 +120,19 @@ WHAT THE ADAPTER OBSERVED: {sk.get('detail')}
    this domain and its `login` function (e.g. `_login_huurwoningen`) -- the
    exact button-text regexes, form-field selectors, and blocker-detection
    regexes it relies on.
-2. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
+2. FAILURE_CONTEXT.failure_record (when present) is a deterministic,
+   fail-open hypothesis from the offline harness. Verify it against the raw
+   evidence; do not spend turns re-deriving a weaker generic explanation.
+3. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
    memory: what earlier self-improvement runs already concluded/tried for
    THIS domain. Build on it -- don't re-derive a root cause an earlier
    attempt already established.
-3. Use browser_open/browser_diagnostics to inspect the LIVE login page at
+4. Use browser_open/browser_diagnostics to inspect the LIVE login page at
    LOGIN URL in the shared logged-in browser (the same profile the adapter
    itself uses). Compare what you see against the adapter's assumptions.
-4. Choose exactly one verdict:
+5. Read only the relevant adapter code and repository guidance; do not spend
+   turns reading broad documentation before inspecting the login evidence.
+6. Choose exactly one verdict:
    - fix: the live page's button text, field selectors, or login flow no
      longer match what the adapter looks for (e.g. the Google SSO button
      text changed, the email/password inputs no longer match the adapter's
@@ -131,7 +149,7 @@ WHAT THE ADAPTER OBSERVED: {sk.get('detail')}
    Be conservative about *scope*, but not about *whether to act*: if the live
    page contradicts a specific selector/regex in the adapter, that is a fix,
    not a noop.
-5. {_STOP_RULE}
+7. {_STOP_RULE}
 
 FAILURE_CONTEXT:
 {json.dumps(_redacted(context), ensure_ascii=False, indent=2)}

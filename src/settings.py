@@ -285,7 +285,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             e, "SELF_IMPROVEMENT_MAX_TURNS", 30,
             _si_legacy("SELF_IMPROVEMENT_MAX_TURNS")),
         self_improvement_diagnosis_max_turns=_int(
-            e, "SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS", 15,
+            e, "SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS", 20,
             _si_legacy("SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS")),
         self_improvement_max_budget_usd=_float(
             e, "SELF_IMPROVEMENT_MAX_BUDGET_USD", 40.0,
