@@ -2,8 +2,8 @@
 
 This is the ONE place that stamps persisted timestamps and the one funnel
 through which event records reach disk, replacing the per-module `_log` /
-`_activity` copies that used to live in orchestrator.py, poller/watcher.py,
-and friends. Three invariants it enforces:
+`_activity` copies that used to live in orchestrator.py and friends. Three
+invariants it enforces:
 
 - **UTC, offset-aware timestamps** (`2026-07-08T12:34:56+00:00`). The old
   copies stamped naive local time — ambiguous at DST transitions and 2h off
@@ -15,8 +15,7 @@ and friends. Three invariants it enforces:
 - **One JSONL shape**: `{"ts": ..., "event": ..., **fields}`.
 
 Appends are O_APPEND single-write, which POSIX keeps atomic for these line
-sizes across the multiple writer processes (orchestrator, poller,
-healthcheck).
+sizes across the multiple writer processes (orchestrator, healthcheck).
 """
 from __future__ import annotations
 

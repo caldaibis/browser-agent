@@ -1,8 +1,0 @@
-{# Shared render helpers. Import with:
-   {% from "_macros.html" import race_delta %} #}
-
-{% macro race_delta(lead_s, won) %}
-<span class="{{ 'delta-win' if won else 'delta-loss' if lead_s is not none else 'delta-none' }}">
-  {{ fmt_delta(lead_s) }}
-</span>
-{% endmacro %}

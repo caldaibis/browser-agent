@@ -37,7 +37,13 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import eventlog, incident_store, known_gates, self_improvement_harness
+from . import (
+    eventlog,
+    incident_store,
+    known_gates,
+    self_improvement_harness,
+    self_improvement_queue,
+)
 from .self_improvement.browser_tools import (
     _blocked_click_label as _blocked_click_label,  # re-export: tests target this module
     _browser_tools,
@@ -116,7 +122,8 @@ _DIAGNOSIS_MARKER_RE = re.compile(r"DIAGNOSIS_JSON:\s*(\{.*\})", re.DOTALL)
 # actually write git history, deny raw git-write/deploy attempts via Bash too
 # so enforcement doesn't depend on the model choosing the right tool.
 _DANGEROUS_BASH_RE = re.compile(
-    r"\bgit\s+(commit|push|reset\b|checkout\s+--|clean\s+-f)\b",
+    r"\bgit\s+(add|branch|switch|checkout|merge|rebase|stash|commit|push|"
+    r"reset|clean|tag|cherry-pick|revert)\b",
     re.IGNORECASE,
 )
 
@@ -132,6 +139,19 @@ class SelfImprovementResult:
     log_path: str = ""  # per-run text log, so the dashboard can link to it
     strategy: str = ""
     candidate_id: str = ""
+
+
+@dataclass
+class _RunToolState:
+    """Authoritative state written by tools before the model can time out.
+
+    Model-authored JSON remains a compatibility fallback.  A successfully
+    recorded diagnosis, gate, email, commit, or push must survive a later SDK
+    max-turn/control error.
+    """
+
+    diagnosis: dict[str, Any] | None = None
+    terminal: SelfImprovementResult | None = None
 
 
 def should_recover(status: str | None) -> bool:
@@ -151,12 +171,12 @@ def _run_for_incident(
     occurrence_listing: dict | None = None,
     occurrence_summary: str = "",
 ) -> SelfImprovementResult:
-    """Shared engine for every self-improvement trigger (apply failures AND
-    poller zero-yield). Incident memory (src/incident_store.py): fingerprint,
-    skip if this incident already had a run in the dedup window, and feed a
-    run that does happen its predecessors' findings. Fail-open: a broken store
-    never blocks self-improvement, and self-improvement never raises into the
-    pipeline that called it.
+    """Shared engine for every self-improvement trigger. Incident memory
+    (src/incident_store.py): fingerprint, skip if this incident already had a
+    run in the dedup window, and feed a run that does happen its
+    predecessors' findings. Fail-open: a broken store never blocks
+    self-improvement, and self-improvement never raises into the pipeline
+    that called it.
     """
     incident: dict = {}
     try:
@@ -246,6 +266,46 @@ def improve_after_apply(
     msg_id: str | None = None,
     extra: dict | None = None,
 ) -> SelfImprovementResult | None:
+    """Persist a failed apply for the dedicated serial worker."""
+    if not should_improve(result.outcome):
+        return None
+    payload = {
+        "listing": listing,
+        "result": {
+            "rc": result.rc,
+            "outcome": result.outcome,
+            "summary": result.summary,
+            "transcript_path": result.transcript_path,
+            "resolved_url": result.resolved_url,
+        },
+        "trigger": trigger,
+        "msg_id": msg_id,
+        "extra": extra or {},
+    }
+    try:
+        job_id = self_improvement_queue.enqueue("apply", payload)
+    except Exception as exc:  # noqa: BLE001 - queue must never break apply
+        _log("queue_error", status=result.outcome, trigger=trigger,
+             error=f"{type(exc).__name__}: {exc}")
+        return SelfImprovementResult(
+            action="error",
+            summary=f"Could not persist self-improvement job: {type(exc).__name__}: {exc}",
+        )
+    _log("queued", status=result.outcome, job_id=job_id, trigger=trigger)
+    return SelfImprovementResult(
+        action="queued",
+        summary=f"Queued self-improvement job {job_id} for the serial worker.",
+    )
+
+
+def _improve_after_apply_now(
+    *,
+    listing: dict,
+    result: AgentResult,
+    trigger: str,
+    msg_id: str | None = None,
+    extra: dict | None = None,
+) -> SelfImprovementResult | None:
     """Run self-improvement for a failed apply result when configured to do so.
 
     Never raises into the caller; the application pipeline must continue even if
@@ -284,58 +344,83 @@ def improve_after_apply(
     )
 
 
-def improve_poller_zero_yield(
+def improve_session_keeper_adapter(
     *,
-    site_name: str,
-    list_url: str = "",
-    tier: int = 0,
-    parser_desc: str = "",
-    sample_path: str = "",
-    streak: int = 0,
+    domain: str,
+    detail: str,
+    probe_url: str = "",
+    login_url: str = "",
 ) -> SelfImprovementResult | None:
-    """Close the loop on a silently-broken poller parser: a site that has
-    yielded zero listings for many consecutive polls almost always means its
-    parser stopped matching the site's markup (URL scheme changed, JSON-LD
-    dropped, now behind login). Instead of emailing a human to run
-    `just poll-once` and fix it, drive the same two-phase diagnose→patch→
-    deploy engine against the saved sample HTML. Returns None only when
-    self-improvement is disabled entirely (so the caller can fall back to the
-    old alert); otherwise always returns a result (possibly a dedup skip)."""
+    """Close the loop on a session-keeper login adapter that ran to
+    completion but did not restore a logged-in session -- almost always
+    because the site's login page changed and the adapter's selectors/button
+    text in src/session_keeper.py are stale. Only called for that ONE failure
+    class (see session_keeper._feed_self_improvement): CAPTCHA, 2FA, account-
+    chooser mismatches, and rejected passwords are real external gates only a
+    human can clear, and never reach here. Returns None only when
+    self-improvement is disabled entirely; otherwise always returns a result
+    (possibly a dedup skip)."""
+    if not SELF_IMPROVEMENT_ENABLED:
+        return None
+    payload = {
+        "domain": domain, "detail": detail,
+        "probe_url": probe_url, "login_url": login_url,
+    }
+    try:
+        job_id = self_improvement_queue.enqueue("session_keeper_adapter", payload)
+    except Exception as exc:  # noqa: BLE001 - caller falls back to alert
+        _log("queue_error", status="session_keeper_adapter",
+             trigger="session_keeper", error=f"{type(exc).__name__}: {exc}")
+        return None
+    _log("queued", status="session_keeper_adapter", job_id=job_id,
+         trigger="session_keeper")
+    return SelfImprovementResult(
+        action="queued",
+        summary=f"Queued self-improvement job {job_id} for the serial worker.",
+    )
+
+
+def _improve_session_keeper_adapter_now(
+    *,
+    domain: str,
+    detail: str,
+    probe_url: str = "",
+    login_url: str = "",
+) -> SelfImprovementResult | None:
     if not SELF_IMPROVEMENT_ENABLED:
         return None
     fp = None
     try:
-        fp = incident_store.fingerprint_poller_zero_yield(site_name)
+        fp = incident_store.fingerprint_session_keeper_adapter(domain)
     except Exception as e:  # noqa: BLE001
-        _log("incident_store_error", status="poller_zero_yield",
+        _log("incident_store_error", status="session_keeper_adapter",
              error=f"{type(e).__name__}: {e}")
 
-    summary = (f"Poller site {site_name} yielded 0 listings for {streak} "
-               f"consecutive polls ({list_url}); its parser is likely broken.")
+    summary = (f"session_keeper's login adapter for {domain} completed a "
+              f"repair attempt but the session was not restored: {detail}")
 
     def _ctx(incident: dict) -> dict:
         return {
-            "kind": "poller_zero_yield",
+            "kind": "session_keeper_adapter",
             "result": {
-                "outcome": "poller_zero_yield", "rc": 0,
+                "outcome": "session_keeper_adapter_broken", "rc": 0,
                 "summary": summary, "transcript_path": "",
             },
-            "poller": {
-                "site_name": site_name, "list_url": list_url, "tier": tier,
-                "parser_desc": parser_desc, "sample_path": sample_path,
-                "streak": streak,
+            "session_keeper": {
+                "domain": domain, "detail": detail,
+                "probe_url": probe_url, "login_url": login_url,
             },
-            "trigger": "poller_zero_yield",
+            "trigger": "session_keeper",
             "msg_id": None,
             "extra": {},
             "incident": incident,
         }
 
     return _run_for_incident(
-        fp=fp, ctx_builder=_ctx, status_label="poller_zero_yield",
+        fp=fp, ctx_builder=_ctx, status_label="session_keeper_adapter_broken",
         occurrence_summary=summary,
         crash_detail=(f"The self-improvement agent crashed while handling a "
-                      f"zero-yield for poller site {site_name}."),
+                      f"broken session-keeper adapter for {domain}."),
     )
 
 
@@ -347,23 +432,93 @@ def improve_exception(
     msg_id: str | None = None,
     extra: dict | None = None,
 ) -> SelfImprovementResult | None:
+    evidence = _format_exception_evidence(error)
     result = AgentResult(
         rc=2,
         outcome="error",
-        summary=f"{type(error).__name__}: {error}",
+        summary=evidence,
     )
     return improve_after_apply(
         listing=listing,
         result=result,
         trigger=trigger,
         msg_id=msg_id,
-        extra=extra,
+        extra={**(extra or {}), "exception_evidence": evidence},
     )
+
+
+def process_queued_job(job: dict[str, Any]) -> SelfImprovementResult | None:
+    """Execute one durable job. Called only by the serial worker."""
+    kind = str(job.get("kind") or "")
+    payload = job.get("payload") or {}
+    if kind == "apply":
+        raw = payload.get("result") or {}
+        result = AgentResult(
+            rc=int(raw.get("rc") or 2),
+            outcome=str(raw.get("outcome") or "error"),
+            summary=str(raw.get("summary") or ""),
+            transcript_path=str(raw.get("transcript_path") or ""),
+            resolved_url=str(raw.get("resolved_url") or ""),
+        )
+        return _improve_after_apply_now(
+            listing=payload.get("listing") or {},
+            result=result,
+            trigger=str(payload.get("trigger") or "unknown"),
+            msg_id=payload.get("msg_id"),
+            extra=payload.get("extra") or {},
+        )
+    if kind == "session_keeper_adapter":
+        return _improve_session_keeper_adapter_now(
+            domain=str(payload.get("domain") or ""),
+            detail=str(payload.get("detail") or ""),
+            probe_url=str(payload.get("probe_url") or ""),
+            login_url=str(payload.get("login_url") or ""),
+        )
+    raise ValueError(f"unknown self-improvement job kind: {kind!r}")
+
+
+def _format_exception_evidence(error: BaseException) -> str:
+    """Keep nested ExceptionGroup causes instead of only its generic title."""
+    rendered = "".join(traceback.format_exception(error)).strip()
+    if not rendered:
+        rendered = f"{type(error).__name__}: {error}"
+    return redact(rendered)[-20_000:]
+
+
+def record_abandoned_runs() -> list[str]:
+    """Close run starts left terminal-less by SIGTERM/deploy/host death."""
+    starts: set[str] = set()
+    finished: set[str] = set()
+    try:
+        with RUN_LOG.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                run_id = str(rec.get("run_id") or "")
+                if rec.get("event") == "run_started" and run_id:
+                    starts.add(run_id)
+                elif rec.get("event") == "run_finished" and run_id:
+                    finished.add(run_id)
+    except OSError:
+        return []
+    abandoned = sorted(starts - finished)
+    for run_id in abandoned:
+        _log("run_abandoned", run_id=run_id,
+             reason="worker recovered after prior process exited without terminal record")
+        _log("run_finished", run_id=run_id, action="orphan_recovered", terminal=True)
+    return abandoned
 
 
 def run_self_improvement(context: dict) -> SelfImprovementResult:
     log_path = _new_log_path()
+    run_id = log_path.stem
+    context = {**context, "run_id": run_id}
     logger = _Logger(log_path)
+    _log("run_started", run_id=run_id, status=context["result"]["outcome"],
+         log_path=str(log_path))
+    rr: SelfImprovementResult | None = None
     try:
         logger.line(f"[self-improvement] model={SELF_IMPROVEMENT_PROXY_MODEL} status={context['result']['outcome']}")
         rr = asyncio.run(asyncio.wait_for(
@@ -373,10 +528,17 @@ def run_self_improvement(context: dict) -> SelfImprovementResult:
         rr.log_path = str(log_path)
         return rr
     except TimeoutError:
-        return SelfImprovementResult(action="timeout",
-                                     summary="Self-improvement agent timed out.",
-                                     log_path=str(log_path))
+        rr = SelfImprovementResult(action="timeout",
+                                   summary="Self-improvement agent timed out.",
+                                   log_path=str(log_path))
+        return rr
+    except Exception:
+        _log("run_finished", run_id=run_id, action="error", terminal=True)
+        raise
     finally:
+        if rr is not None:
+            _log("run_finished", run_id=run_id, action=rr.action, terminal=True,
+                 code_changed=rr.code_changed, deployed=rr.deployed)
         logger.close()
 
 
@@ -410,6 +572,8 @@ async def _execute(context: dict, logger: _Logger) -> SelfImprovementResult:
         )
 
     worktree_path, branch_name = _create_worktree()
+    run_id = str(context.get("run_id") or "")
+    _log("worktree_created", run_id=run_id, path=str(worktree_path), branch=branch_name)
     logger.line(f"[self-improvement] worktree {worktree_path} on branch {branch_name}")
     try:
         system_prompt = (
@@ -418,23 +582,41 @@ async def _execute(context: dict, logger: _Logger) -> SelfImprovementResult:
             "outcome, working in an isolated git worktree checked out from "
             "origin/main -- a fix you commit here does not touch the live "
             "checkout directly; commit_push_deploy pushes it to main (or a "
-            "review branch) for the existing CI/CD pipeline to deploy."
+            "review branch) for the existing CI/CD pipeline to deploy. "
+            f"Your ONLY writable repository is {worktree_path}. The live "
+            f"checkout {PROJECT_ROOT} is evidence-only and MUST NEVER be "
+            "edited, staged, or used as a command working directory."
         )
+        tool_state = _RunToolState()
         mcp_servers: dict[str, Any] = {
             "browser": _browser_tools(),
-            "self_improve": _self_improve_tools(context, logger, worktree_path, branch_name),
+            "self_improve": _self_improve_tools(
+                context, logger, worktree_path, branch_name, tool_state),
         }
 
-        def _options(allowed_tools: list[str], max_turns: int) -> ClaudeAgentOptions:
+        def _options(
+            built_in_tools: list[str], mcp_tools: list[str], max_turns: int,
+            phase: str,
+        ) -> ClaudeAgentOptions:
             return ClaudeAgentOptions(
                 cwd=str(worktree_path),
                 system_prompt=system_prompt,
-                allowed_tools=allowed_tools,
-                disallowed_tools=["WebSearch", "WebFetch"],
-                permission_mode="bypassPermissions",
-                can_use_tool=_can_use_tool,
+                # `allowed_tools` only auto-approves; `tools` is the actual
+                # availability boundary in claude-agent-sdk 0.2.110.
+                tools=built_in_tools,
+                # MCP tools are fixed local operations and may auto-run.
+                # Built-ins deliberately go through can_use_tool on every call
+                # so Edit/Write path checks are enforcement, not prompt advice.
+                allowed_tools=mcp_tools,
+                disallowed_tools=[
+                    "WebSearch", "WebFetch", "Task", "TaskCreate",
+                    "TaskUpdate", "TaskList", "Agent", "NotebookEdit",
+                ],
+                permission_mode="default",
+                can_use_tool=_make_can_use_tool(worktree_path, phase),
                 setting_sources=[],
                 mcp_servers=mcp_servers,
+                strict_mcp_config=True,
                 model=SELF_IMPROVEMENT_PROXY_MODEL,
                 env={
                     # Redirect Claude Code at the local LiteLLM/DeepSeek proxy
@@ -452,27 +634,43 @@ async def _execute(context: dict, logger: _Logger) -> SelfImprovementResult:
 
         # ---- Phase 1: diagnosis (read-only; no Edit/Write, no commit tool).
         diagnosis_options = _options(
-            allowed_tools=[
-                "Read", "Grep", "Glob", "Bash",
+            built_in_tools=["Read", "Grep", "Glob", "Bash"],
+            mcp_tools=[
                 "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
                 "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
+                "mcp__self_improve__submit_diagnosis",
                 "mcp__self_improve__send_user_email",
                 "mcp__self_improve__record_known_gate",
             ],
             max_turns=SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS,
+            phase="diagnosis",
         )
-        result_msg = await _query_once(
-            _diagnosis_prompt(context), diagnosis_options, logger, phase="diagnosis")
-        if result_msg is None:
+        _log("phase_started", run_id=run_id, phase="diagnosis")
+        result_msg: ResultMessage | None = None
+        query_error: Exception | None = None
+        try:
+            result_msg = await _query_once(
+                _diagnosis_prompt(context), diagnosis_options, logger, phase="diagnosis")
+        except Exception as exc:  # salvage submit_diagnosis before max-turn errors
+            query_error = exc
+            logger.line(f"[self-improvement:diagnosis] query error: {type(exc).__name__}: {exc}")
+        diagnosis = tool_state.diagnosis
+        if diagnosis is None and result_msg is not None:
+            diagnosis = _parse_marker(result_msg, _DIAGNOSIS_MARKER_RE)
+        if query_error is not None and diagnosis is None:
+            raise query_error
+        if result_msg is None and diagnosis is None:
             return SelfImprovementResult(
                 action="incomplete",
                 summary="Diagnosis query ended without a result message.")
-        diagnosis = _parse_marker(result_msg, _DIAGNOSIS_MARKER_RE)
         if not isinstance(diagnosis, dict):
             return SelfImprovementResult(
                 action="incomplete",
                 summary=("Diagnosis ended without a DIAGNOSIS_JSON line: "
-                         + (result_msg.result or "no result text")[:1500]))
+                         + ((result_msg.result if result_msg else "") or
+                            "no result text")[:1500]))
+        _log("phase_finished", run_id=run_id, phase="diagnosis",
+             verdict=str(diagnosis.get("verdict") or ""), authoritative=bool(tool_state.diagnosis))
 
         verdict = str(diagnosis.get("verdict") or "").strip().lower()
         root_cause = str(diagnosis.get("root_cause") or "")
@@ -517,9 +715,11 @@ async def _execute(context: dict, logger: _Logger) -> SelfImprovementResult:
             logger=logger,
             options_factory=_options,
             worktree_path=worktree_path,
+            tool_state=tool_state,
         )
     finally:
         _remove_worktree(worktree_path, branch_name, logger)
+        _log("worktree_removed", run_id=run_id, path=str(worktree_path), branch=branch_name)
 
 
 async def _run_patch_candidates(
@@ -530,10 +730,11 @@ async def _run_patch_candidates(
     logger: _Logger,
     options_factory,
     worktree_path: Path,
+    tool_state: _RunToolState,
 ) -> SelfImprovementResult:
     patch_options = options_factory(
-        allowed_tools=[
-            "Read", "Edit", "Write", "Grep", "Glob", "Bash",
+        built_in_tools=["Read", "Edit", "Write", "Grep", "Glob"],
+        mcp_tools=[
             "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
             "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
             "mcp__self_improve__run_verification",
@@ -542,6 +743,7 @@ async def _run_patch_candidates(
             "mcp__self_improve__record_known_gate",
         ],
         max_turns=SELF_IMPROVEMENT_MAX_TURNS,
+        phase="patch",
     )
     strategies = _candidate_strategies(context, diagnosis)
     last = SelfImprovementResult(
@@ -556,23 +758,43 @@ async def _run_patch_candidates(
             "incident": (context.get("incident") or {}).get("fingerprint", ""),
             "diagnosis": diagnosis,
         })
-        result_msg = await _query_once(
-            _patch_prompt(context, diagnosis, candidate_strategy=strategy),
-            patch_options,
-            logger,
-            phase=f"patch:{strategy}",
-        )
-        if result_msg is None:
+        tool_state.terminal = None
+        run_id = str(context.get("run_id") or "")
+        phase = f"patch:{strategy}"
+        _log("phase_started", run_id=run_id, phase=phase, candidate_id=candidate_id)
+        result_msg: ResultMessage | None = None
+        query_error: Exception | None = None
+        try:
+            result_msg = await _query_once(
+                _patch_prompt(context, diagnosis, candidate_strategy=strategy),
+                patch_options,
+                logger,
+                phase=phase,
+            )
+        except Exception as exc:
+            query_error = exc
+            logger.line(f"[self-improvement:{phase}] query error: {type(exc).__name__}: {exc}")
+        if tool_state.terminal is not None:
+            last = tool_state.terminal
+        elif query_error is not None:
+            last = SelfImprovementResult(
+                action="error", root_cause=root_cause,
+                summary=f"{type(query_error).__name__}: {query_error}")
+        elif result_msg is None:
             last = SelfImprovementResult(
                 action="fix_failed", root_cause=root_cause,
                 summary="Patch query ended without a result message.",
                 strategy=strategy, candidate_id=candidate_id)
         else:
             last = _parse_result(result_msg)
-            if not last.root_cause:
-                last.root_cause = root_cause
             last.strategy = strategy
             last.candidate_id = candidate_id
+        if not last.root_cause:
+            last.root_cause = root_cause
+        last.strategy = strategy
+        last.candidate_id = candidate_id
+        _log("phase_finished", run_id=run_id, phase=phase, action=last.action,
+             authoritative=bool(tool_state.terminal), candidate_id=candidate_id)
         self_improvement_harness.record_candidate_event("result", {
             "candidate_id": candidate_id,
             "strategy": strategy,
@@ -582,7 +804,7 @@ async def _run_patch_candidates(
             "code_changed": last.code_changed,
             "deployed": last.deployed,
         })
-        if last.action == "fixed_deployed" or last.deployed or last.code_changed:
+        if last.action in {"fixed_deployed", "fixed_review"} or last.deployed or last.code_changed:
             return last
         if idx < len(strategies):
             reset = _reset_worktree_to_head(worktree_path)
@@ -698,27 +920,97 @@ async def _one_shot_prompt(text: str):
     }
 
 
+def _make_can_use_tool(worktree_path: Path, phase: str):
+    root = worktree_path.resolve()
+
+    async def guard(
+        tool_name: str,
+        tool_input: dict,
+        ctx: ToolPermissionContext,
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        data = tool_input or {}
+        if tool_name in {"Edit", "Write", "NotebookEdit"}:
+            raw_path = str(data.get("file_path") or data.get("path") or "")
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            try:
+                inside = candidate.resolve().is_relative_to(root)
+            except (OSError, RuntimeError):
+                inside = False
+            if not inside:
+                return PermissionResultDeny(
+                    message=f"Writes are restricted to isolated worktree {root}.")
+        if tool_name == "Bash":
+            command = str(data.get("command") or "")
+            if _DANGEROUS_BASH_RE.search(command):
+                return PermissionResultDeny(
+                    message=(
+                        "Direct git add/commit/push/reset via Bash is not allowed. "
+                        "Use commit_push_deploy; it verifies and records the result."
+                    ),
+                )
+            if phase == "patch" and str(PROJECT_ROOT) in command:
+                return PermissionResultDeny(
+                    message=(
+                        f"Patch commands may not target live checkout {PROJECT_ROOT}; "
+                        f"the command already runs in {root}."
+                    ),
+                )
+            if phase == "patch" and re.search(r"(^|[\s/])\.\.(/|\s|$)", command):
+                return PermissionResultDeny(
+                    message="Patch commands may not escape the isolated worktree with '..'.")
+            if phase == "diagnosis":
+                check = command.replace("2>/dev/null", "").replace("2>&1", "")
+                if re.search(
+                    r"(?:^|[;&|]\s*|\s)(?:rm|mv|cp|install|tee|touch|mkdir|chmod|chown|truncate)\s|"
+                    r"\bsed\s+-i\b|(?:^|[^>])>(?:>|[^&])",
+                    check,
+                ):
+                    return PermissionResultDeny(
+                        message="Diagnosis Bash is read-only; mutating shell commands are denied.")
+        return PermissionResultAllow()
+
+    return guard
+
+
 async def _can_use_tool(
     tool_name: str,
     tool_input: dict,
     ctx: ToolPermissionContext,
 ) -> PermissionResultAllow | PermissionResultDeny:
-    if tool_name == "Bash":
-        command = str((tool_input or {}).get("command") or "")
-        if _DANGEROUS_BASH_RE.search(command):
-            return PermissionResultDeny(
-                message=(
-                    "Direct git commit/push/reset via Bash is not allowed. Use the "
-                    "commit_push_deploy tool instead — it enforces verification and "
-                    "the configured push-to-main-or-review-branch policy."
-                ),
-            )
-    return PermissionResultAllow()
+    """Compatibility wrapper retained for tests and external imports."""
+    return await _make_can_use_tool(PROJECT_ROOT, "patch")(tool_name, tool_input, ctx)
 
 
 def _self_improve_tools(
     context: dict, logger: _Logger, worktree_path: Path, branch_name: str,
+    state: _RunToolState,
 ) -> McpSdkServerConfig:
+    @tool("submit_diagnosis", (
+        "Submit the final diagnosis and STOP investigating. Call as soon as a "
+        "root cause has direct evidence and a bounded verdict/fix plan."
+    ), {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["noop", "email_user", "fix"]},
+            "root_cause": {"type": "string"},
+            "fix_plan": {"type": "string"},
+            "summary": {"type": "string"},
+            "email_sent": {"type": "boolean"},
+            "surface": {"type": "string"},
+        },
+        "required": ["verdict", "root_cause", "fix_plan", "summary", "email_sent"],
+    })
+    async def submit_diagnosis(args: dict) -> dict:
+        state.diagnosis = _redacted(dict(args))
+        _log("tool_result", run_id=context.get("run_id"), tool="submit_diagnosis",
+             verdict=state.diagnosis.get("verdict"), authoritative=True)
+        return {"content": [{"type": "text", "text": (
+            "Diagnosis recorded authoritatively. Stop now and return; no more "
+            "source, browser, package, or deployment research is needed."
+        )}]}
+
     @tool("run_verification", "Run the configured verification command and return its output.", {
         "type": "object",
         "properties": {},
@@ -743,6 +1035,11 @@ def _self_improve_tools(
         text = await asyncio.to_thread(
             _commit_push_deploy, message, context, worktree_path, branch_name,
         )
+        state.terminal = _result_from_commit_output(text)
+        _log("tool_result", run_id=context.get("run_id"),
+             tool="commit_push_deploy", action=state.terminal.action,
+             code_changed=state.terminal.code_changed,
+             deployed=state.terminal.deployed, authoritative=True)
         return {"content": [{"type": "text", "text": text}]}
 
     @tool("send_user_email", "Email the configured recipient about required user action.", {
@@ -756,6 +1053,8 @@ def _self_improve_tools(
     async def send_user_email(args: dict) -> dict:
         subject = str(args.get("subject") or "Rental agent needs attention")
         send_alert(subject, redact(str(args.get("body") or "")))
+        _log("tool_result", run_id=context.get("run_id"), tool="send_user_email",
+             authoritative=True)
         return {"content": [{"type": "text", "text": "email sent"}]}
 
     @tool("record_known_gate", (
@@ -789,13 +1088,37 @@ def _self_improve_tools(
         except ValueError as e:
             return {"content": [{"type": "text", "text": f"REFUSED: {e}"}]}
         logger.line(f"[self-improvement] known gate: {confirmation}")
+        _log("tool_result", run_id=context.get("run_id"), tool="record_known_gate",
+             authoritative=True)
         return {"content": [{"type": "text", "text": confirmation}]}
 
     return create_sdk_mcp_server(
         name="self_improve",
-        tools=[run_verification, commit_push_deploy, send_user_email,
-               record_known_gate],
+        tools=[submit_diagnosis, run_verification, commit_push_deploy,
+               send_user_email, record_known_gate],
     )
+
+
+def _result_from_commit_output(text: str) -> SelfImprovementResult:
+    low = (text or "").lower()
+    if "pushed to main" in low:
+        return SelfImprovementResult(
+            action="fixed_deployed", summary=text[:2000], code_changed=True,
+            deployed=True)
+    if any(marker in low for marker in (
+        "pushed for review", "pushed to self-improvement/", "pushed to branch",
+        "instead; user email sent",
+    )):
+        return SelfImprovementResult(
+            action="fixed_review", summary=text[:2000], code_changed=True,
+            deployed=False, email_sent="email sent" in low)
+    if "patch saved locally" in low:
+        return SelfImprovementResult(
+            action="fix_failed", summary=text[:2000], code_changed=True,
+            deployed=False, email_sent="email sent" in low)
+    return SelfImprovementResult(
+        action="fix_failed", summary=(text or "commit/deploy tool failed")[:2000],
+        code_changed=False, deployed=False)
 
 
 def _commit_push_deploy(

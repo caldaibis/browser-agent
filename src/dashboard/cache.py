@@ -1,9 +1,9 @@
 """Cheap caching for the read-only dashboard.
 
 The old dashboard re-read all of `mail_summary.jsonl` (and re-parsed every
-run's transcript) on every request; the overview page triggered 5+ full
-reloads because `race_report`/`load_mail_events` each re-called
-`load_submissions()`. These logs are append-only, so we can do far better:
+run's transcript) on every request; the overview page triggered several full
+reloads because multiple internal callers each re-called `load_submissions()`.
+These logs are append-only, so we can do far better:
 
 - `JsonlTail` parses a JSONL file once, then on later calls only reads bytes
   appended since (keyed on size + mtime); it re-parses fully only if the file

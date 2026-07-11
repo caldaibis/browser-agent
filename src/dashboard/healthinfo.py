@@ -4,7 +4,7 @@ Split out of data.py (which is about submissions/costs/transcripts). This is
 the "does the operator need to do something right now" layer: live systemd
 service state, DeepSeek credit, login/session freshness, and the aggregated
 attention items (pending patches, paid gates, self-improvement failing,
-stuck browser lock, blocked poller sites).
+stuck browser lock).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from datetime import datetime
 
 from ..config import LOG_DIR, PROJECT_ROOT
 from ..healthcheck import CREDIT_THRESHOLD, remaining_credit
-from . import cache, data
+from . import cache
 
 ALERTS_FILE = PROJECT_ROOT / "state" / "alerts.json"
 ACTIVITY_LOG = LOG_DIR / "activity.log"
@@ -24,7 +24,7 @@ PENDING_PATCH_DIR = PROJECT_ROOT / "state" / "pending_patches"
 BROWSER_LOCK = PROJECT_ROOT / "state" / "browser.lock"
 SI_RUN_LOG = LOG_DIR / "self_improvement.jsonl"
 
-SERVICES = ["orchestrator", "poller", "browser-host", "xvfb", "dashboard", "healthcheck.timer"]
+SERVICES = ["orchestrator", "browser-host", "xvfb", "dashboard", "healthcheck.timer"]
 
 # Same rule as healthcheck.check_self_improvement: N consecutive failed runs.
 SI_HEALTH_WINDOW = 5
@@ -224,20 +224,6 @@ def attention_items() -> list[dict]:
                 "detail": f"Held > 35 min ({holder or 'unknown holder'}). The shared "
                           "browser may be wedged; no applies can run.",
             })
-
-        try:
-            sites = data.poller_site_health()
-            summary = data.poller_site_summary(sites)
-            if summary.get("blocked"):
-                blocked = ", ".join(s.name for s in sites if s.status == "blocked")
-                items.append({
-                    "severity": "warn",
-                    "title": f"{summary['blocked']} poller site(s) blocked",
-                    "detail": f"Being challenged/blocked: {blocked}.",
-                    "href": "/funnel",
-                })
-        except Exception:
-            pass
 
         order = {"bad": 0, "warn": 1}
         items.sort(key=lambda it: order.get(it["severity"], 9))

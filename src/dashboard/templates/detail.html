@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% from "_macros.html" import race_delta %}
 {% block title %}{{ sub.address or 'Submission' }}{% endblock %}
 {% block content %}
 <p><a href="/submissions">← submissions</a></p>
@@ -8,57 +7,33 @@
   <span class="badge origin">{{ sub.origin_label }}</span>
 </h3>
 
-<div class="grid2">
-  <article>
-    <header><strong>Submission</strong></header>
-    <table>
-      <tbody>
-        <tr><th>Finished</th><td>{{ sub.ts.replace('T',' ') }}</td></tr>
-        <tr><th>Detected</th><td>{{ (sub.detected_ts or sub.msg_received_ts or '—').replace('T',' ') }}</td></tr>
-        <tr><th>Origin</th><td>{{ sub.origin_label }}</td></tr>
-        <tr><th>Source</th><td>{{ sub.source or '—' }}</td></tr>
-        {% if sub.origin == 'poller' %}
-        <tr><th>Poller detected by</th><td>{{ sub.detected_by_label or '—' }}</td></tr>
-        {% endif %}
-        <tr><th>Duration</th><td>{{ fmt_dur(sub.seconds) }}</td></tr>
-        <tr><th>LLM cost</th><td>{{ usage.display_cost if usage else '—' }}</td></tr>
-        {% if usage %}
-        <tr><th>LLM tokens</th><td>
-          {{ usage.display_tokens }}
-          <span class="muted-txt">
-            (input {{ usage.input_tokens if usage.input_tokens is not none else 'unknown' }},
-            output {{ usage.output_tokens }}, reasoning {{ usage.reasoning_tokens }})
-          </span>
-        </td></tr>
-        <tr><th>LLM model</th><td>{{ usage.model or 'unknown' }}{% if usage.cost_is_partial %} <span class="muted-txt">(output-only lower bound; older transcript)</span>{% endif %}</td></tr>
-        {% endif %}
-        <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
-      </tbody>
-    </table>
-  </article>
-
-  <article>
-    <header><strong>Mail Race</strong></header>
-    {% if race %}
-    <table>
-      <tbody>
-        <tr><th>Detected by</th><td>{{ race.detected_by or '—' }}</td></tr>
-        <tr><th>Poller detected</th><td>{{ race.poller_ts.replace('T',' ') }}</td></tr>
-        <tr><th>Stekkies mail</th><td>
-          {{ race.stekkies_ts.replace('T',' ') if race.stekkies_ts else 'not seen' }}
-          {{ race_delta(race.stekkies_lead_s, race.poller_won_stekkies) }}
-        </td></tr>
-        <tr><th>Huurwoningen mail</th><td>
-          {{ race.huurwoningen_ts.replace('T',' ') if race.huurwoningen_ts else 'not seen' }}
-          {{ race_delta(race.huurwoningen_lead_s, race.poller_won_huurwoningen) }}
-        </td></tr>
-      </tbody>
-    </table>
-    {% else %}
-    <p class="muted-txt">No poller race record for this listing.</p>
-    {% endif %}
-  </article>
-</div>
+<article>
+  <header><strong>Submission</strong></header>
+  <table>
+    <tbody>
+      <tr><th>Finished</th><td>{{ sub.ts.replace('T',' ') }}</td></tr>
+      <tr><th>Detected</th><td>{{ (sub.detected_ts or sub.msg_received_ts or '—').replace('T',' ') }}</td></tr>
+      <tr><th>Origin</th><td>{{ sub.origin_label }}</td></tr>
+      <tr><th>Source</th><td>{{ sub.source or '—' }}</td></tr>
+      {% if sub.origin == 'poller' %}
+      <tr><th>Poller detected by</th><td>{{ sub.detected_by_label or '—' }}</td></tr>
+      {% endif %}
+      <tr><th>Duration</th><td>{{ fmt_dur(sub.seconds) }}</td></tr>
+      <tr><th>LLM cost</th><td>{{ usage.display_cost if usage else '—' }}</td></tr>
+      {% if usage %}
+      <tr><th>LLM tokens</th><td>
+        {{ usage.display_tokens }}
+        <span class="muted-txt">
+          (input {{ usage.input_tokens if usage.input_tokens is not none else 'unknown' }},
+          output {{ usage.output_tokens }}, reasoning {{ usage.reasoning_tokens }})
+        </span>
+      </td></tr>
+      <tr><th>LLM model</th><td>{{ usage.model or 'unknown' }}{% if usage.cost_is_partial %} <span class="muted-txt">(output-only lower bound; older transcript)</span>{% endif %}</td></tr>
+      {% endif %}
+      <tr><th>Outcome</th><td>{{ sub.message }}</td></tr>
+    </tbody>
+  </table>
+</article>
 
 <article>
   <header><strong>Links</strong></header>

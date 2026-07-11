@@ -17,10 +17,11 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
   git curl ca-certificates xvfb x11vnc fonts-liberation fonts-noto-color-emoji \
-  nodejs npm \
   >/dev/null
-# Node/npm installs the pinned agent-browser binary and Claude CLI. The apply
-# runtime itself uses agent-browser's native Rust CDP daemon; npx remains only
+# Node 20+/npx is installed and version-checked by the shared runtime ensure
+# step below. Ubuntu's default Node 18 silently became incompatible with the
+# pinned Playwright MCP in production on 2026-07-10. The same step installs the
+# pinned agent-browser binary used by the apply runtime; npx remains available
 # for the explicit APPLY_BROWSER_BACKEND=playwright rollback path.
 
 echo "==> [2/8] app user '${APP_USER}'"
@@ -54,8 +55,9 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
 
 echo "==> [7/8] systemd units"
-for unit in xvfb.service browser-host.service orchestrator.service poller.service \
-            vnc.service healthcheck.service healthcheck.timer dashboard.service; do
+for unit in xvfb.service browser-host.service orchestrator.service \
+            vnc.service healthcheck.service healthcheck.timer dashboard.service \
+            self-improvement-worker.service self-improvement-worker.timer; do
   sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
     "${APP_DIR}/deploy/systemd/${unit}" > "/etc/systemd/system/${unit}"
 done
@@ -85,6 +87,7 @@ echo "==> enable Xvfb + browser host + health-check timer + dashboard (NOT orche
 systemctl enable --now xvfb.service
 systemctl enable --now browser-host.service
 systemctl enable --now healthcheck.timer
+systemctl enable --now self-improvement-worker.timer
 systemctl enable --now dashboard.service
 
 cat <<EOF
@@ -101,6 +104,5 @@ cat <<EOF
        systemctl stop vnc.service
   3. Go live:
        systemctl enable --now orchestrator.service
-       systemctl enable --now poller.service   # active site poller (optional)
-       journalctl -u orchestrator -u poller -f
+       journalctl -u orchestrator -f
 EOF

@@ -364,21 +364,6 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         prune_lines = [l for l in log.lines if "pruned" in l and "stale page dump" in l]
         self.assertEqual(len(prune_lines), 2)
 
-    async def test_yield_check_aborts_before_spending_an_llm_call(self):
-        """With yield_check firing, the run must return rc=125 (outcome
-        'yielded') without ever calling the LLM — a priority mail apply is
-        waiting for the browser."""
-        responses = [_FakeResponse(content="never reached")]
-        patches = _patch_agent(responses)
-        log = _CollectingLogger()
-        with patches[0], patches[1], patches[2]:
-            rc, text = await loop._run(
-                prompt="test prompt", model="test-model", max_turns=60,
-                cdp_url="http://fake", log=log, yield_check=lambda: True,
-            )
-        self.assertEqual(rc, 125)
-        self.assertEqual(browser_agent._parse_outcome(text, rc), "yielded")
-
     async def test_payment_url_aborts_before_next_model_turn(self):
         responses = [
             _FakeResponse(tool_calls=[_FakeToolCall("id1", "browser_snapshot", "{}")]),

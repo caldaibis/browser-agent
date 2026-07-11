@@ -11,7 +11,7 @@ from src.dashboard import cache, healthinfo
 
 
 _HEALTHY = {
-    "services": {"orchestrator": "active", "poller": "active"},
+    "services": {"orchestrator": "active", "dashboard": "active"},
     "credit": 10.0, "credit_currency": "USD", "credit_low": False,
     "credit_threshold": 2.0, "stekkies_logged_in": True,
     "low_credit": False, "last_health_check": None,
@@ -40,21 +40,18 @@ class TestAttentionItems(unittest.TestCase):
         cache.clear()
         self.tmp.cleanup()
 
-    def _items(self, health=None, gates=None, sites=None):
+    def _items(self, health=None, gates=None):
         cache.clear()
         health = health or dict(_HEALTHY)
         with patch.object(healthinfo, "health", return_value=health), \
-             patch("src.known_gates.load_gates", return_value=gates or []), \
-             patch.object(healthinfo.data, "poller_site_health", return_value=sites or []), \
-             patch.object(healthinfo.data, "poller_site_summary",
-                          return_value={"blocked": 0}):
+             patch("src.known_gates.load_gates", return_value=gates or []):
             return healthinfo.attention_items()
 
     def test_all_clear(self):
         self.assertEqual(self._items(), [])
 
     def test_service_down(self):
-        h = dict(_HEALTHY, services={"orchestrator": "failed", "poller": "active"})
+        h = dict(_HEALTHY, services={"orchestrator": "failed", "dashboard": "active"})
         items = self._items(health=h)
         self.assertTrue(any("orchestrator" in it["title"] for it in items))
         self.assertEqual(items[0]["severity"], "bad")
@@ -101,21 +98,6 @@ class TestAttentionItems(unittest.TestCase):
     def test_fresh_browser_lock_not_flagged(self):
         self.lock.write_text("pid=1 holder=apply:x t=1", encoding="utf-8")
         self.assertFalse(any("lock" in it["title"].lower() for it in self._items()))
-
-    def test_blocked_poller_sites(self):
-        class _S:
-            def __init__(self, name, status):
-                self.name, self.status = name, status
-        cache.clear()
-        with patch.object(healthinfo, "health", return_value=dict(_HEALTHY)), \
-             patch("src.known_gates.load_gates", return_value=[]), \
-             patch.object(healthinfo.data, "poller_site_health",
-                          return_value=[_S("kamernet.nl", "blocked")]), \
-             patch.object(healthinfo.data, "poller_site_summary",
-                          return_value={"blocked": 1}):
-            items = healthinfo.attention_items()
-        self.assertTrue(any("blocked" in it["title"] for it in items))
-
 
 class TestHealthCreditCache(unittest.TestCase):
     def setUp(self):

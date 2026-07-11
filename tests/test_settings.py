@@ -15,7 +15,6 @@ class TestLoadSettings(unittest.TestCase):
         self.assertEqual(s.agent_browser_max_output_chars, 20000)
         self.assertEqual(s.apply_max_turns, 60)
         self.assertEqual(s.max_rent, 1750.0)
-        self.assertEqual(s.poll_cities, ("utrecht",))
         self.assertTrue(s.notify_enabled_flag)
         self.assertEqual(s.web_push_outcomes, frozenset({"submitted"}))
         self.assertIsNone(s.deepseek_api_key)
@@ -34,12 +33,6 @@ class TestLoadSettings(unittest.TestCase):
         self.assertFalse(load_settings({"APPLY_FASTPATH_ENABLED": "0"}).apply_fastpath_enabled)
         self.assertTrue(load_settings({"APPLY_FASTPATH_ENABLED": "yes"}).apply_fastpath_enabled)
 
-    def test_max_rent_legacy_poll_max_price(self):
-        self.assertEqual(load_settings({"POLL_MAX_PRICE": "1500"}).max_rent, 1500.0)
-        # Canonical name wins over the legacy alias.
-        s = load_settings({"MAX_RENT": "1600", "POLL_MAX_PRICE": "1500"})
-        self.assertEqual(s.max_rent, 1600.0)
-
     def test_playbook_model_falls_back_to_apply_model(self):
         s = load_settings({"APPLY_MODEL": "some-model"})
         self.assertEqual(s.playbook_model, "some-model")
@@ -52,8 +45,8 @@ class TestLoadSettings(unittest.TestCase):
             "low")
 
     def test_csv_fields_strip_and_drop_empty(self):
-        s = load_settings({"POLL_CITIES": "Utrecht, Amersfoort ,,"})
-        self.assertEqual(s.poll_cities, ("utrecht", "amersfoort"))
+        s = load_settings({"HEALTHCHECK_SERVICES": "orchestrator, dashboard ,,"})
+        self.assertEqual(s.healthcheck_services, ("orchestrator", "dashboard"))
 
     def test_prune_keep_recent_floor(self):
         self.assertEqual(load_settings({"APPLY_PRUNE_KEEP_RECENT": "0"}).apply_prune_keep_recent, 1)

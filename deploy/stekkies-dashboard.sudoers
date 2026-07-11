@@ -1,4 +1,4 @@
 # Allow the dashboard (running as the app user) to control exactly these
 # services for its safe actions — nothing else. Install to:
 #   /etc/sudoers.d/stekkies-dashboard   (replace __APP_USER__; mode 0440)
-__APP_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start orchestrator, /usr/bin/systemctl stop orchestrator, /usr/bin/systemctl restart orchestrator, /usr/bin/systemctl start poller, /usr/bin/systemctl stop poller, /usr/bin/systemctl restart poller, /usr/bin/systemctl start healthcheck.service
+__APP_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start orchestrator, /usr/bin/systemctl stop orchestrator, /usr/bin/systemctl restart orchestrator, /usr/bin/systemctl start healthcheck.service

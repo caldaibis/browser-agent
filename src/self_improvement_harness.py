@@ -175,6 +175,31 @@ def classify_failure(text: str, *, outcome: str = "", domain: str = "") -> Failu
     outcome = (outcome or _extract_outcome(text) or "unknown").lower()
     domain = domain or _extract_domain(text)
 
+    if ("node.js" in low and "requires node.js 20" in low) or any(
+        marker in low for marker in (
+            "unsupported engine", "runtime-version-mismatch",
+            "playwright requires node.js 20",
+        )
+    ):
+        return FailureSignature(
+            "runtime-version-mismatch", "control_policy", outcome, "",
+            "A pinned runtime/tool dependency cannot start on the installed runtime.",
+        )
+    if any(marker in low for marker in (
+        "control request timeout: initialize",
+        "mcp.shared.exceptions.mcperror: connection closed",
+        "mcp initialize", "mcp startup", "mcp-initialize-failure",
+    )):
+        return FailureSignature(
+            "mcp-initialize-failure", "control_policy", outcome, "",
+            "The MCP transport failed before the application agent could run.",
+        )
+    if "reached maximum number of turns" in low and "self-improvement" in low:
+        return FailureSignature(
+            "self-improvement-turn-exhaustion", "control_policy", outcome, "",
+            "The repair layer exhausted its own phase turn budget.",
+        )
+
     if any(x in low for x in ("mollie", "stripe", "adyen", "paypal", "checkout", "payment page")):
         return FailureSignature(
             "payment-checkout-hard-stop", "control_policy", outcome, domain,

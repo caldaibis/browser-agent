@@ -164,10 +164,10 @@ def _resolve_redirect(url: str, timeout: float = 8.0) -> str:
     """Follow a click-tracking link to its final listing URL.
 
     Without this, Huurwoningen mail events keep the track.huurwoningen.nl
-    wrapper as their source_url, which never canonically matches the direct
-    URL the poller sees for the same listing -- silently breaking dedup and
-    the dashboard's mail-race stats. Fail open (keep the tracking URL) so a
-    network hiccup never blocks the mail trigger.
+    wrapper as their source_url, which never canonically matches the same
+    listing's direct URL from a Stekkies mail or a later duplicate alert --
+    silently breaking cross-source dedup. Fail open (keep the tracking URL)
+    so a network hiccup never blocks the mail trigger.
     """
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout) as client:
@@ -296,40 +296,6 @@ def _event_from_message(svc, msg_id: str, provider: str) -> GmailListingEvent:
         received_ts=ev.get("received_ts", ""),
         subject=ev.get("subject", ""),
     )
-
-
-def recent_mail_events(days: int = 30, max_results: int = 100) -> list[dict]:
-    """Return recent Stekkies and Huurwoningen mail signals for dashboard timing.
-
-    Stekkies mails only expose the Stekkies redirect URL; their external source
-    URL is filled later by correlating with processed mail_summary records.
-    Huurwoningen mails usually include the source listing URL directly.
-    """
-    svc = get_service()
-    queries = [
-        ("stekkies", f'from:help@stekkies.com subject:"new Stekkies for you" newer_than:{days}d'),
-        ("huurwoningen", f"from:huurwoningen newer_than:{days}d"),
-    ]
-    events: list[dict] = []
-    seen: set[str] = set()
-    for provider, query in queries:
-        try:
-            resp = svc.users().messages().list(
-                userId="me", q=query, maxResults=max_results,
-            ).execute()
-        except Exception:
-            continue
-        for m in resp.get("messages", []) or []:
-            msg_id = m.get("id", "")
-            if not msg_id or msg_id in seen:
-                continue
-            seen.add(msg_id)
-            try:
-                events.append(_message_event(svc, msg_id, provider))
-            except Exception:
-                continue
-    events.sort(key=lambda e: e.get("received_ts") or "", reverse=True)
-    return events
 
 
 def mark_read(msg_id: str) -> None:

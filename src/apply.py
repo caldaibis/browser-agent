@@ -14,13 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import known_gates, site_playbooks
-from .apply_priority import priority_pending
+from . import known_gates, session_keeper, site_playbooks
 from .config import LOG_DIR, CDP_URL
 from .listing_context import fetch_context
 from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .browser_agent import run_agent, AgentResult
-from .poller.browser_lock import browser_lock
+from .browser_lock import browser_lock
 from .rent_policy import MAX_RENT, parse_rent
 from .eventlog import get_logger
 from .models import Listing
@@ -100,16 +99,9 @@ def _slug(text: str) -> str:
     return (s or "listing")[:50]
 
 
-def apply(listing: Listing | dict, model: str = APPLY_MODEL,
-          yield_to_priority: bool = False) -> AgentResult:
+def apply(listing: Listing | dict, model: str = APPLY_MODEL) -> AgentResult:
     """Run the apply agent on one listing. Returns an AgentResult with the true
-    outcome (submitted / already_applied / not_available / ... / timeout).
-
-    yield_to_priority: set by the poller's applier. The run then checks the
-    mail-apply priority flag once per turn and aborts with outcome "yielded"
-    (listing untouched, caller requeues) so a time-critical mail-triggered
-    apply gets the shared browser within seconds. Mail/manual runs ARE the
-    priority path and leave this off."""
+    outcome (submitted / already_applied / not_available / ... / timeout)."""
     if not isinstance(listing, Listing):
         listing = Listing.from_json(listing)
     listing_price = parse_rent(listing.price)
@@ -130,6 +122,14 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL,
         _LOG.info(f"{summary}")
         return AgentResult(rc=0, outcome="payment_required", summary=summary)
 
+    domain = _domain(listing.source_url)
+    if session_keeper.has_adapter(domain):
+        # Best-effort, never raises: repair a dead session BEFORE the
+        # expensive browser agent starts, so a time-critical apply doesn't
+        # burn turns discovering login_required mid-form. Acquires its own
+        # browser_lock, released before the run below acquires its own.
+        session_keeper.ensure_session(domain)
+
     prompt = build_prompt(listing)
     # Persist a per-run transcript + prompt so nothing is overwritten/lost.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -143,7 +143,7 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL,
     _LOG.info(f"launching agent ({model}) for {listing.source_url}")
     _LOG.info(f"transcript: {transcript}")
     # Exclusive browser lock: only one component drives the shared CDP browser
-    # at a time. Coordinates the Stekkies orchestrator and the poller's applier.
+    # at a time.
     with browser_lock(holder=f"apply:{slug}"):
         result = None
         if APPLY_FASTPATH_ENABLED:
@@ -163,7 +163,6 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL,
                 log_path=transcript,
                 timeout_seconds=APPLY_TIMEOUT_SECONDS,
                 source_url=listing.source_url,
-                yield_check=priority_pending if yield_to_priority else None,
             )
     # Keep the convenience "latest" copy too.
     try:

@@ -94,9 +94,12 @@ def kpis(days: int = 7) -> dict:
                    if (parse_ts(r["ts"]) or datetime.min) >= cutoff]
     real = [r for r in runs_window if r["event"] != "skipped_duplicate_incident"]
     deployed = sum(1 for r in real if r["deployed"])
-    fix_attempts = sum(1 for r in real if r["action"] in ("fixed_deployed", "fix_failed"))
+    fix_attempts = sum(1 for r in real if r["action"] in (
+        "fixed_deployed", "fixed_review", "fix_failed"))
     skipped = sum(1 for r in runs_window if r["event"] == "skipped_duplicate_incident")
     spend = sum(r["cost_usd"] or 0.0 for r in real)
+    from ..self_improvement_queue import queue_counts
+    lifecycle = _lifecycle(days)
     return {
         "days": days,
         "runs": len(real),
@@ -104,7 +107,36 @@ def kpis(days: int = 7) -> dict:
         "landing_rate": round(100 * deployed / fix_attempts, 1) if fix_attempts else None,
         "skipped_duplicates": skipped,
         "spend_usd": round(spend, 4),
+        "orphans": lifecycle["orphans"],
+        "turn_exhaustions": lifecycle["turn_exhaustions"],
+        "queue": queue_counts(),
     }
+
+
+def _lifecycle(days: int) -> dict[str, int]:
+    cutoff = datetime.now() - timedelta(days=days)
+    starts: dict[str, datetime] = {}
+    finishes: set[str] = set()
+    turn_exhaustions = 0
+    abandoned = 0
+    for rec in cache.jsonl_records(SI_RUN_LOG):
+        ts = parse_ts(rec.get("ts"))
+        if ts is None or ts < cutoff:
+            continue
+        event = str(rec.get("event") or "")
+        run_id = str(rec.get("run_id") or "")
+        if event == "run_started" and run_id:
+            starts[run_id] = ts
+        elif event == "run_finished" and run_id:
+            finishes.add(run_id)
+        elif event == "run_abandoned":
+            abandoned += 1
+        if "reached maximum number of turns" in str(rec.get("error") or "").lower():
+            turn_exhaustions += 1
+    orphan_cutoff = datetime.now() - timedelta(seconds=1800)
+    orphans = abandoned + sum(1 for run_id, ts in starts.items()
+                              if run_id not in finishes and ts <= orphan_cutoff)
+    return {"orphans": orphans, "turn_exhaustions": turn_exhaustions}
 
 
 def pending_patches() -> list[dict]:

@@ -1,13 +1,14 @@
 """Exclusive lock on the shared CDP browser.
 
-Only ONE component may drive the shared CDP browser at a time. The
-applier (apply.py) holds this for a whole submission; tier-3 watchers and the
-Stekkies orchestrator must acquire it before touching the browser and yield
-while it is held.
+Only ONE component may drive the browser via the Playwright MCP at a time. The
+applier (apply.py) holds this for a whole submission; healthcheck's site
+probes and the self-improvement agent's browser diagnostics must acquire it
+before touching the browser and yield while it is held.
 
 Backed by an OS file lock (fcntl.flock) so it is exclusive ACROSS PROCESSES —
-the poller and the Stekkies orchestrator are separate systemd services sharing
-one browser, and an in-process asyncio.Lock alone would not coordinate them.
+the orchestrator, healthcheck, and self-improvement worker are separate
+systemd services sharing one browser, and an in-process asyncio.Lock alone
+would not coordinate them.
 """
 from __future__ import annotations
 
@@ -17,8 +18,8 @@ import os
 import time
 from contextlib import contextmanager
 
-from ..config import PROJECT_ROOT
-from ..settings import settings
+from .config import PROJECT_ROOT
+from .settings import settings
 
 LOCK_FILE = PROJECT_ROOT / "state" / "browser.lock"
 
@@ -42,14 +43,14 @@ def _alert_long_wait(holder: str, waited: float) -> None:
     try:
         # Local import: notify pulls in the Gmail stack; the lock must stay
         # importable (and cheap) everywhere, including in tests without it.
-        from ..notify import send_alert_dedup
+        from .notify import send_alert_dedup
         send_alert_dedup(
             "browser_lock_wait",
             "⏳ Stekkies bot: shared browser contended",
             f"'{holder or 'unknown'}' has been waiting {waited:.0f}s for the "
             f"shared-browser lock.\nCurrent holder: {holder_info()}\n"
             "If this persists, a run is wedged holding the lock — check the "
-            "orchestrator/poller journals.",
+            "orchestrator journal.",
         )
     except Exception as e:  # noqa: BLE001 - alerting must never break locking
         print(f"[lock] wait alert failed: {e}")
@@ -61,9 +62,9 @@ def browser_lock(timeout: float = 1800.0, poll: float = 0.5, holder: str = ""):
     be acquired within ``timeout`` seconds.
 
     ``holder`` names the component acquiring it (e.g. "apply:huurwoningen.nl",
-    "tier3:funda.nl", "healthcheck") — written into the lock file so that when
-    someone is stuck WAITING for this lock, the alert/journal can say who is
-    actually HOLDING it instead of just "pid 12345".
+    "healthcheck", "self-improvement") — written into the lock file so that
+    when someone is stuck WAITING for this lock, the alert/journal can say who
+    is actually HOLDING it instead of just "pid 12345".
     """
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)

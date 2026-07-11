@@ -2,11 +2,11 @@
 
 Scope (deliberate): **state, not logs.** Processed listings + their dedup
 keys, and self-improvement incidents — the records multiple processes write
-and query by key. Append-only *logs* (trajectories, poller.jsonl,
-mail_summary.jsonl, transcripts) stay plain files: they are only ever tailed
-or scanned, and files are the right shape for that.
+and query by key. Append-only *logs* (trajectories, mail_summary.jsonl,
+transcripts) stay plain files: they are only ever tailed or scanned, and
+files are the right shape for that.
 
-Why a database at all: four processes (orchestrator, poller, healthcheck,
+Why a database at all: three processes (orchestrator, healthcheck,
 self-improvement) appended JSONL files that every reader re-parsed in full,
 and the multi-key dedup identity of a listing (source/stekkies/resolved,
 raw + canonical) was re-derived by two independent code paths — which is
@@ -61,8 +61,8 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     """Open a connection (schema ensured, WAL mode, sane busy timeout).
 
     A fresh connection per operation keeps this trivially safe across the
-    poller's worker threads and the other writer processes; at this write
-    rate (a handful of records per hour) connection cost is irrelevant.
+    other writer processes; at this write rate (a handful of records per
+    hour) connection cost is irrelevant.
     """
     path = db_path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -12,9 +12,9 @@ Pieces:
   - Subscriptions: one JSON per line in ``state/push_subscriptions.jsonl``,
     deduped by endpoint; expired endpoints (HTTP 404/410 from the push
     service) are pruned automatically on send.
-  - Sending happens in whatever process records the outcome (orchestrator /
-    poller) via notify.send_status_email's hook — the dashboard only serves
-    the public key + subscribe/unsubscribe endpoints and the service worker.
+  - Sending happens in the orchestrator process, via notify.send_status_email's
+    hook — the dashboard only serves the public key + subscribe/unsubscribe
+    endpoints and the service worker.
 
 Everything is best-effort and fail-open: notifications must never break the
 apply flow. Disable entirely with WEB_PUSH_ENABLED=0.

@@ -36,8 +36,7 @@ class TestPreflightDuplicateGuard(unittest.TestCase):
         keys = self._keys_from({"source_url": FRONTEND_URL,
                                 "resolved_url": RESOLVED_URL,
                                 "outcome": "already_applied"})
-        with patch.object(orchestrator, "active_claim_keys", set):
-            self.assertTrue(orchestrator._source_duplicate(RESOLVED_URL, keys))
+        self.assertTrue(orchestrator._source_duplicate(RESOLVED_URL, keys))
 
     def test_kaatstraat_regression_both_huurwoningen_shapes_match(self):
         """The exact production miss: mail recorded the /frontend/listing/
@@ -45,16 +44,14 @@ class TestPreflightDuplicateGuard(unittest.TestCase):
         listing-id canonicalization must connect them pre-flight."""
         keys = self._keys_from({"source_url": FRONTEND_URL,
                                 "outcome": "already_applied"})
-        with patch.object(orchestrator, "active_claim_keys", set):
-            self.assertTrue(orchestrator._source_duplicate(SITE_PAGE_URL, keys))
-            self.assertTrue(orchestrator._source_duplicate(FRONTEND_URL, keys))
+        self.assertTrue(orchestrator._source_duplicate(SITE_PAGE_URL, keys))
+        self.assertTrue(orchestrator._source_duplicate(FRONTEND_URL, keys))
 
     def test_different_listing_id_is_not_a_duplicate(self):
         keys = self._keys_from({"source_url": FRONTEND_URL,
                                 "outcome": "submitted"})
         other = "https://www.huurwoningen.nl/huren/utrecht/deadbeef/andere-straat/"
-        with patch.object(orchestrator, "active_claim_keys", set):
-            self.assertFalse(orchestrator._source_duplicate(other, keys))
+        self.assertFalse(orchestrator._source_duplicate(other, keys))
 
     def test_prevented_message_names_the_guard_and_key(self):
         msg = orchestrator._prevented_message(SITE_PAGE_URL)

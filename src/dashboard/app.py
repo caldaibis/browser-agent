@@ -62,10 +62,6 @@ def _warm_dashboard_once() -> None:
         healthinfo.warm_dashboard_caches()
     except Exception:
         pass
-    try:
-        funnel.funnel_by_domain(days=7)
-    except Exception:
-        pass
 
 
 def _dashboard_warm_loop() -> None:
@@ -109,7 +105,6 @@ STATUS_CLASS = {
 # over-narrow value union from its defaults; widen once and assign through it.
 _template_globals: dict[str, Any] = templates.env.globals
 _template_globals["status_class"] = lambda s: STATUS_CLASS.get(s, "muted")
-_template_globals["fmt_delta"] = data.format_delta
 _template_globals["fmt_age"] = data.format_age
 _template_globals["fmt_dur"] = data.format_duration
 _template_globals["fmt_usd"] = data.format_usd
@@ -119,19 +114,14 @@ _template_globals["fmt_count"] = data.format_count
 @app.get("/", response_class=HTMLResponse)
 def overview(request: Request):
     subs = list(reversed(data.load_submissions()))
-    mail_events = data.load_mail_events(refresh_stale=False)
     stats = data.compute_stats(subs)
-    race = data.cached_race_report(refresh_mail=False)
-    poller_sites = data.poller_site_health()
     spend = costs.spend_rollup(days=7)
     return templates.TemplateResponse(request, "index.html", {
-        "stats": stats, "recent": subs[:12], "race": race,
-        "mail_events": mail_events[:10],
+        "stats": stats, "recent": subs[:12],
         "health": healthinfo.health(refresh_credit_if_stale=False),
         "stats_json": json.dumps(stats),
-        "sites": poller_sites, "summary": data.poller_site_summary(poller_sites),
         "attention": healthinfo.attention_items(), "spend": spend,
-        "kpis": data.mission_kpis(subs, race, spend), "active_page": "overview",
+        "kpis": data.mission_kpis(subs, spend), "active_page": "overview",
     })
 
 
@@ -155,14 +145,12 @@ def submissions(request: Request, status: str = "", source: str = "",
     page = max(1, min(page, pages))
     start = (page - 1) * per
     page_subs = subs[start:start + per]
-    race = data.cached_race_report(refresh_mail=False)
     return templates.TemplateResponse(request, "submissions.html", {
         "subs": page_subs, "total": total, "page": page, "pages": pages, "per": per,
         "statuses": sorted({s.status for s in all_subs}),
         "sources": sorted({s.source for s in all_subs if s.source}),
         "origins": sorted({s.origin for s in all_subs if s.origin}),
         "f_status": status, "f_source": source, "f_origin": origin, "f_days": days,
-        "race_by_url": {r.source_url: r for r in race["rows"]},
         "active_page": "submissions",
     })
 
@@ -172,14 +160,12 @@ def submission_detail(request: Request, key: str):
     sub = data.get_submission(key)
     if not sub:
         return HTMLResponse("Not found", status_code=404)
-    race = data.cached_race_report(refresh_mail=False)
-    race_by_url = {r.source_url: r for r in race["rows"]}
     return templates.TemplateResponse(request, "detail.html", {
         "sub": sub, "transcript": data.load_transcript(sub),
         "usage": costs.usage_for_submission(sub),
         "timeline": trajectories.load_timeline(sub.transcript_stem)
                     or trajectories.timeline_from_transcript(data.load_transcript(sub) or ""),
-        "race": race_by_url.get(sub.source_url), "active_page": "submissions",
+        "active_page": "submissions",
     })
 
 
@@ -187,14 +173,6 @@ def submission_detail(request: Request, key: str):
 def health_panel(request: Request):
     return templates.TemplateResponse(request, "_health.html", {
         "health": healthinfo.health(refresh_credit_if_stale=False),
-    })
-
-
-@app.get("/poller-sites", response_class=HTMLResponse)
-def poller_sites_panel(request: Request):
-    sites = data.poller_site_health()
-    return templates.TemplateResponse(request, "_poller_sites.html", {
-        "sites": sites, "summary": data.poller_site_summary(sites),
     })
 
 
@@ -206,15 +184,12 @@ def api_stats():
 @app.get("/funnel", response_class=HTMLResponse)
 def funnel_page(request: Request, days: int = 7):
     days = days if days in (7, 30) else 7
-    race = data.cached_race_report(refresh_mail=False)
     return templates.TemplateResponse(request, "funnel.html", {
         "days": days,
-        "rows": funnel.funnel_by_domain(days),
         "mail_rows": funnel.mail_funnel(days),
         "failures": funnel.failure_pareto(days),
         "incidents": funnel.incident_pareto(days=30),
-        "reasons": funnel.reason_breakdown(days),
-        "race": race, "active_page": "funnel",
+        "active_page": "funnel",
     })
 
 
@@ -332,32 +307,11 @@ def action_resume(request: Request):
     return _action(request, ok, msg or "orchestrator started")
 
 
-@app.post("/action/poller-pause")
-def action_poller_pause(request: Request):
-    ok, msg = _systemctl("stop", "poller")
-    return _action(request, ok, msg or "poller stopped")
-
-
-@app.post("/action/poller-resume")
-def action_poller_resume(request: Request):
-    ok, msg = _systemctl("start", "poller")
-    return _action(request, ok, msg or "poller started")
-
-
 @app.post("/action/healthcheck")
 def action_healthcheck(request: Request):
     ok, msg = _systemctl("start", "healthcheck.service")
     return _action(request, ok, msg or "health check triggered")
 
-
-@app.post("/action/refresh-mail-index")
-def action_refresh_mail_index(request: Request):
-    try:
-        events = data.load_mail_events(force=True)
-        data_cache_bust()
-        return _action(request, True, f"indexed {len(events)} mail signals")
-    except Exception as e:
-        return _action(request, False, str(e))
 
 
 @app.post("/action/retry")

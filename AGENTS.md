@@ -71,7 +71,7 @@ form, uploads docs, submits).
   also does a cross-source duplicate check once
   per turn: if the browser's current tab lands on a URL already recorded as
   processed under a *different* URL than this run's input (see
-  `poller/dedup.py`'s `known_processed_urls`), it stops immediately with
+  `dedup.py`'s `known_processed_urls`), it stops immediately with
   `already_applied` instead of re-filling/resubmitting a form the site itself
   gives no "already applied" signal for.
 - `src/apply.py` — pre-flight vetoes (rent cap, payment gates), run the agent,
@@ -100,50 +100,16 @@ form, uploads docs, submits).
   out of band. `DOCS_DIR` (config) points here; override with the env var.
 - `src/credentials.py` / `import_passwords.py` — per-site logins by domain.
 - `src/gmail_watch.py` — poll inbox (5s), extract Stekkies link.
-- `src/orchestrator.py` — ties it together (`--once URL` or live watch); logs the
-  true `outcome` (submitted / already_applied / not_available / …) and only marks
-  a listing processed when the outcome is terminal.
-- `src/poller/` — **active site poller** (the "don't wait for Stekkies mail" path;
-  design in `docs/poller-plan.md`). Watches source sites directly and feeds the
-  same `apply.py`. `watcher.py` runs each enabled site on its own cadence+jitter,
-  `fetch.py` does httpx GET + block/challenge detection, `parsers.py` has a
-  generic schema.org JSON-LD parser (tier-2 default), `filters.py` is the
-  deterministic pre-filter (price/city/surface/room), `judge.py` is the cheap-LLM
-  judgment (distance-to-centre + roommates, fail-open), `dedup.py` keys on the
-  canonical (tracking-stripped) source URL and cross-checks
-  `state/store.db` (both `source_url` and `resolved_url` — the
-  latter is the real external destination an apply run discovered mid-flight,
-  e.g. after in-page redirect dialogs on an aggregator page; needed because
-  the poller discovers a listing at whatever URL it found it while the
-  Stekkies flow records the final resolved URL — two different keys for the
-  same real-world listing otherwise, see `known_processed_urls()`),
-  `browser_lock.py` is a cross-process flock so the
-  poller's applier and the Stekkies orchestrator never drive the shared browser
-  at once (also wired into `apply.apply()`). `registry.py` lists all 26 sites;
-  `discover.py` probes which tier each site currently yields. Run: `just poll`,
-  `just poll-once <site>`, `just discover`. **One attempt per listing — no
-  automatic retries** (02-07-2026, replaced the earlier `MAX_POLLER_ATTEMPTS`
-  retry cap): a retry re-runs the identical prompt against the same page at
-  full LLM cost — nothing carries over from the failed attempt, so it's the
-  same coin flip again (seen: `Hof van Oslo` retried 15+ times over several
-  hours on 2026-07-01, several million tokens each, all `incomplete`). Every
-  completed agent run marks the listing seen/processed whatever the outcome;
-  the orchestrator's mail path records non-terminal outcomes too, for the same
-  reason. Two carve-outs that are NOT attempts and don't consume the listing:
-  outcome `yielded` (run aborted to hand the browser to a priority mail apply,
-  see `src/apply_priority.py` — requeued untouched) and a browser-lock
-  `TimeoutError` (agent never ran — claim released for a future poll).
-- `src/apply_priority.py` — **mail-apply priority over the poller.** Rentals
-  are won by minutes: a mail-triggered apply (Stekkies/Huurwoningen alert —
-  competitors were just notified too) must not queue behind a speculative
-  poller run holding the shared-browser flock for up to 15 min. The
-  orchestrator holds a priority flag (`state/apply_priority.flag`, stale after
-  `APPLY_PRIORITY_STALE_SECONDS`) around extraction+apply; the poller's
-  applier waits for it before starting, and an in-flight poller run checks it
-  once per agent turn (`browser_agent._run`'s `yield_check`, wired via
-  `apply(..., yield_to_priority=True)`) and aborts with rc=125 / outcome
-  `yielded` so the lock frees within one turn. A yielded listing is requeued
-  untouched — it is not an attempt.
+- `src/orchestrator.py` — ties it together (`--once URL` or live watch); logs
+  the true `outcome` (submitted / already_applied / not_available / …).
+  **One attempt per listing — no automatic retries** (02-07-2026): a retry
+  re-runs the identical prompt against the same page at full LLM cost —
+  nothing carries over from the failed attempt, so it's the same coin flip
+  again (seen: `Hof van Oslo` retried 15+ times over several hours on
+  2026-07-01, several million tokens each, all `incomplete`). Every completed
+  agent run marks the listing processed whatever the outcome, terminal or
+  not — the one exception is `no_credit` (see the hard-won lesson below),
+  which leaves the mail unread and consumes nothing.
 - `src/site_playbooks.py` — **per-domain playbooks: persistent memory of how
   each site works.** After every real agent run, one cheap LLM pass per
   touched domain (source + resolved) distills the redacted transcript into
@@ -202,17 +168,11 @@ form, uploads docs, submits).
   improved the pipeline without aggregating logs by hand.
 - `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
   (blocked/error/incomplete/timeout/not_available/…, see
-  `SELF_IMPROVEMENT_OUTCOMES`) **and** after a poller site goes silently
-  zero-yield (`improve_poller_zero_yield`, triggered from
-  `poller/watcher.py` at the `POLL_ZERO_YIELD_ALERT_POLLS` streak — instead
-  of emailing a human to run `just poll-once` and fix the parser, it hands
-  the saved sample HTML to the same two-phase engine, which diagnoses the
-  broken parser and patches `src/poller/parsers.py`/`registry.py` — or
-  disables a now-gated site — verifies and deploys; the old alert email only
-  fires if self-improvement is disabled entirely). Both triggers share
-  `_run_for_incident` (incident dedup + logging) and dispatch the
-  diagnosis/patch prompts on `context["kind"]` (`apply` vs
-  `poller_zero_yield`). Drives the **Claude Agent SDK**
+  `SELF_IMPROVEMENT_OUTCOMES`) **and** after the session keeper's login
+  adapter fails to repair a dead session (`session_keeper_adapter`).
+  Both triggers share `_run_for_incident` (incident dedup + logging) and
+  dispatch the diagnosis/patch prompts on `context["kind"]`. Drives the
+  **Claude Agent SDK**
   (`claude_agent_sdk.query()` — the same engine behind Claude Code: real
   `Read`/`Edit`/`Bash`/`Grep`/`Glob`). Each run creates a **throwaway git
   worktree** (`_create_worktree`, a sibling dir
@@ -258,6 +218,15 @@ form, uploads docs, submits).
   turns/budget/timeout via `SELF_IMPROVEMENT_PROXY_MODEL` (default
   `self-improvement-deepseek`), `SELF_IMPROVEMENT_MAX_TURNS`,
   `SELF_IMPROVEMENT_MAX_BUDGET_USD`, `SELF_IMPROVEMENT_TIMEOUT_SECONDS`.
+- `src/self_improvement_queue.py` / `src/self_improvement_worker.py` — failed
+  applies enqueue redacted durable jobs instead of running repair inline. A
+  30-second systemd timer drains them under one global flock, recovers jobs
+  and worktrees left by killed processes, and is deliberately not restarted
+  by application deploys. This prevents concurrent agents racing `main` and
+  a self-deploy killing sibling diagnosis runs. Diagnosis is submitted via an
+  authoritative tool; commit/push tool state survives later model turn-limit
+  errors. SDK `tools=` is the real availability boundary (`allowed_tools`
+  only auto-approves), and writes are enforced inside the isolated worktree.
 - `src/notify.py` — emails `NOTIFY_TO` after each handled listing
   (outcome + redacted summary) via Gmail `send` scope. Also the single
   integration point for web push: `send_status_email` calls
@@ -268,12 +237,12 @@ form, uploads docs, submits).
   `state/push_subscriptions.jsonl` (expired endpoints pruned on send). The
   dashboard serves the plumbing (`/sw.js` from root scope, `/push/public-key`,
   `/push/subscribe`, `/push/unsubscribe`, `/push/test`) and a 🔔 toggle in the
-  nav; the actual send happens in whichever process records the outcome
-  (orchestrator/poller). Enable per device: open the dashboard, click 🔔 once.
+  nav; the actual send happens in the orchestrator process, via
+  `send_status_email`. Enable per device: open the dashboard, click 🔔 once.
   Env: `WEB_PUSH_ENABLED=0` to disable, `WEB_PUSH_OUTCOMES` (default
   `submitted`) to widen.
 - `src/healthcheck.py` (+ systemd timer, 30 min) — alerts (push + email) when:
-  DeepSeek credit is low; a pipeline systemd unit is down (orchestrator/poller/
+  DeepSeek credit is low; a pipeline systemd unit is down (orchestrator/
   browser-host/litellm-proxy — a crash-looping orchestrator is otherwise
   invisible, see hard-won lessons); a session expired on Stekkies or a top
   apply site (`SITE_PROBES`: huurwoningen.nl, kamernet.nl — extend via
@@ -287,37 +256,32 @@ form, uploads docs, submits).
   healthchecks.io) at the end of each run — its *absence* alerts on total-box
   death. `remaining_credit()` shared here.
 - `src/listing_context.py` — one cheap httpx GET of a listing's own detail
-  page (JSON-LD): description/price/surface. Used by `poller.watcher._enrich`
-  (anchor-parser sites yield URL-only listings, so the filter/judge were
-  blind on them) and by `apply.build_prompt` (description + aggregator
-  warning in the prompt up front). Strictly fail-open; tier-3 pages just
-  fail the fetch and nothing changes.
+  page (JSON-LD): description/price/surface, used by `apply.build_prompt`
+  (description + aggregator warning in the prompt up front). Strictly
+  fail-open; tier-3 pages just fail the fetch and nothing changes.
 - `src/dashboard/` — FastAPI + htmx/Chart.js read-mostly dashboard behind Caddy
   (HTTPS + Basic Auth), organized around four decision questions. **Overview**
   (`/`): an action-needed strip (`healthinfo.attention_items` — service down,
   low credit, logged-out session, unlanded pending patches, active paid gates,
-  self-improvement failing streak, stuck browser lock, blocked poller sites)
-  plus mission KPIs (submissions, success rate, detection→submitted latency,
-  race wins, weekly spend + cost/submission). **Funnel** (`/funnel`,
-  `src/dashboard/funnel.py`): per-source seen→filtered→judged→qualified→
-  attempted→submitted (leak rows flagged), failure + incident Paretos, filter/
-  judge veto-reason breakdown, and the mail race (moved here). **Self-
-  improvement** (`/self-improvement`, `src/dashboard/si.py`): SI runs with
-  per-run cost, incidents, editable known-gates table (delete a wrongly-gated
-  site via `known_gates.remove_gate`), pending patches (read-only, copyable
-  `git am`), guard-fire trend, playbooks. **Forensics** (`/submission/{key}`):
-  a per-turn trajectory timeline (`src/dashboard/trajectories.py`, from
-  `logs/trajectories/*.jsonl` with a transcript-regex fallback) + token-per-turn
-  chart + collapsed redacted transcript. Data layer: `src/dashboard/cache.py`
-  (`JsonlTail` incremental append-only parse + `memo` TTL cache — the overview
-  used to trigger 5+ full re-reads/request), `costs.py` (trajectory-first per-run
-  cost + weekly rollups, rates from `src/llm_pricing.py` shared with the
-  self-improvement agent). Stable content-hash permalinks (`Submission.permalink`;
-  legacy `/submission/<int>` still resolves). Never serves `*.prompt.txt`;
+  self-improvement failing streak, stuck browser lock) plus mission KPIs
+  (submissions, success rate, detection→submitted latency, weekly spend +
+  cost/submission). **Funnel** (`/funnel`, `src/dashboard/funnel.py`):
+  attempted→submitted by mail trigger, plus failure + incident Paretos.
+  **Self-improvement** (`/self-improvement`, `src/dashboard/si.py`): SI runs
+  with per-run cost, incidents, editable known-gates table (delete a
+  wrongly-gated site via `known_gates.remove_gate`), pending patches
+  (read-only, copyable `git am`), guard-fire trend, playbooks. **Forensics**
+  (`/submission/{key}`): a per-turn trajectory timeline
+  (`src/dashboard/trajectories.py`, from `logs/trajectories/*.jsonl` with a
+  transcript-regex fallback) + token-per-turn chart + collapsed redacted
+  transcript. Data layer: `src/dashboard/cache.py` (`JsonlTail` incremental
+  append-only parse + `memo` TTL cache — the overview used to trigger 5+ full
+  re-reads/request), `costs.py` (trajectory-first per-run cost + weekly
+  rollups, rates from `src/llm_pricing.py` shared with the self-improvement
+  agent). Stable content-hash permalinks (`Submission.permalink`; legacy
+  `/submission/<int>` still resolves). Never serves `*.prompt.txt`;
   everything user-visible goes through `data.redact()`. Static assets in
-  `static/` (theme-aware light/dark). Safe POST actions return an htmx toast;
-  poller pause/resume needs the `deploy/stekkies-dashboard.sudoers` entries
-  (re-synced every deploy by `ensure-self-improvement.sh`).
+  `static/` (theme-aware light/dark). Safe POST actions return an htmx toast.
 - `justfile` — every workflow as a `just` command (local + VPS ops + secret push).
 
 ## Conventions
@@ -370,6 +334,11 @@ form, uploads docs, submits).
 - The pinned agent-browser version in `deploy/agent-browser.version` is required
   at runtime (`just ensure-agent-browser`). Node/npx remains for the Playwright
   rollback path and the Claude CLI.
+- Node 20+/npx is required at runtime for the pinned Playwright MCP
+  (`@playwright/mcp@0.0.78`). Never use `@latest`: it raised its Node engine
+  requirement on 10-07-2026 and every apply began failing before turn 1 while
+  all systemd units still reported active. Deploy and healthcheck run a
+  functional startup/initialize probe.
 - The self-improvement agent needs the **`claude` CLI on PATH**
   (`npm install -g @anthropic-ai/claude-code` — `claude-agent-sdk` shells out
   to it) and the **LiteLLM proxy running** (`litellm-proxy.service` on the
@@ -423,8 +392,8 @@ The standing rules are below; each dated incident's full postmortem lives in
   its holder and alerts after a 300s wait.
   → `docs/lessons/2026-07-03-hung-mcp-teardown-watchdog.md`
 - **HTTP 402 (out of credit) is not a verdict on the listing.** Outcome
-  `no_credit` (rc=126) never consumes the listing: poller releases the
-  claim, orchestrator leaves the mail unread, both alert (deduped).
+  `no_credit` (rc=126) never consumes the listing: the orchestrator leaves
+  the mail unread and alerts (deduped).
   → `docs/lessons/2026-07-05-no-credit-is-not-a-verdict.md`
 - **Model:** `deepseek-v4-pro` is the default apply model. Keep
   `gemini-3.5-flash` avoided; it falls into degenerate loops (e.g. ArrowDown ×30).
@@ -478,11 +447,9 @@ The standing rules are below; each dated incident's full postmortem lives in
 - **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
   accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
   These are real states to report, not bugs — stop early and label them.
-- **Hard published eligibility gates are readable at poll time.**
-  `filters.hard_exclusion` vetoes students-only/seniors-only/short-stay
-  deterministically (sentence-scoped, negation-aware); `APPLY_GRACE_TURNS`
-  grants one extension when a run is demonstrably mid-form; a deterministic
-  cookie-banner sweep runs after every navigation.
+- **Turn-budget and navigation friction have deterministic mitigations.**
+  `APPLY_GRACE_TURNS` grants one extension when a run is demonstrably
+  mid-form; a deterministic cookie-banner sweep runs after every navigation.
   → `docs/lessons/2026-07-02-eligibility-gates-readable-at-poll-time.md`
 - **Gmail listing mails:** from `help@stekkies.com`; the listing link is a
   hex-hash `http://www.stekkies.com/.../redirect/<hash>` and the body is

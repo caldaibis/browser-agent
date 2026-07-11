@@ -117,31 +117,14 @@ class Settings:
     apply_auto_cookie: bool
     apply_teardown_grace_seconds: int
     apply_trajectory_enabled: bool
-    apply_priority_stale_seconds: int
     google_account: str
 
     # --- Orchestrator
     watch_retry_seconds: int
 
-    # --- Rent cap (shared by poller filter and apply pre-flight)
+    # --- Rent cap (apply pre-flight)
     max_rent: float
 
-    # --- Poller
-    poll_tier3_settle_ms: int
-    poll_executor_threads: int
-    poll_tier3_lock_timeout: float
-    poll_tier3_render_timeout: float
-    poll_tier3_close_timeout: float
-    poll_zero_yield_alert_polls: int
-    poll_min_price: float
-    poll_min_surface: float
-    poll_require_known_price: bool
-    poll_cities: tuple[str, ...]
-    poll_min_stay_months: int
-    poll_judge_model: str
-    poll_max_cycling_min: int
-    poll_enable_tier3: bool
-    listing_claim_ttl_seconds: int
     browser_lock_wait_alert_seconds: float
 
     # --- Notifications
@@ -158,6 +141,8 @@ class Settings:
     healthcheck_ping_url: str
     healthcheck_site_probes_json: str  # raw JSON; healthcheck parses fail-open
     self_improvement_health_window: int
+    self_improvement_health_failure_ratio: float
+    self_improvement_orphan_seconds: int
     digest_interval_days: float
 
     # --- Site playbooks
@@ -192,7 +177,13 @@ class Settings:
     self_improvement_allow_code_changes: bool
     self_improvement_allow_deploy: bool
     self_improvement_proposal_candidates: int
+    self_improvement_browser_lock_timeout: float
     self_improvement_outcomes: frozenset[str]
+
+    # --- Session keeper (proactive login-session repair)
+    session_keeper_enabled: bool
+    session_keeper_cooldown_seconds: int
+    session_keeper_lock_timeout_seconds: float
 
     # --- Paths (the one env-driven one; config.py consumes it)
     docs_dir: str | None
@@ -236,28 +227,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         apply_auto_cookie=_flag(e, "APPLY_AUTO_COOKIE", True),
         apply_teardown_grace_seconds=_int(e, "APPLY_TEARDOWN_GRACE_SECONDS", 120),
         apply_trajectory_enabled=_flag(e, "APPLY_TRAJECTORY_ENABLED", True),
-        apply_priority_stale_seconds=_int(e, "APPLY_PRIORITY_STALE_SECONDS", 1800),
         google_account=_str(e, "GOOGLE_ACCOUNT", "you@example.com"),
 
         watch_retry_seconds=_int(e, "WATCH_RETRY_SECONDS", 300),
 
-        max_rent=_float(e, "MAX_RENT", 1750.0, "POLL_MAX_PRICE"),
+        max_rent=_float(e, "MAX_RENT", 1750.0),
 
-        poll_tier3_settle_ms=_int(e, "POLL_TIER3_SETTLE_MS", 5500),
-        poll_executor_threads=_int(e, "POLL_EXECUTOR_THREADS", 64),
-        poll_tier3_lock_timeout=_float(e, "POLL_TIER3_LOCK_TIMEOUT", 120.0),
-        poll_tier3_render_timeout=_float(e, "POLL_TIER3_RENDER_TIMEOUT", 120.0),
-        poll_tier3_close_timeout=_float(e, "POLL_TIER3_CLOSE_TIMEOUT", 5.0),
-        poll_zero_yield_alert_polls=_int(e, "POLL_ZERO_YIELD_ALERT_POLLS", 120),
-        poll_min_price=_float(e, "POLL_MIN_PRICE", 800.0),
-        poll_min_surface=_float(e, "POLL_MIN_SURFACE", 30.0),
-        poll_require_known_price=_flag(e, "POLL_REQUIRE_KNOWN_PRICE", True),
-        poll_cities=tuple(c.lower() for c in _csv(e, "POLL_CITIES", ("utrecht",))),
-        poll_min_stay_months=_int(e, "POLL_MIN_STAY_MONTHS", 6),
-        poll_judge_model=_str(e, "POLL_JUDGE_MODEL", "deepseek-v4-pro"),
-        poll_max_cycling_min=_int(e, "POLL_MAX_CYCLING_MIN", 15),
-        poll_enable_tier3=e.get("POLL_ENABLE_TIER3", "0") == "1",
-        listing_claim_ttl_seconds=_int(e, "LISTING_CLAIM_TTL_SECONDS", 7200),
         browser_lock_wait_alert_seconds=_float(
             e, "BROWSER_LOCK_WAIT_ALERT_SECONDS", 300.0),
 
@@ -272,10 +247,15 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         server_ssh_hint=_str(e, "SERVER_SSH", "root@your-server-ip"),
         healthcheck_services=_csv(
             e, "HEALTHCHECK_SERVICES",
-            ("orchestrator", "poller", "browser-host", "litellm-proxy")),
+            ("orchestrator", "browser-host", "litellm-proxy",
+             "self-improvement-worker.timer")),
         healthcheck_ping_url=_str(e, "HEALTHCHECK_PING_URL", ""),
         healthcheck_site_probes_json=_str(e, "HEALTHCHECK_SITE_PROBES", "{}"),
         self_improvement_health_window=_int(e, "SELF_IMPROVEMENT_HEALTH_WINDOW", 5),
+        self_improvement_health_failure_ratio=_float(
+            e, "SELF_IMPROVEMENT_HEALTH_FAILURE_RATIO", 0.6),
+        self_improvement_orphan_seconds=_int(
+            e, "SELF_IMPROVEMENT_ORPHAN_SECONDS", 1800),
         digest_interval_days=_float(e, "DIGEST_INTERVAL_DAYS", 7.0),
 
         playbook_model=_str(e, "PLAYBOOK_MODEL", apply_model),
@@ -329,10 +309,19 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         self_improvement_proposal_candidates=_int(
             e, "SELF_IMPROVEMENT_PROPOSAL_CANDIDATES", 2,
             _si_legacy("SELF_IMPROVEMENT_PROPOSAL_CANDIDATES")),
+        self_improvement_browser_lock_timeout=_float(
+            e, "SELF_IMPROVEMENT_BROWSER_LOCK_TIMEOUT", 10.0,
+            _si_legacy("SELF_IMPROVEMENT_BROWSER_LOCK_TIMEOUT")),
         self_improvement_outcomes=frozenset(
             _csv(e, "SELF_IMPROVEMENT_OUTCOMES",
                  tuple(sorted(DEFAULT_SELF_IMPROVEMENT_OUTCOMES)),
                  _si_legacy("SELF_IMPROVEMENT_OUTCOMES"))),
+
+        session_keeper_enabled=_flag(e, "SESSION_KEEPER_ENABLED", True),
+        session_keeper_cooldown_seconds=_int(
+            e, "SESSION_KEEPER_COOLDOWN_SECONDS", 21600),
+        session_keeper_lock_timeout_seconds=_float(
+            e, "SESSION_KEEPER_LOCK_TIMEOUT_SECONDS", 120.0),
 
         docs_dir=_raw(e, "DOCS_DIR"),
     )

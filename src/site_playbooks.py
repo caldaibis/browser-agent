@@ -152,8 +152,7 @@ def update_after_run(listing: Listing | dict, result) -> None:
 
 
 def _update(listing: Listing, result) -> None:
-    # A yielded run was aborted for priority, not finished — nothing to learn.
-    if result.outcome == "yielded" or not getattr(result, "transcript_path", ""):
+    if not getattr(result, "transcript_path", ""):
         return
     transcript_path = Path(result.transcript_path)
     if not transcript_path.exists():
