@@ -19,9 +19,9 @@ apt-get install -y -qq \
   git curl ca-certificates xvfb x11vnc fonts-liberation fonts-noto-color-emoji \
   nodejs npm \
   >/dev/null
-# Node/npx is required for the Playwright MCP (browser automation + file upload)
-# that Hermes drives. The MCP server config travels in the copied ~/.hermes.
-# Also needed for the claude CLI (self-improvement agent) -- see step 5.
+# Node/npm installs the pinned agent-browser binary and Claude CLI. The apply
+# runtime itself uses agent-browser's native Rust CDP daemon; npx remains only
+# for the explicit APPLY_BROWSER_BACKEND=playwright rollback path.
 
 echo "==> [2/8] app user '${APP_USER}'"
 if ! id "${APP_USER}" >/dev/null 2>&1; then

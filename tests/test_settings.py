@@ -11,6 +11,8 @@ class TestLoadSettings(unittest.TestCase):
         s = load_settings({})
         self.assertIsInstance(s, Settings)
         self.assertEqual(s.apply_model, "deepseek-v4-pro")
+        self.assertEqual(s.apply_browser_backend, "agent_browser")
+        self.assertEqual(s.agent_browser_max_output_chars, 20000)
         self.assertEqual(s.apply_max_turns, 60)
         self.assertEqual(s.max_rent, 1750.0)
         self.assertEqual(s.poll_cities, ("utrecht",))
@@ -55,6 +57,19 @@ class TestLoadSettings(unittest.TestCase):
 
     def test_prune_keep_recent_floor(self):
         self.assertEqual(load_settings({"APPLY_PRUNE_KEEP_RECENT": "0"}).apply_prune_keep_recent, 1)
+
+    def test_browser_backend_normalizes_dash_and_rejects_unknown(self):
+        self.assertEqual(
+            load_settings({"APPLY_BROWSER_BACKEND": "agent-browser"}).apply_browser_backend,
+            "agent_browser")
+        with self.assertRaises(SettingsError) as ctx:
+            load_settings({"APPLY_BROWSER_BACKEND": "selenium"})
+        self.assertIn("APPLY_BROWSER_BACKEND", str(ctx.exception))
+
+    def test_agent_browser_output_floor(self):
+        self.assertEqual(
+            load_settings({"AGENT_BROWSER_MAX_OUTPUT_CHARS": "10"}).agent_browser_max_output_chars,
+            1000)
 
     def test_self_improvement_outcomes_csv(self):
         s = load_settings({"SELF_IMPROVEMENT_OUTCOMES": "blocked,error"})

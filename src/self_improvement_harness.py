@@ -200,7 +200,8 @@ def classify_failure(text: str, *, outcome: str = "", domain: str = "") -> Failu
             "browser-lock-contention", "control_policy", outcome, domain,
             "Run blocked on the shared-browser lock or a hung CDP connection.",
         )
-    if any(x in low for x in ("snapshot-overuse", "stale page dump", "pruned", "quadratic")):
+    if any(x in low for x in ("snapshot-overuse", "observation-overuse", "stale page dump",
+                              "pruned", "quadratic")):
         return FailureSignature(
             "context-growth-snapshot-loop", "control_policy", outcome, domain,
             "Snapshots or page dumps dominated context/turn budget.",

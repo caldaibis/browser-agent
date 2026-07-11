@@ -21,6 +21,18 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "==> claude CLI (self-improvement agent, via claude-agent-sdk)"
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code >/dev/null
 
+# The apply agent uses the native Rust binary and attaches it to browser-host's
+# existing CDP profile. Install an exact version: this boundary submits real
+# rental applications, so an unreviewed `latest` upgrade is not acceptable.
+AGENT_BROWSER_VERSION="$(tr -d '[:space:]' < "${APP_DIR}/deploy/agent-browser.version")"
+CURRENT_AGENT_BROWSER="$(agent-browser --version 2>/dev/null | awk '{print $2}' || true)"
+if [ "${CURRENT_AGENT_BROWSER}" != "${AGENT_BROWSER_VERSION}" ]; then
+  echo "==> agent-browser ${AGENT_BROWSER_VERSION} (apply agent)"
+  npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" >/dev/null
+else
+  echo "==> agent-browser ${AGENT_BROWSER_VERSION} already installed"
+fi
+
 echo "==> litellm-proxy.service"
 sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__APP_HOME__|${APP_HOME}|g" \
   "${APP_DIR}/deploy/systemd/litellm-proxy.service" > /etc/systemd/system/litellm-proxy.service

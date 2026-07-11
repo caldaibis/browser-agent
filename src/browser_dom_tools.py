@@ -1,6 +1,6 @@
 """Shared raw-DOM browser helpers, connecting over CDP directly with Playwright.
 
-A narrow fallback for situations the Playwright MCP's accessibility-tree
+A narrow fallback for situations the browser backend's accessibility-tree
 snapshot doesn't handle well: an open dialog/overlay whose markup lacks
 proper ARIA roles (so it never gets a ref in browser_snapshot), a
 snapshot-ref click that silently no-ops, and a text input inside such a
@@ -21,7 +21,7 @@ from .dashboard.data import redact
 
 
 async def current_page(browser, hint_url: str | None = None):
-    """Pick the page the Playwright MCP itself considers "current".
+    """Pick the page the browser MCP itself considers "current".
 
     With several tabs open (common on REBO-style flows: SSO popups, an
     inschrijfportaal tab, the original listing tab...) the last-*created*
@@ -313,6 +313,77 @@ async def click_by_text(cdp_url: str, text: str, settle_ms: int = 600, current_u
             if settle_ms:
                 await page.wait_for_timeout(settle_ms)
             return await dom_report(page)
+        finally:
+            await browser.close()
+
+
+# huurwoningen.nl's aggregator gateway: a "Contact met de verhuurder" control
+# (its visible text varies by listing -- verified: "Bekijk opnieuw" and
+# "Reageer op deze woning" both seen) opens a dialog reading "Deze woning is
+# gevonden buiten ons eigen netwerk. Met de knop hieronder kom je direct bij
+# de aanbieder terecht." with an opt-in checkbox (left unchecked -- it is
+# promotional, not required) and a "Ga verder" button that lands on the real
+# external provider. A paired replay (10-07-2026) showed this costing 7-19
+# turns of browser_find/dom_scan trial-and-error per session, once ballooning
+# a single session from 85k to 211k tokens. This fixes the whole two-click
+# gateway as one deterministic tool call instead of leaving the model to
+# rediscover it turn by turn.
+_AGGREGATOR_STEP1_TEXTS = ("Bekijk opnieuw", "Reageer op deze woning", "Reageer")
+_AGGREGATOR_STEP2_TEXTS = ("Ga verder",)
+
+
+async def aggregator_hop(cdp_url: str, settle_ms: int = 700, current_url: str | None = None) -> str:
+    """Connect over CDP and drive the huurwoningen.nl aggregator gateway in
+    one call: click the first matching "Contact met de verhuurder" control,
+    then click "Ga verder" in the dialog it opens. Falls back to reporting
+    the raw DOM (like click_by_text) when either step doesn't match, so the
+    model can recover with the narrower fallback tools instead of being stuck.
+    """
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        try:
+            page = await current_page(browser, hint_url=current_url)
+            start_url = page.url
+            clicked_first = None
+            for label in _AGGREGATOR_STEP1_TEXTS:
+                try:
+                    await page.get_by_text(label, exact=False).first.click(timeout=2500)
+                    clicked_first = label
+                    break
+                except Exception:
+                    continue
+            if clicked_first is None:
+                return (
+                    "AGGREGATOR HOP FAILED: none of the gateway controls "
+                    f"({', '.join(_AGGREGATOR_STEP1_TEXTS)!r}) were clickable on this "
+                    f"page. {await dom_report(page)}"
+                )
+            if settle_ms:
+                await page.wait_for_timeout(settle_ms)
+            scope = await dialog_scope(page)
+            root = scope if scope is not None else page
+            clicked_second = None
+            for label in _AGGREGATOR_STEP2_TEXTS:
+                try:
+                    await root.get_by_text(label, exact=False).first.click(timeout=5000)
+                    clicked_second = label
+                    break
+                except Exception:
+                    continue
+            if clicked_second is None:
+                return (
+                    f"AGGREGATOR HOP PARTIAL: clicked {clicked_first!r} but no "
+                    f"{'/'.join(_AGGREGATOR_STEP2_TEXTS)} control appeared to confirm. "
+                    f"{await dom_report(page)}"
+                )
+            if settle_ms:
+                await page.wait_for_timeout(settle_ms)
+            return (
+                f"AGGREGATOR HOP OK: clicked {clicked_first!r} then {clicked_second!r}. "
+                f"URL {start_url!r} -> {page.url!r}.\n{await dom_report(page)}"
+            )
         finally:
             await browser.close()
 

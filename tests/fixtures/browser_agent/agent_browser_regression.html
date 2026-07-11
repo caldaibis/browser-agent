@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Agent browser regression</title>
+  <style>
+    dialog:not([open]) { display: none; }
+    #overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .15); z-index: 10; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Rental application</h1>
+    <p id="requirement">Minimum gross income is EUR 4,000 per month.</p>
+    <button id="open-dialog" type="button">Request viewing</button>
+    <button id="covered" type="button">Covered action</button>
+    <div id="overlay"><button id="dismiss-overlay" type="button">Accept cookies</button></div>
+  </main>
+
+  <dialog id="hidden-dialog">
+    <label>First name <input id="first_name" type="text"></label>
+  </dialog>
+
+  <dialog id="application-dialog">
+    <form id="application-form">
+      <label>First name <input id="first_name" type="text"></label>
+      <label>Email <input id="email" type="email"></label>
+      <label>Income type <button id="income-toggle">Choose</button></label>
+      <div id="income-options" hidden><button id="employment-option">Employment</button></div>
+      <label>Documents <input id="documents" type="file" multiple></label>
+      <button id="submit" type="submit">Submit application</button>
+      <output id="status"></output>
+    </form>
+  </dialog>
+
+  <script>
+    document.querySelector('#dismiss-overlay').addEventListener('click', () => {
+      document.querySelector('#overlay').remove();
+    });
+    document.querySelector('#open-dialog').addEventListener('click', () => {
+      document.querySelector('#application-dialog').showModal();
+    });
+    document.querySelector('#income-toggle').addEventListener('click', event => {
+      event.preventDefault();
+      document.querySelector('#income-options').hidden = false;
+    });
+    document.querySelector('#employment-option').addEventListener('click', event => {
+      event.preventDefault();
+      document.querySelector('#income-toggle').textContent = 'Employment';
+      document.querySelector('#income-options').hidden = true;
+    });
+    document.querySelector('#application-form').addEventListener('submit', event => {
+      event.preventDefault();
+      document.querySelector('#status').textContent = 'Application submitted';
+    });
+  </script>
+</body>
+</html>

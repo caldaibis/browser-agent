@@ -23,5 +23,8 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
+      - name: Install pinned agent-browser contract
+        run: npm install -g "agent-browser@$(tr -d '[:space:]' < deploy/agent-browser.version)"
+
       - name: Offline checks (compile + imports + prompt render)
         run: just check

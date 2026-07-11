@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from src import browser_agent
 from src.browser_agent import loop
+from src.browser_agent import transport
 
 
 class _FakeMessage:
@@ -76,21 +77,16 @@ class _FakeMcpSession:
         pass
 
     async def list_tools(self):
-        return SimpleNamespace(tools=[])
+        return SimpleNamespace(
+            tools=[SimpleNamespace(name=name) for name in transport._AGENT_REMOTE_REQUIRED])
 
     async def call_tool(self, name, args):  # pragma: no cover - not exercised
         raise AssertionError(f"unexpected tool call: {name}({args})")
 
 
-class _FakeMcpSessionPermissive:
+class _FakeMcpSessionPermissive(_FakeMcpSession):
     """Like _FakeMcpSession but succeeds for any tool name, for tests that
     need many turns of real browser_snapshot/browser_click calls."""
-    async def initialize(self):
-        pass
-
-    async def list_tools(self):
-        return SimpleNamespace(tools=[])
-
     async def call_tool(self, name, args):
         return _FakeToolResult(f"ok: {name} {args}")
 
@@ -99,17 +95,26 @@ class _FakeMcpSessionBigSnapshots(_FakeMcpSessionPermissive):
     """Permissive session whose browser_snapshot results are large enough to
     count as page dumps for the stale-dump pruning logic."""
     async def call_tool(self, name, args):
-        if name == "browser_snapshot":
+        if name == "agent_browser_snapshot":
             return _FakeToolResult("- generic [ref=eXX]: snapshot line\n" * 200)
+        return await super().call_tool(name, args)
+
+
+class _FakeMcpSessionRecording(_FakeMcpSessionPermissive):
+    """Permissive session that records every (name, args) it receives, so a
+    test can assert on the exact remote arguments actually sent."""
+    def __init__(self):
+        self.received: list[tuple] = []
+
+    async def call_tool(self, name, args):
+        self.received.append((name, args))
         return await super().call_tool(name, args)
 
 
 class _FakeMcpSessionPayment(_FakeMcpSessionPermissive):
     async def call_tool(self, name, args):
-        if name == "browser_tabs":
-            return _FakeToolResult(
-                "- 0: (current) Checkout (https://www.mollie.com/checkout/select-method/abc)"
-            )
+        if name == "agent_browser_get_url":
+            return _FakeToolResult("https://www.mollie.com/checkout/select-method/abc")
         return await super().call_tool(name, args)
 
 
@@ -329,7 +334,7 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
                 cdp_url="http://fake", log=log,
             )
         self.assertEqual(browser_agent._parse_outcome(text, rc), "blocked")
-        nudge_lines = [l for l in log.lines if "snapshot-overuse nudge" in l]
+        nudge_lines = [l for l in log.lines if "observation-overuse nudge" in l]
         self.assertEqual(len(nudge_lines), 1,
                           "should fire exactly once, not every subsequent turn")
 
@@ -418,6 +423,83 @@ class TestRunLoop(unittest.IsolatedAsyncioTestCase):
         mock_scan.assert_awaited_once_with("http://fake-cdp", current_url=None)
         mock_click.assert_awaited_once_with(
             "http://fake-cdp", "Ja, ik ga akkoord", current_url=None)
+
+    async def test_string_boolean_argument_is_normalized_before_dispatch(self):
+        """DeepSeek emitted interactive="True" (a string) in production
+        (verified: 26 occurrences in a 10-session paired replay sample).
+        The loop must coerce it to a real boolean per browser_snapshot's own
+        schema before it reaches the MCP call, not forward it verbatim."""
+        responses = [
+            _FakeResponse(tool_calls=[_FakeToolCall(
+                "id1", "browser_snapshot", json.dumps({"interactive": "True"}))]),
+            _FakeResponse(content="Done.\nOUTCOME: blocked",
+                          tool_calls=None, finish_reason="stop"),
+        ]
+        session = _FakeMcpSessionRecording()
+        patches = _patch_agent(responses, session=session)
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2]:
+            await loop._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake", log=log,
+            )
+        snapshot_calls = [args for name, args in session.received
+                          if name == "agent_browser_snapshot"]
+        self.assertEqual(len(snapshot_calls), 1)
+        self.assertIs(snapshot_calls[0]["interactive"], True)
+
+    async def test_aggregator_hop_handled_locally_not_via_mcp(self):
+        """aggregator_hop is a local fallback tool (src/browser_dom_tools.py),
+        just like dom_scan/click_by_text -- must not go through
+        session.call_tool (the strict _FakeMcpSession raises on any MCP
+        call), and must be dispatched to browser_dom_tools with the run's
+        cdp_url."""
+        responses = [
+            _FakeResponse(tool_calls=[_FakeToolCall("id1", "aggregator_hop", "{}")]),
+            _FakeResponse(content="Done.\nOUTCOME: submitted",
+                          tool_calls=None, finish_reason="stop"),
+        ]
+        patches = _patch_agent(responses)  # strict session: raises on MCP call_tool
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2], \
+             patch.object(loop.browser_dom_tools, "aggregator_hop",
+                          AsyncMock(return_value="AGGREGATOR HOP OK")) as mock_hop:
+            rc, text = await loop._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake-cdp", log=log,
+            )
+        self.assertEqual(browser_agent._parse_outcome(text, rc), "submitted")
+        mock_hop.assert_awaited_once_with("http://fake-cdp", current_url=None)
+
+    async def test_observation_guard_counts_snapshot_diff_and_read_page(self):
+        """The overuse guard must count browser_snapshot_diff and
+        browser_read_page toward the same budget as browser_snapshot -- a
+        paired replay (10-07-2026) showed runs leaning on a mix of all three
+        (plus dom_scan) to avoid tripping a guard that only watched plain
+        snapshots."""
+        mix = ["browser_snapshot", "browser_snapshot_diff", "browser_read_page"]
+        responses = []
+        for i in range(1, 12):
+            if i % 2 == 1:
+                tool = mix[(i // 2) % len(mix)]
+                responses.append(_FakeResponse(
+                    tool_calls=[_FakeToolCall(f"id{i}", tool, "{}")]))
+            else:
+                responses.append(_FakeResponse(tool_calls=[_FakeToolCall(
+                    f"id{i}", "browser_click", json.dumps({"target": f"e{i}"}))]))
+        responses.append(_FakeResponse(content="Done.\nOUTCOME: blocked",
+                                        tool_calls=None, finish_reason="stop"))
+        patches = _patch_agent(responses, session=_FakeMcpSessionPermissive())
+        log = _CollectingLogger()
+        with patches[0], patches[1], patches[2]:
+            rc, text = await loop._run(
+                prompt="test prompt", model="test-model", max_turns=60,
+                cdp_url="http://fake", log=log,
+            )
+        self.assertEqual(browser_agent._parse_outcome(text, rc), "blocked")
+        nudge_lines = [l for l in log.lines if "observation-overuse nudge" in l]
+        self.assertEqual(len(nudge_lines), 1,
+                          "should fire once for the combined observation-call count")
 
 
 if __name__ == "__main__":
