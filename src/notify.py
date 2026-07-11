@@ -61,12 +61,10 @@ def _subject(rec: dict) -> str:
 
 
 def _body(rec: dict) -> str:
-    detected_by = rec.get("detected_by") if rec.get("trigger") == "poller" else ""
     lines = [
         f"Status:   {rec.get('status')}",
         f"Address:  {rec.get('address') or '-'}",
         f"Source:   {rec.get('source') or '-'}",
-        *([f"Detected by poller: {detected_by}"] if detected_by else []),
         f"Listing:  {rec.get('source_url') or rec.get('stekkies_url') or '-'}",
         f"When:     {rec.get('ts')}",
         f"Duration: {rec.get('seconds', '-')}s",
@@ -138,9 +136,9 @@ def send_status_email(rec: dict) -> None:
 
     Never raises: logging/apply flow must not break on a mail failure.
     """
-    # Web push piggybacks on this single integration point (both the
-    # orchestrator and the poller route every outcome through here). It has
-    # its own enable flag + outcome filter and never raises.
+    # Web push piggybacks on this single integration point (the orchestrator
+    # routes every outcome through here). It has its own enable flag + outcome
+    # filter and never raises.
     from .push_notify import push_status
     push_status(rec)
     if not NOTIFY_ENABLED:

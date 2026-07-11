@@ -82,9 +82,8 @@ def _extract_from_page(page, url: str) -> Listing:
     # networkidle never settles on Stekkies listing pages: they hold
     # persistent connections open for Leaflet maps + analytics beacons, so
     # goto() timed out (30s default) even though the extractable content
-    # (title, external source link) is present shortly after the DOM loads
-    # (same failure class as poller/watcher.py's tier-3 render, diagnosed by
-    # self-improvement 08-07-2026). domcontentloaded + a fixed settle avoids it.
+    # (title, external source link) is present shortly after the DOM loads.
+    # domcontentloaded + a fixed settle avoids it.
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(4000)
     data = page.evaluate(EXTRACT_JS)

@@ -55,8 +55,7 @@ systemctl enable --now self-improvement-worker.timer
 
 # Dashboard safe-action sudoers drop-in. Re-synced on every deploy (not just
 # fresh setup.sh installs) so an existing VPS picks up newly whitelisted
-# commands -- e.g. poller start/stop, added for the dashboard's poller
-# pause/resume buttons, which silently failed before this line existed.
+# commands.
 echo "==> dashboard sudoers drop-in"
 sed "s|__APP_USER__|${APP_USER}|g" "${APP_DIR}/deploy/stekkies-dashboard.sudoers" \
   > /etc/sudoers.d/stekkies-dashboard

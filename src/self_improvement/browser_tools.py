@@ -14,7 +14,7 @@ from claude_agent_sdk import McpSdkServerConfig, create_sdk_mcp_server, tool
 
 from ..browser_dom_tools import compact, current_page, evaluate_controls, evaluate_fields
 from ..config import CDP_URL, SCREENSHOT_DIR
-from ..poller.browser_lock import browser_lock
+from ..browser_lock import browser_lock
 from ..redaction import redact
 from ..settings import settings
 

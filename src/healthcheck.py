@@ -31,10 +31,10 @@ import time
 import urllib.request
 from datetime import datetime
 
-from . import eventlog
+from . import eventlog, session_keeper
 from .config import LOG_DIR, PROJECT_ROOT, CDP_URL
 from .notify import send_alert
-from .poller.browser_lock import browser_lock
+from .browser_lock import browser_lock
 from .playwright_mcp_runtime import initialize_check, runtime_check
 from .settings import settings
 from .eventlog import get_logger
@@ -218,6 +218,12 @@ def check_site_logins(state: dict) -> None:
     from playwright.sync_api import sync_playwright
 
     results: dict[str, bool] = {}
+    # Adapter-covered domains (session_keeper.ADAPTERS) get an autonomous
+    # repair attempt using this same ctx/lock instead of an immediate
+    # manual-VNC alert; session_keeper owns alerting for those. Populated
+    # only when logged_out, so an untouched entry below means "not attempted
+    # (no adapter, or session was fine)".
+    repairs: dict[str, session_keeper.RepairOutcome] = {}
     try:
         with browser_lock(timeout=60, holder="healthcheck"):
             with sync_playwright() as p:
@@ -231,7 +237,11 @@ def check_site_logins(state: dict) -> None:
                             page.goto(probe_url, wait_until="domcontentloaded",
                                       timeout=30000)
                             page.wait_for_timeout(1500)
-                            results[name] = _logged_out_heuristic(page)
+                            logged_out = _logged_out_heuristic(page)
+                            results[name] = logged_out
+                            if logged_out and session_keeper.has_adapter(probe_url):
+                                repairs[name] = session_keeper.ensure_session(
+                                    probe_url, ctx=ctx)
                         except Exception as e:  # noqa: BLE001 - per-site best effort
                             _LOG.info(f"login probe error for {name}: {e}")
                         finally:
@@ -248,6 +258,11 @@ def check_site_logins(state: dict) -> None:
     for name, logged_out in results.items():
         _LOG.info(f"{name} logged_out={logged_out}")
         key = f"logout_sent:{name}"
+        if name in repairs:
+            # session_keeper already attempted repair and owns alerting for
+            # this domain (see ensure_session) -- just track dedup state.
+            state[key] = repairs[name].outcome not in ("ok", "repaired")
+            continue
         if logged_out:
             if not state.get(key):
                 send_alert(

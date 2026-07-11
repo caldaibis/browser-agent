@@ -1,7 +1,7 @@
 """Typed domain model — the pipeline's core records, defined once.
 
-The listing dict used to flow through apply/orchestrator/poller/dashboard as
-a bare `dict` with stringly-typed keys, and every JSONL record type was a
+The listing dict used to flow through apply/orchestrator/dashboard as a bare
+`dict` with stringly-typed keys, and every JSONL record type was a
 schema-by-convention at each producer and consumer. The dedup sagas
 (Kaatstraat, Hof van Oslo — see docs/lessons/) were at root "same entity,
 several ad-hoc key representations" bugs. These dataclasses centralize the
@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
-from .poller.dedup import canonical_url
+from .dedup import canonical_url
 
 
 def _str_of(data: Mapping[str, Any], key: str) -> str:
@@ -108,10 +108,10 @@ class ProcessedRecord:
 
     def keys(self) -> frozenset[str]:
         """Every dedup key this record contributes: raw + canonical forms of
-        stekkies/source/resolved URLs. THE one derivation both the
-        orchestrator pre-flight and the poller's SeenStore must share —
-        having two copies is exactly how the cross-source duplicate
-        submission of 02-07-2026 happened."""
+        stekkies/source/resolved URLs. THE one derivation the orchestrator's
+        pre-flight duplicate check relies on — having two copies of this
+        logic is exactly how the cross-source duplicate submission of
+        02-07-2026 happened."""
         keys: set[str] = set()
         for url in (self.stekkies_url, self.source_url, self.resolved_url):
             if url:

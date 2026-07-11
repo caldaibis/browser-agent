@@ -43,6 +43,16 @@ class TestFingerprinting(_TempLog):
             {"source_url": "https://site-b.nl/listing/2"}, "unknown", "other weird state")
         self.assertNotEqual(fp_a.key, fp_b.key)
 
+    def test_fingerprint_session_keeper_adapter_scopes_to_domain(self):
+        fp_a = incident_store.fingerprint_session_keeper_adapter("huurwoningen.nl")
+        fp_b = incident_store.fingerprint_session_keeper_adapter(
+            "https://www.huurwoningen.nl/account/inloggen/")
+        fp_c = incident_store.fingerprint_session_keeper_adapter("kamernet.nl")
+        self.assertEqual(fp_a.signature, "session-keeper-adapter")
+        self.assertEqual(fp_a.key, fp_b.key)
+        self.assertEqual(fp_a.key, "session-keeper-adapter@huurwoningen.nl")
+        self.assertNotEqual(fp_a.key, fp_c.key)
+
 
 class TestDedupPolicy(_TempLog):
     def _fp(self):

@@ -22,8 +22,7 @@ NO_CREDIT_RC = 126
 
 @dataclass
 class AgentResult:
-    rc: int            # 0 ok, 1 incomplete/loop, 2 setup error, 124 timeout,
-    #                    125 yielded to a priority (mail-triggered) apply
+    rc: int            # 0 ok, 1 incomplete/loop, 2 setup error, 124 timeout
     outcome: str       # one of VALID_OUTCOMES, or incomplete/timeout/error/unknown
     summary: str       # the model's final one-paragraph status
     transcript_path: str = ""
@@ -31,8 +30,8 @@ class AgentResult:
     # reached, when different from the input source_url -- e.g. an
     # aggregator listing's real destination after in-page redirect dialogs.
     # Callers persist this as an extra dedup key (see
-    # poller.dedup.known_processed_urls) so a listing reachable via two
-    # different entry points isn't double-submitted.
+    # dedup.known_processed_urls) so a listing reachable via two different
+    # entry points isn't double-submitted.
 
     @property
     def applied(self) -> bool:
@@ -62,8 +61,6 @@ def _parse_outcome(final_text: str, rc: int) -> str:
         return outcome
     if rc == NO_CREDIT_RC:
         return "no_credit"
-    if rc == 125:
-        return "yielded"
     if rc == 124:
         return "timeout"
     if rc == 2:

@@ -8,7 +8,6 @@ through redact(), and *.prompt.txt is never read here.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -18,16 +17,13 @@ from pathlib import Path
 
 from .. import eventlog
 from ..config import LOG_DIR, PROJECT_ROOT
-from ..gmail_watch import recent_mail_events
 from ..llm_pricing import pricing_table
-from ..poller.dedup import canonical_url
 from . import cache
 
 MAIL_SUMMARY = LOG_DIR / "mail_summary.jsonl"
 TRANSCRIPTS_DIR = LOG_DIR / "transcripts"
 SCREENSHOTS_DIR = LOG_DIR / "screenshots"
 CREDS_FILE = PROJECT_ROOT / "state" / "sources_credentials.json"
-MAIL_EVENTS_CACHE = PROJECT_ROOT / "state" / "dashboard_mail_events.json"
 
 # Outcomes that represent a real apply attempt (for success-rate maths).
 ATTEMPT_STATUSES = {
@@ -94,12 +90,6 @@ class Submission:
         return parse_ts(self.detected_ts) or parse_ts(self.msg_received_ts) or self.when
 
     @property
-    def key(self) -> str:
-        """Canonical listing key — used to group a listing's records together
-        (race pairing). NOT a stable per-record id; several records share it."""
-        return canonical_url(self.source_url) if self.source_url else ""
-
-    @property
     def permalink(self) -> str:
         """Stable per-record id for URLs. Derived from content (timestamp +
         hash of source_url/msg_id), so it survives log edits/rotation that
@@ -151,73 +141,14 @@ class TokenUsage:
         return f"{self.display_cost} · {self.display_tokens}"
 
 
-@dataclass
-class MailEvent:
-    provider: str
-    msg_id: str
-    received_ts: str
-    subject: str
-    source_url: str = ""
-    stekkies_url: str = ""
-
-    @property
-    def when(self) -> datetime | None:
-        return parse_ts(self.received_ts)
-
-    @property
-    def key(self) -> str:
-        return canonical_url(self.source_url) if self.source_url else ""
-
-
-@dataclass
-class RaceInfo:
-    id: int
-    source_url: str
-    source: str
-    detected_by: str
-    address: str
-    status: str
-    permalink: str = ""
-    poller_ts: str = ""
-    stekkies_ts: str = ""
-    huurwoningen_ts: str = ""
-    stekkies_lead_s: float | None = None
-    huurwoningen_lead_s: float | None = None
-
-    @property
-    def poller_won_stekkies(self) -> bool:
-        return self.stekkies_lead_s is not None and self.stekkies_lead_s > 0
-
-    @property
-    def poller_won_huurwoningen(self) -> bool:
-        return self.huurwoningen_lead_s is not None and self.huurwoningen_lead_s > 0
-
-
 def parse_ts(value: str | None) -> datetime | None:
     # Delegates to eventlog.parse_ts: old records are naive local time, new
     # ones aware UTC; both normalize to naive local so age math stays right.
     return eventlog.parse_ts(value)
 
 
-def format_delta(seconds: float | None) -> str:
-    if seconds is None:
-        return "no mail yet"
-    ahead = seconds >= 0
-    seconds = abs(seconds)
-    mins = int(seconds // 60)
-    secs = int(seconds % 60)
-    if mins >= 60:
-        text = f"{mins // 60}h {mins % 60}m"
-    elif mins:
-        text = f"{mins}m {secs}s"
-    else:
-        text = f"{secs}s"
-    return f"poller +{text}" if ahead else f"mail +{text}"
-
-
 def format_age(seconds: float | None) -> str:
-    """'2m ago' / '1h 5m ago' style, for "when did this site last say
-    anything at all" -- distinct from format_delta's poller-vs-mail race."""
+    """'2m ago' / '1h 5m ago' style, for "when did this last happen"."""
     if seconds is None:
         return "never"
     seconds = max(0, seconds)
@@ -234,7 +165,7 @@ def format_age(seconds: float | None) -> str:
 
 def format_duration(seconds: float | None) -> str:
     """A plain elapsed-time duration ('3m 20s', '1h 5m'), distinct from
-    format_age's '... ago' and format_delta's poller-vs-mail sign."""
+    format_age's '... ago' framing."""
     if seconds is None:
         return "—"
     seconds = int(max(0, seconds))
@@ -443,59 +374,6 @@ def _submission_index() -> dict[str, Submission]:
     return cache.memo("submission_index", _CACHE_TTL, _build)
 
 
-def _read_mail_events_cache() -> list[dict]:
-    try:
-        return json.loads(MAIL_EVENTS_CACHE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-
-def _write_mail_events_cache(events: list[dict]) -> None:
-    MAIL_EVENTS_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    MAIL_EVENTS_CACHE.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def load_mail_events(days: int = 30, max_age_minutes: int = 15,
-                     force: bool = False, refresh_stale: bool = True) -> list[MailEvent]:
-    raw = _read_mail_events_cache()
-    stale = True
-    if MAIL_EVENTS_CACHE.exists():
-        age = datetime.now() - datetime.fromtimestamp(MAIL_EVENTS_CACHE.stat().st_mtime)
-        stale = age > timedelta(minutes=max_age_minutes)
-    if force or (stale and refresh_stale):
-        try:
-            raw = recent_mail_events(days=days)
-            _write_mail_events_cache(raw)
-        except Exception:
-            raw = raw or []
-
-    # Stekkies source URLs are only known after the orchestrator extracts the
-    # listing. Fill them from mail_summary records with the same Gmail msg_id or
-    # Stekkies redirect URL.
-    subs = load_submissions()
-    by_msg = {s.msg_id: s.source_url for s in subs if s.msg_id and s.source_url}
-    by_stekkies = {
-        s.stekkies_url: s.source_url
-        for s in subs
-        if s.stekkies_url and s.source_url
-    }
-    events: list[MailEvent] = []
-    for r in raw:
-        source_url = r.get("source_url") or ""
-        if r.get("provider") == "stekkies":
-            source_url = source_url or by_msg.get(r.get("msg_id", ""), "")
-            source_url = source_url or by_stekkies.get(r.get("stekkies_url", ""), "")
-        events.append(MailEvent(
-            provider=r.get("provider", ""),
-            msg_id=r.get("msg_id", ""),
-            received_ts=r.get("received_ts", ""),
-            subject=r.get("subject", ""),
-            source_url=source_url,
-            stekkies_url=r.get("stekkies_url", ""),
-        ))
-    return events
-
-
 def get_submission(key: str | int) -> Submission | None:
     """Look up by stable permalink or legacy line-index id (as str or int)."""
     return _submission_index().get(str(key))
@@ -537,9 +415,9 @@ def _median(values: list[float]) -> float | None:
     return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
 
 
-def mission_kpis(subs: list[Submission], race: dict, spend: dict) -> dict:
+def mission_kpis(subs: list[Submission], spend: dict) -> dict:
     """The "is the mission on track" tiles for the overview: submissions,
-    success rate, detection→submitted latency, race wins, spend."""
+    success rate, detection→submitted latency, spend."""
     now = datetime.now()
     week_cutoff = now - timedelta(days=7)
     attempts = [s for s in subs if s.status in ATTEMPT_STATUSES]
@@ -547,7 +425,7 @@ def mission_kpis(subs: list[Submission], race: dict, spend: dict) -> dict:
     submitted_week = sum(1 for s in submitted if (s.when or datetime.min) >= week_cutoff)
 
     # detection → submitted latency: from when we first saw the listing
-    # (poller detected_ts / mail received_ts) to the submitted record time.
+    # (mail received_ts) to the submitted record time.
     latencies: list[float] = []
     for s in submitted:
         start = s.event_time
@@ -562,123 +440,18 @@ def mission_kpis(subs: list[Submission], race: dict, spend: dict) -> dict:
         "attempts_total": len(attempts),
         "success_rate": round(100 * len(submitted) / len(attempts), 1) if attempts else 0.0,
         "median_latency_s": median_latency,
-        "poller_wins_stekkies": race["stekkies"]["poller_wins"],
-        "poller_wins_huurwoningen": race["huurwoningen"]["poller_wins"],
         "spend_week_usd": spend.get("total_usd"),
         "cost_per_submission": spend.get("cost_per_submission"),
     }
 
 
-def race_report(subs: list[Submission], mail_events: list[MailEvent]) -> dict:
-    by_key: dict[str, list[Submission]] = defaultdict(list)
-    for s in subs:
-        if s.key:
-            by_key[s.key].append(s)
-
-    mail_by_key: dict[str, dict[str, list[MailEvent]]] = defaultdict(lambda: defaultdict(list))
-    for e in mail_events:
-        if e.key:
-            mail_by_key[e.key][e.provider].append(e)
-
-    rows: list[RaceInfo] = []
-    for key, records in by_key.items():
-        pollers = [s for s in records if s.origin == "poller"]
-        if not pollers:
-            continue
-        pollers.sort(key=lambda s: s.event_time or datetime.max)
-        p = pollers[0]
-        p_time = p.event_time
-        if p_time is None:
-            continue
-
-        stekkies_times = [e.when for e in mail_by_key[key].get("stekkies", []) if e.when]
-        # Also use Stekkies-triggered submissions; they carry msg_received_ts
-        # when available and are the only way to map Stekkies redirects to source URLs.
-        stekkies_times += [
-            s.event_time for s in records
-            if s.origin == "stekkies_mail" and s.event_time
-        ]
-        huur_times = [e.when for e in mail_by_key[key].get("huurwoningen", []) if e.when]
-        # Also use Huurwoningen-mail-triggered submissions directly, in case the
-        # mail-index cache missed the event (stale refresh, API hiccup, etc.).
-        huur_times += [
-            s.event_time for s in records
-            if s.origin == "huurwoningen_mail" and s.event_time
-        ]
-
-        st = min(stekkies_times) if stekkies_times else None
-        hw = min(huur_times) if huur_times else None
-        rows.append(RaceInfo(
-            id=p.id,
-            source_url=p.source_url,
-            source=p.source,
-            detected_by=p.detected_by_label,
-            address=p.address,
-            status=p.status,
-            permalink=p.permalink,
-            poller_ts=p.event_time.isoformat(timespec="seconds") if p.event_time else "",
-            stekkies_ts=st.isoformat(timespec="seconds") if st else "",
-            huurwoningen_ts=hw.isoformat(timespec="seconds") if hw else "",
-            stekkies_lead_s=(st - p_time).total_seconds() if st else None,
-            huurwoningen_lead_s=(hw - p_time).total_seconds() if hw else None,
-        ))
-    rows.sort(key=lambda r: r.poller_ts, reverse=True)
-
-    def _summary(provider: str) -> dict:
-        attr = "stekkies_lead_s" if provider == "stekkies" else "huurwoningen_lead_s"
-        vals = [getattr(r, attr) for r in rows if getattr(r, attr) is not None]
-        wins = [v for v in vals if v > 0]
-        losses = [v for v in vals if v < 0]
-        return {
-            "matched": len(vals),
-            "poller_wins": len(wins),
-            "mail_wins": len(losses),
-            "no_mail": len(rows) - len(vals),
-            "avg_lead_s": round(sum(wins) / len(wins), 1) if wins else None,
-        }
-
-    return {
-        "rows": rows,
-        "stekkies": _summary("stekkies"),
-        "huurwoningen": _summary("huurwoningen"),
-    }
-
-
-def cached_race_report(refresh_mail: bool = True) -> dict:
-    """race_report over the memoized submissions + mail events, itself memoized
-    so the overview/detail/submissions routes and their internal reuse share
-    one computation per few seconds."""
-    key = "race_report" if refresh_mail else "race_report:stale_mail_ok"
-    return cache.memo(
-        key, _CACHE_TTL,
-        lambda: race_report(
-            load_submissions(),
-            load_mail_events(refresh_stale=refresh_mail),
-        ),
-    )
-
-
 def warm_dashboard_caches() -> None:
     """Populate expensive dashboard caches off the request path.
 
-    This intentionally performs the live mail refresh that normal page loads
-    avoid. Every call is fail-open so a warmup failure never takes the
-    dashboard down.
+    Fail-open so a warmup failure never takes the dashboard down.
     """
     try:
         load_submissions()
-    except Exception:
-        pass
-    try:
-        load_mail_events(refresh_stale=True)
-    except Exception:
-        pass
-    try:
-        cached_race_report(refresh_mail=False)
-    except Exception:
-        pass
-    try:
-        poller_site_health()
     except Exception:
         pass
 
@@ -725,137 +498,3 @@ def load_transcript(sub: Submission) -> str | None:
     except Exception:
         return None
 
-
-# --------------------------------------------------------------------------- #
-# Poller site health — "is the poller actually working, and is any site
-# blocking/challenging us?" This was previously invisible: the dashboard only
-# showed the `poller` systemd unit as active/inactive, which says nothing
-# about whether individual sites are being blocked or have silently stopped
-# yielding listings (a Blocked exception backs off + retries forever without
-# ever crashing the service).
-# --------------------------------------------------------------------------- #
-POLL_LOG = LOG_DIR / "poller.jsonl"
-POLL_LOG_TAIL_LINES = 30000  # bounds memory even once the log grows for weeks
-
-
-@dataclass
-class SiteHealth:
-    name: str
-    tier: int
-    enabled: bool
-    needs_login: bool
-    cadence_s: int
-    last_ts: str = ""
-    last_event: str = ""
-    last_age_s: float | None = None
-    polled_recent: int = 0
-    blocked_recent: int = 0
-    error_recent: int = 0
-    new_recent: int = 0
-    last_block_reason: str = ""
-    last_block_ts: str = ""
-    block_streak: int = 0
-    status: str = "unknown"  # ok | blocked | stale | erroring | disabled | never_polled
-
-    @property
-    def status_label(self) -> str:
-        return {
-            "ok": "OK", "blocked": "BLOCKED", "stale": "STALE",
-            "erroring": "ERRORING", "disabled": "disabled",
-            "never_polled": "never polled",
-        }.get(self.status, self.status)
-
-
-def _poll_log_events_by_site() -> dict[str, list[dict]]:
-    from collections import deque
-    by_site: dict[str, list[dict]] = defaultdict(list)
-    if not POLL_LOG.exists():
-        return by_site
-    with POLL_LOG.open(encoding="utf-8") as f:
-        for line in deque(f, maxlen=POLL_LOG_TAIL_LINES):
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            site = rec.get("site")
-            if site:
-                by_site[site].append(rec)
-    return by_site
-
-
-def _build_poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
-    """Per-site poller status derived from poller.jsonl, cross-referenced
-    against the registry (so a site that's stopped logging entirely --
-    e.g. an exception outside the try/except in _watch_site, or the whole
-    poller process being down -- shows up as "stale"/"never polled" rather
-    than silently vanishing)."""
-    from ..poller.registry import REGISTRY
-
-    by_site = _poll_log_events_by_site()
-    now = datetime.now()
-    cutoff = now - timedelta(hours=window_hours)
-    results: list[SiteHealth] = []
-    for cfg in REGISTRY:
-        events = by_site.get(cfg.name, [])
-        last = events[-1] if events else None
-        recent = [e for e in events if (parse_ts(e.get("ts")) or now) >= cutoff]
-        polled_recent = sum(1 for e in recent if e.get("event") == "polled")
-        blocked_recent = sum(1 for e in recent if e.get("event") == "blocked")
-        error_recent = sum(1 for e in recent if e.get("event") == "poll_error")
-        new_recent = sum(e.get("new") or 0 for e in recent if e.get("event") == "polled")
-        last_block = next((e for e in reversed(events) if e.get("event") == "blocked"), None)
-
-        last_ts = last.get("ts", "") if last else ""
-        last_dt = parse_ts(last_ts)
-        last_age = (now - last_dt).total_seconds() if last_dt else None
-
-        if not cfg.enabled:
-            status = "disabled"
-        elif last is None:
-            status = "never_polled"
-        elif last.get("event") == "blocked":
-            status = "blocked"
-        elif last_age is not None and last_age > max(cfg.cadence_s * 4, 900):
-            status = "stale"
-        elif polled_recent and error_recent >= max(polled_recent, 3):
-            status = "erroring"
-        else:
-            status = "ok"
-
-        results.append(SiteHealth(
-            name=cfg.name, tier=cfg.tier, enabled=cfg.enabled,
-            needs_login=cfg.needs_login, cadence_s=cfg.cadence_s,
-            last_ts=last_ts, last_event=(last.get("event", "") if last else ""),
-            last_age_s=last_age,
-            polled_recent=polled_recent, blocked_recent=blocked_recent,
-            error_recent=error_recent, new_recent=new_recent,
-            last_block_reason=(last_block or {}).get("reason", ""),
-            last_block_ts=(last_block or {}).get("ts", ""),
-            block_streak=((last or {}).get("streak") or 0) if status == "blocked" else 0,
-            status=status,
-        ))
-
-    # Worst first: blocked > stale > erroring > never_polled > ok > disabled.
-    order = {"blocked": 0, "stale": 1, "erroring": 2, "never_polled": 3, "ok": 4, "disabled": 5}
-    results.sort(key=lambda s: (order.get(s.status, 9), s.name))
-    return results
-
-
-def poller_site_health(window_hours: float = 6) -> list[SiteHealth]:
-    return cache.memo(
-        f"poller_site_health:{window_hours}",
-        15.0,
-        lambda: _build_poller_site_health(window_hours),
-    )
-
-
-def poller_site_summary(sites: list[SiteHealth]) -> dict:
-    active = [s for s in sites if s.enabled]
-    return {
-        "total": len(active),
-        "ok": sum(1 for s in active if s.status == "ok"),
-        "blocked": sum(1 for s in active if s.status == "blocked"),
-        "stale": sum(1 for s in active if s.status == "stale"),
-        "erroring": sum(1 for s in active if s.status == "erroring"),
-        "never_polled": sum(1 for s in active if s.status == "never_polled"),
-    }

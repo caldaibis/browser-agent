@@ -10,13 +10,12 @@ import traceback
 from dataclasses import asdict
 
 from . import eventlog, store
-from .apply_priority import priority_claim
 from .config import LOG_DIR
 from .models import Listing, ProcessedRecord
 from .stekkies import extract_listing
 from .apply import apply
 from .gmail_watch import message_received_ts, mark_read, watch_events
-from .poller.dedup import active_claim_keys, canonical_url
+from .dedup import canonical_url
 from .notify import send_alert_dedup, send_status_email
 from .self_improvement_agent import improve_after_apply, improve_exception
 from .settings import settings
@@ -97,7 +96,7 @@ def _finish(**kw) -> dict:
 
 def _source_duplicate(source_url: str, keys: set[str]) -> bool:
     key = canonical_url(source_url)
-    return source_url in keys or key in keys or key in active_claim_keys()
+    return source_url in keys or key in keys
 
 
 # One shared wording so a deterministically-prevented duplicate is
@@ -141,10 +140,7 @@ def process_source(listing: Listing | dict, msg_id: str | None = None,
         (LOG_DIR / "last_listing.json").write_text(
             json.dumps(listing.to_json(), indent=2, ensure_ascii=False),
             encoding="utf-8")
-        # Priority claim: the poller defers/yields the shared browser to this
-        # mail/manual apply for the whole run (see apply_priority.py).
-        with priority_claim():
-            result = apply(listing)
+        result = apply(listing)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
         if result.outcome == "no_credit":
@@ -172,8 +168,8 @@ def process_source(listing: Listing | dict, msg_id: str | None = None,
             extra={"source_url": source_url, "source": source, "address": address},
         )
         # One attempt per listing — record every completed agent run, terminal
-        # or not, so neither this path nor the poller ever re-applies to it (a
-        # retry re-runs the identical prompt at full cost for the same result).
+        # or not, so this path never re-applies to it (a retry re-runs the
+        # identical prompt at full cost for the same result).
         _remember_processed(
             msg_id=msg_id,
             trigger=trigger,
@@ -239,46 +235,40 @@ def process(stekkies_url: str, msg_id: str | None = None,
         )
 
     try:
-        # Priority claim: the poller defers/yields the shared browser to this
-        # mail/manual run (see apply_priority.py). It spans extraction too —
-        # extraction drives the browser as well — but NOT improve_after_apply
-        # below (a self-improvement run can take minutes and must not starve
-        # the poller).
-        with priority_claim():
-            listing = extract_listing(stekkies_url, headless=True)
-            d = asdict(listing)
-            (LOG_DIR / "last_listing.json").write_text(
-                json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
-            _log("listing_extracted", source=listing.source_name,
-                 source_url=listing.source_url, address=listing.address)
-            if not listing.source_url:
-                _log("no_source_url", note="cannot apply without external link")
-                return _finish(
-                    msg_id=msg_id,
-                    trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
-                    msg_received_ts=received_ts,
-                    stekkies_url=stekkies_url,
-                    source=listing.source_name,
-                    address=listing.address,
-                    status="no_source_url",
-                    mark_read=True,
-                    message="Could not find an external source URL, so no application was submitted.",
-                )
-            if _source_duplicate(listing.source_url, keys):
-                _log("duplicate_source_skipped", msg_id=msg_id, source_url=listing.source_url)
-                return _finish(
-                    msg_id=msg_id,
-                    trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
-                    msg_received_ts=received_ts,
-                    stekkies_url=stekkies_url,
-                    source_url=listing.source_url,
-                    source=listing.source_name,
-                    address=listing.address,
-                    status="skipped_duplicate",
-                    mark_read=True,
-                    message=_prevented_message(listing.source_url),
-                )
-            result = apply(d)
+        listing = extract_listing(stekkies_url, headless=True)
+        d = asdict(listing)
+        (LOG_DIR / "last_listing.json").write_text(
+            json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+        _log("listing_extracted", source=listing.source_name,
+             source_url=listing.source_url, address=listing.address)
+        if not listing.source_url:
+            _log("no_source_url", note="cannot apply without external link")
+            return _finish(
+                msg_id=msg_id,
+                trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+                msg_received_ts=received_ts,
+                stekkies_url=stekkies_url,
+                source=listing.source_name,
+                address=listing.address,
+                status="no_source_url",
+                mark_read=True,
+                message="Could not find an external source URL, so no application was submitted.",
+            )
+        if _source_duplicate(listing.source_url, keys):
+            _log("duplicate_source_skipped", msg_id=msg_id, source_url=listing.source_url)
+            return _finish(
+                msg_id=msg_id,
+                trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
+                msg_received_ts=received_ts,
+                stekkies_url=stekkies_url,
+                source_url=listing.source_url,
+                source=listing.source_name,
+                address=listing.address,
+                status="skipped_duplicate",
+                mark_read=True,
+                message=_prevented_message(listing.source_url),
+            )
+        result = apply(d)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
         if result.outcome == "no_credit":
@@ -305,8 +295,8 @@ def process(stekkies_url: str, msg_id: str | None = None,
             extra={"stekkies_url": stekkies_url},
         )
         # One attempt per listing — record every completed agent run, terminal
-        # or not, so neither this path nor the poller ever re-applies to it (a
-        # retry re-runs the identical prompt at full cost for the same result).
+        # or not, so this path never re-applies to it (a retry re-runs the
+        # identical prompt at full cost for the same result).
         _remember_processed(
             msg_id=msg_id,
             stekkies_url=stekkies_url,

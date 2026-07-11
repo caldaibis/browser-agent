@@ -78,15 +78,15 @@ def fingerprint_failure(listing: dict, outcome: str, summary: str) -> Fingerprin
                        outcome=(outcome or "unknown"))
 
 
-def fingerprint_poller_zero_yield(site_name: str) -> Fingerprint:
-    """Incident fingerprint for a poller site that has stopped yielding
-    listings (a silently-broken parser). Scoped to the site so one site's
-    broken parser dedups on its own, and repeated threshold hits within the
-    window don't re-diagnose it."""
-    domain = _domain(site_name) or (site_name or "").strip().lower()
-    return Fingerprint(key=f"poller-zero-yield@{domain}",
-                       signature="poller-zero-yield", domain=domain,
-                       outcome="zero_yield")
+def fingerprint_session_keeper_adapter(domain: str) -> Fingerprint:
+    """Incident fingerprint for a session-keeper login adapter that completed
+    a repair attempt without restoring the session (its selectors/flow
+    assumptions are likely stale). Scoped to the site so one site's broken
+    adapter dedups on its own."""
+    d = _domain(domain) or (domain or "").strip().lower()
+    return Fingerprint(key=f"session-keeper-adapter@{d}",
+                       signature="session-keeper-adapter", domain=d,
+                       outcome="adapter_broken")
 
 
 def record_occurrence(fp: Fingerprint, *, listing: dict | None = None,

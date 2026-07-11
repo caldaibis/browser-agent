@@ -171,12 +171,12 @@ def _run_for_incident(
     occurrence_listing: dict | None = None,
     occurrence_summary: str = "",
 ) -> SelfImprovementResult:
-    """Shared engine for every self-improvement trigger (apply failures AND
-    poller zero-yield). Incident memory (src/incident_store.py): fingerprint,
-    skip if this incident already had a run in the dedup window, and feed a
-    run that does happen its predecessors' findings. Fail-open: a broken store
-    never blocks self-improvement, and self-improvement never raises into the
-    pipeline that called it.
+    """Shared engine for every self-improvement trigger. Incident memory
+    (src/incident_store.py): fingerprint, skip if this incident already had a
+    run in the dedup window, and feed a run that does happen its
+    predecessors' findings. Fail-open: a broken store never blocks
+    self-improvement, and self-improvement never raises into the pipeline
+    that called it.
     """
     incident: dict = {}
     try:
@@ -344,91 +344,83 @@ def _improve_after_apply_now(
     )
 
 
-def improve_poller_zero_yield(
+def improve_session_keeper_adapter(
     *,
-    site_name: str,
-    list_url: str = "",
-    tier: int = 0,
-    parser_desc: str = "",
-    sample_path: str = "",
-    streak: int = 0,
+    domain: str,
+    detail: str,
+    probe_url: str = "",
+    login_url: str = "",
 ) -> SelfImprovementResult | None:
-    """Close the loop on a silently-broken poller parser: a site that has
-    yielded zero listings for many consecutive polls almost always means its
-    parser stopped matching the site's markup (URL scheme changed, JSON-LD
-    dropped, now behind login). Instead of emailing a human to run
-    `just poll-once` and fix it, drive the same two-phase diagnose→patch→
-    deploy engine against the saved sample HTML. Returns None only when
-    self-improvement is disabled entirely (so the caller can fall back to the
-    old alert); otherwise always returns a result (possibly a dedup skip)."""
+    """Close the loop on a session-keeper login adapter that ran to
+    completion but did not restore a logged-in session -- almost always
+    because the site's login page changed and the adapter's selectors/button
+    text in src/session_keeper.py are stale. Only called for that ONE failure
+    class (see session_keeper._feed_self_improvement): CAPTCHA, 2FA, account-
+    chooser mismatches, and rejected passwords are real external gates only a
+    human can clear, and never reach here. Returns None only when
+    self-improvement is disabled entirely; otherwise always returns a result
+    (possibly a dedup skip)."""
     if not SELF_IMPROVEMENT_ENABLED:
         return None
     payload = {
-        "site_name": site_name,
-        "list_url": list_url,
-        "tier": tier,
-        "parser_desc": parser_desc,
-        "sample_path": sample_path,
-        "streak": streak,
+        "domain": domain, "detail": detail,
+        "probe_url": probe_url, "login_url": login_url,
     }
     try:
-        job_id = self_improvement_queue.enqueue("poller_zero_yield", payload)
+        job_id = self_improvement_queue.enqueue("session_keeper_adapter", payload)
     except Exception as exc:  # noqa: BLE001 - caller falls back to alert
-        _log("queue_error", status="poller_zero_yield",
-             trigger="poller_zero_yield", error=f"{type(exc).__name__}: {exc}")
+        _log("queue_error", status="session_keeper_adapter",
+             trigger="session_keeper", error=f"{type(exc).__name__}: {exc}")
         return None
-    _log("queued", status="poller_zero_yield", job_id=job_id,
-         trigger="poller_zero_yield")
+    _log("queued", status="session_keeper_adapter", job_id=job_id,
+         trigger="session_keeper")
     return SelfImprovementResult(
         action="queued",
         summary=f"Queued self-improvement job {job_id} for the serial worker.",
     )
 
 
-def _improve_poller_zero_yield_now(
+def _improve_session_keeper_adapter_now(
     *,
-    site_name: str,
-    list_url: str = "",
-    tier: int = 0,
-    parser_desc: str = "",
-    sample_path: str = "",
-    streak: int = 0,
+    domain: str,
+    detail: str,
+    probe_url: str = "",
+    login_url: str = "",
 ) -> SelfImprovementResult | None:
     if not SELF_IMPROVEMENT_ENABLED:
         return None
     fp = None
     try:
-        fp = incident_store.fingerprint_poller_zero_yield(site_name)
+        fp = incident_store.fingerprint_session_keeper_adapter(domain)
     except Exception as e:  # noqa: BLE001
-        _log("incident_store_error", status="poller_zero_yield",
+        _log("incident_store_error", status="session_keeper_adapter",
              error=f"{type(e).__name__}: {e}")
 
-    summary = (f"Poller site {site_name} yielded 0 listings for {streak} "
-               f"consecutive polls ({list_url}); its parser is likely broken.")
+    summary = (f"session_keeper's login adapter for {domain} completed a "
+              f"repair attempt but the session was not restored: {detail}")
 
     def _ctx(incident: dict) -> dict:
         return {
-            "kind": "poller_zero_yield",
+            "kind": "session_keeper_adapter",
             "result": {
-                "outcome": "poller_zero_yield", "rc": 0,
+                "outcome": "session_keeper_adapter_broken", "rc": 0,
                 "summary": summary, "transcript_path": "",
             },
-            "poller": {
-                "site_name": site_name, "list_url": list_url, "tier": tier,
-                "parser_desc": parser_desc, "sample_path": sample_path,
-                "streak": streak,
+            "session_keeper": {
+                "domain": domain, "detail": detail,
+                "probe_url": probe_url, "login_url": login_url,
             },
-            "trigger": "poller_zero_yield",
+            "trigger": "session_keeper",
             "msg_id": None,
             "extra": {},
             "incident": incident,
         }
 
     return _run_for_incident(
-        fp=fp, ctx_builder=_ctx, status_label="poller_zero_yield",
+        fp=fp, ctx_builder=_ctx, status_label="session_keeper_adapter_broken",
         occurrence_summary=summary,
         crash_detail=(f"The self-improvement agent crashed while handling a "
-                      f"zero-yield for poller site {site_name}."),
+                      f"broken session-keeper adapter for {domain}."),
     )
 
 
@@ -475,14 +467,12 @@ def process_queued_job(job: dict[str, Any]) -> SelfImprovementResult | None:
             msg_id=payload.get("msg_id"),
             extra=payload.get("extra") or {},
         )
-    if kind == "poller_zero_yield":
-        return _improve_poller_zero_yield_now(
-            site_name=str(payload.get("site_name") or ""),
-            list_url=str(payload.get("list_url") or ""),
-            tier=int(payload.get("tier") or 0),
-            parser_desc=str(payload.get("parser_desc") or ""),
-            sample_path=str(payload.get("sample_path") or ""),
-            streak=int(payload.get("streak") or 0),
+    if kind == "session_keeper_adapter":
+        return _improve_session_keeper_adapter_now(
+            domain=str(payload.get("domain") or ""),
+            detail=str(payload.get("detail") or ""),
+            probe_url=str(payload.get("probe_url") or ""),
+            login_url=str(payload.get("login_url") or ""),
         )
     raise ValueError(f"unknown self-improvement job kind: {kind!r}")
 
@@ -748,7 +738,6 @@ async def _run_patch_candidates(
             "mcp__browser__browser_open", "mcp__browser__browser_diagnostics",
             "mcp__browser__browser_safe_click", "mcp__browser__browser_screenshot",
             "mcp__self_improve__run_verification",
-            "mcp__self_improve__run_site_validation",
             "mcp__self_improve__commit_push_deploy",
             "mcp__self_improve__send_user_email",
             "mcp__self_improve__record_known_gate",
@@ -1031,25 +1020,6 @@ def _self_improve_tools(
         text = await asyncio.to_thread(_run_shell, SELF_IMPROVEMENT_VERIFY_CMD, 300, worktree_path)
         return {"content": [{"type": "text", "text": text}]}
 
-    @tool("run_site_validation", (
-        "For poller zero-yield jobs only: run the fixed `just poll-once <site>` "
-        "diagnostic in the isolated worktree. The site name comes from durable "
-        "job context and cannot be supplied as a shell command."
-    ), {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    })
-    async def run_site_validation(args: dict) -> dict:
-        poller = context.get("poller") or {}
-        site_name = str(poller.get("site_name") or "")
-        if not site_name or not re.fullmatch(r"[A-Za-z0-9.-]+", site_name):
-            text = "REFUSED: this incident has no safe poller site name"
-        else:
-            text = await asyncio.to_thread(
-                _run_cmd, ["just", "poll-once", site_name], 90, worktree_path)
-        return {"content": [{"type": "text", "text": text}]}
-
     @tool("commit_push_deploy", (
         "Commit all current changes in this worktree and push. If deploy is "
         "allowed and main hasn't moved, pushes straight to main (the existing "
@@ -1124,7 +1094,7 @@ def _self_improve_tools(
 
     return create_sdk_mcp_server(
         name="self_improve",
-        tools=[submit_diagnosis, run_verification, run_site_validation, commit_push_deploy,
+        tools=[submit_diagnosis, run_verification, commit_push_deploy,
                send_user_email, record_known_gate],
     )
 

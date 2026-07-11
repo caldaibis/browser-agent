@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-import os
 import time
 import unittest
 from pathlib import Path
@@ -75,56 +74,6 @@ class TestMemo(unittest.TestCase):
         self.assertEqual(cache.memo_get("k"), {"ok": True})
         cache.memo_set("expired", -1, "old")
         self.assertIsNone(cache.memo_get("expired"))
-
-
-class TestDashboardNonBlockingData(unittest.TestCase):
-    def setUp(self):
-        cache.clear()
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.mail_cache = self.root / "dashboard_mail_events.json"
-        self.mail_summary = self.root / "mail_summary.jsonl"
-        self.mail_summary.write_text("", encoding="utf-8")
-
-    def tearDown(self):
-        cache.clear()
-        self.tmp.cleanup()
-
-    def test_stale_mail_cache_can_be_served_without_gmail_refresh(self):
-        self.mail_cache.write_text(
-            json.dumps([{
-                "provider": "stekkies",
-                "msg_id": "m1",
-                "received_ts": "2026-07-08T10:00:00",
-                "subject": "x",
-            }]),
-            encoding="utf-8",
-        )
-        old = time.time() - 3600
-        os.utime(self.mail_cache, (old, old))
-        with patch.object(data, "MAIL_EVENTS_CACHE", self.mail_cache), \
-             patch.object(data, "MAIL_SUMMARY", self.mail_summary), \
-             patch.object(data, "recent_mail_events") as recent:
-            events = data.load_mail_events(refresh_stale=False)
-        recent.assert_not_called()
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].msg_id, "m1")
-
-    def test_force_mail_refresh_still_calls_gmail(self):
-        with patch.object(data, "MAIL_EVENTS_CACHE", self.mail_cache), \
-             patch.object(data, "MAIL_SUMMARY", self.mail_summary), \
-             patch.object(data, "recent_mail_events",
-                          return_value=[{"provider": "stekkies", "msg_id": "m2"}]) as recent:
-            events = data.load_mail_events(force=True, refresh_stale=False)
-        recent.assert_called_once()
-        self.assertEqual(events[0].msg_id, "m2")
-
-    def test_poller_site_health_is_memoized(self):
-        with patch.object(data, "_build_poller_site_health",
-                          side_effect=[["first"], ["second"]]) as build:
-            self.assertEqual(data.poller_site_health(), ["first"])
-            self.assertEqual(data.poller_site_health(), ["first"])
-        self.assertEqual(build.call_count, 1)
 
 
 class TestStablePermalinks(unittest.TestCase):

@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% from "_macros.html" import race_delta %}
 {% block title %}Submissions{% endblock %}
 {% block content %}
 <h3>Submissions <span class="muted-txt">({{ total }})</span></h3>
@@ -40,12 +39,11 @@
     <thead>
       <tr>
         <th>When</th><th>Listing</th><th>Origin</th><th>Status</th>
-        <th>Took</th><th>LLM</th><th>vs Stekkies</th><th>vs Huurwoningen</th>
+        <th>Took</th><th>LLM</th>
       </tr>
     </thead>
     <tbody>
       {% for s in subs %}
-      {% set r = race_by_url.get(s.source_url) %}
       <tr data-href="/submission/{{ s.permalink }}">
         <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
         <td>
@@ -59,11 +57,9 @@
         <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
         <td class="muted-txt nowrap">{{ fmt_dur(s.seconds) }}</td>
         <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
-        <td>{% if r %}{{ race_delta(r.stekkies_lead_s, r.poller_won_stekkies) }}{% else %}<span class="delta-none">—</span>{% endif %}</td>
-        <td>{% if r %}{{ race_delta(r.huurwoningen_lead_s, r.poller_won_huurwoningen) }}{% else %}<span class="delta-none">—</span>{% endif %}</td>
       </tr>
       {% else %}
-      <tr><td colspan="8" class="muted-txt">No submissions match these filters.</td></tr>
+      <tr><td colspan="6" class="muted-txt">No submissions match these filters.</td></tr>
       {% endfor %}
     </tbody>
   </table>

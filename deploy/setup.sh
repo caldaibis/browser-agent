@@ -53,7 +53,7 @@ sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv sync"
 sudo -u "${APP_USER}" bash -lc "cd '${APP_DIR}' && uv run playwright install chromium"
 
 echo "==> [7/8] systemd units"
-for unit in xvfb.service browser-host.service orchestrator.service poller.service \
+for unit in xvfb.service browser-host.service orchestrator.service \
             vnc.service healthcheck.service healthcheck.timer dashboard.service \
             self-improvement-worker.service self-improvement-worker.timer; do
   sed "s|__APP_USER__|${APP_USER}|g; s|__APP_DIR__|${APP_DIR}|g; s|__DISPLAY__|${DISPLAY_NUM}|g; s|__APP_HOME__|${APP_HOME}|g" \
@@ -102,6 +102,5 @@ cat <<EOF
        systemctl stop vnc.service
   3. Go live:
        systemctl enable --now orchestrator.service
-       systemctl enable --now poller.service   # active site poller (optional)
-       journalctl -u orchestrator -u poller -f
+       journalctl -u orchestrator -f
 EOF

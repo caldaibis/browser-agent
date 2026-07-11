@@ -55,7 +55,7 @@ from .transport import (
     _result_text,
     _to_openai_tools,
 )
-from ..poller import dedup as poller_dedup
+from .. import dedup
 from ..self_improvement_harness import record_trajectory_event
 from ..settings import settings
 
@@ -91,25 +91,18 @@ def _record_trajectory(run_id: str, event: str, payload: dict | None = None) -> 
 
 async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logger,
                 source_url: str = "", resolved: dict | None = None,
-                yield_check=None, trajectory_id: str = "") -> tuple[int, str]:
+                trajectory_id: str = "") -> tuple[int, str]:
     """resolved, when given, is a plain dict this fills in as {"url": ...} with
     the last distinct external destination the browser actually reached --
     read back by run_agent() after the call so callers can persist it as an
-    extra dedup key (see poller_dedup.known_processed_urls).
-
-    yield_check, when given, is a zero-arg callable polled once per turn
-    (before spending the LLM call): when it returns True the run aborts with
-    rc=125 / outcome "yielded" so a higher-priority apply (a mail-triggered
-    one, see apply_priority.py) can take the shared browser within seconds
-    instead of waiting out this whole run. A yielded attempt is NOT a verdict
-    on the listing -- callers requeue it untouched."""
+    extra dedup key (see dedup.known_processed_urls)."""
     api_key = settings().deepseek_api_key
     if not api_key:
         log.line("[agent] ERROR: DEEPSEEK_API_KEY not set")
         return 2, "DEEPSEEK_API_KEY not set."
 
-    source_canon = poller_dedup.canonical_url(source_url) if source_url else None
-    known_urls = poller_dedup.known_processed_urls()
+    source_canon = dedup.canonical_url(source_url) if source_url else None
+    known_urls = dedup.known_processed_urls()
 
     client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=api_key)
 
@@ -167,19 +160,6 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                     else:
                         break
                 turn += 1
-                if yield_check is not None and yield_check():
-                    log.line(f"[agent] YIELD at turn {turn}: a priority "
-                             "(mail-triggered) apply is waiting for the browser")
-                    _record_trajectory(trajectory_id, "final", {
-                        "rc": 125,
-                        "outcome": "yielded",
-                        "turn": turn,
-                    })
-                    return 125, (
-                        "Yielded the browser mid-run to a priority mail-triggered "
-                        "apply. This attempt did not finish and says nothing about "
-                        "the listing itself; it must be re-run."
-                    )
                 request: dict[str, Any] = {
                     "model": model,
                     "messages": messages,
@@ -617,7 +597,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         "without paying, as instructed.\nOUTCOME: payment_required"
                     )
                 if current_url:
-                    current_canon = poller_dedup.canonical_url(current_url)
+                    current_canon = dedup.canonical_url(current_url)
                     if current_canon != source_canon:
                         if resolved is not None:
                             resolved["url"] = current_url
@@ -697,8 +677,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
 
 
 def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: Path,
-              timeout_seconds: int = 900, source_url: str = "",
-              yield_check=None) -> AgentResult:
+              timeout_seconds: int = 900, source_url: str = "") -> AgentResult:
     log = Logger(log_path)
     resolved: dict = {}
 
@@ -706,7 +685,7 @@ def run_agent(prompt: str, model: str, max_turns: int, cdp_url: str, log_path: P
         try:
             return await asyncio.wait_for(
                 _run(prompt, model, max_turns, cdp_url, log, source_url=source_url,
-                     resolved=resolved, yield_check=yield_check,
+                     resolved=resolved,
                      trajectory_id=log_path.stem),
                 timeout=timeout_seconds)
         except TimeoutError:

@@ -16,8 +16,7 @@ class TestParseOutcome(unittest.TestCase):
             browser_agent._parse_outcome("done\nOUTCOME: submitted", 0),
             "submitted")
 
-    def test_yielded_and_timeout_unchanged(self):
-        self.assertEqual(browser_agent._parse_outcome("", 125), "yielded")
+    def test_timeout_unchanged(self):
         self.assertEqual(browser_agent._parse_outcome("", 124), "timeout")
 
     def test_payment_required_is_valid_outcome(self):

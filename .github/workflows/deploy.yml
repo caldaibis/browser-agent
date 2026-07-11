@@ -2,9 +2,7 @@ name: deploy
 
 # Auto-deploy to the VPS after CI passes on main. Runs the same steps as
 # `just deploy`: fast-forward pull, uv sync, ensure self-improvement runtime
-# (claude CLI + litellm-proxy.service), restart orchestrator + dashboard
-# (+ poller, if it's currently running -- it isn't `systemctl enable`d, so a
-# plain `is-enabled` check would silently skip it; see justfile's `deploy`).
+# (claude CLI + litellm-proxy.service), restart orchestrator + dashboard.
 on:
   workflow_run:
     workflows: ["ci"]
@@ -74,9 +72,6 @@ jobs:
 
             restart_services() {
               systemctl restart orchestrator dashboard
-              if systemctl is-active poller >/dev/null 2>&1; then
-                systemctl restart poller
-              fi
             }
 
             smoke_check() {
@@ -85,9 +80,6 @@ jobs:
               # the app crash-loops behind uvicorn's supervisor).
               sleep 5
               systemctl is-active orchestrator dashboard || return 1
-              if systemctl is-active poller >/dev/null 2>&1; then
-                systemctl is-active poller || return 1
-              fi
               for _ in 1 2 3 4 5 6; do
                 if curl -sf --max-time 20 -o /dev/null http://127.0.0.1:8000/; then
                   return 0

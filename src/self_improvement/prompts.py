@@ -1,6 +1,6 @@
-"""The self-improvement agent's phase prompts (diagnosis / patch, apply /
-poller-zero-yield). Operational policy lives in this text — keep prompt
-changes reviewable on their own, apart from engine code."""
+"""The self-improvement agent's phase prompts (diagnosis / patch).
+Operational policy lives in this text — keep prompt changes reviewable on
+their own, apart from engine code."""
 from __future__ import annotations
 
 import json
@@ -31,12 +31,12 @@ record is authoritative even if the SDK later reaches its turn limit."""
 
 
 def _diagnosis_prompt(context: dict) -> str:
-    if context.get("kind") == "poller_zero_yield":
-        return _poller_diagnosis_prompt(context)
+    if context.get("kind") == "session_keeper_adapter":
+        return _session_keeper_diagnosis_prompt(context)
     result = context.get("result") or {}
     transcript = result.get("transcript_path") or ""
     log_paths = ", ".join(str(LOG_DIR / n) for n in
-                           ("runs.jsonl", "poller.jsonl", "mail_summary.jsonl", "activity.log"))
+                           ("runs.jsonl", "mail_summary.jsonl", "activity.log"))
     return f"""You are running after an unsuccessful rental-application submission. This is
 the DIAGNOSIS phase: find the root cause and pick a verdict. You cannot edit
 files or commit in this phase — a separate patch phase runs afterwards if you
@@ -86,46 +86,52 @@ compatibility fallback if the tool is unavailable:
 DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
 
 
-def _poller_diagnosis_prompt(context: dict) -> str:
-    p = context.get("poller") or {}
-    sample = p.get("sample_path") or ""
-    return f"""You are running because a POLLER SITE stopped yielding listings — it has
-returned zero parsed listings for {p.get('streak')} consecutive polls, which
-almost always means its parser silently broke (the site changed its listing
-URL scheme or markup, dropped its schema.org JSON-LD, or moved its listings
-behind a login). This is the DIAGNOSIS phase: find the cause and pick a
-verdict. You cannot edit files here; a patch phase runs afterwards with your
-diagnosis, so name exact files and the smallest change in fix_plan.
+def _session_keeper_diagnosis_prompt(context: dict) -> str:
+    sk = context.get("session_keeper") or {}
+    return f"""You are running because the SESSION KEEPER's login adapter for a source site
+completed a repair attempt but the site still looks logged out afterward.
+This trigger ONLY fires for that one case -- CAPTCHA, 2FA, an account-chooser
+mismatch, and a rejected stored password are real external gates the adapter
+already detects and alerts on directly (see
+session_keeper._HUMAN_GATE_OUTCOMES); none of those reach here. This is the
+DIAGNOSIS phase: find the cause and pick a verdict. You cannot edit files
+here; a patch phase runs afterwards with your diagnosis, so name exact
+functions and the smallest change in fix_plan.
 
-SITE: {p.get('site_name')}  (tier {p.get('tier')})
-LIST URL: {p.get('list_url')}
-CURRENT PARSER: {p.get('parser_desc') or 'see the registry entry'}
-SAVED SAMPLE HTML (what the parser actually saw): {sample}
+DOMAIN: {sk.get('domain')}
+PROBE URL (authenticated page the adapter checks after login): {sk.get('probe_url')}
+LOGIN URL: {sk.get('login_url')}
+WHAT THE ADAPTER OBSERVED: {sk.get('detail')}
 
-1. Read the saved sample at the absolute path above (Read accepts absolute
-   paths). Read this site's entry in src/poller/registry.py and the parser it
-   uses in src/poller/parsers.py (usually `make_anchor_parser(<regex>)` keyed
-   on listing-detail link paths, or `parse_jsonld`). Read AGENTS.md's poller
-   section for conventions.
-2. FAILURE_CONTEXT.incident (when present) is cross-run memory: what earlier
-   self-improvement runs already concluded/tried for THIS site. Build on it —
-   if a prior fix didn't stick, do something different, don't repeat it.
-3. Decide which case this is:
-   - PARSER BROKEN: the sample clearly contains listings (detail links, cards,
-     JSON-LD) but the current parser/regex no longer matches them → verdict
-     fix. In fix_plan, give the corrected regex/parse approach, justified by
-     concrete strings you found in the sample.
-   - SITE NOW GATED/GONE: the sample is a login wall, a paywall, an empty
-     "no results" page that is clearly the site's real current state, a 404,
-     or a JS-only shell with no listings in the HTML → verdict fix to DISABLE
-     the site in registry.py (`enabled=False`) with a one-line comment saying
-     why and the date, OR email_user if it needs a credential/paid decision
-     only a human can make.
-   - GENUINELY EMPTY RIGHT NOW: the sample is a valid, working listings page
-     that simply has no offers at the moment → verdict noop.
-   Be decisive: a parser you can see is mis-matching the sample is a fix, not
-   a "temporary" noop.
-4. {_STOP_RULE}
+1. Read `src/session_keeper.py` in full: the `ADAPTERS` registry entry for
+   this domain and its `login` function (e.g. `_login_huurwoningen`) -- the
+   exact button-text regexes, form-field selectors, and blocker-detection
+   regexes it relies on.
+2. FAILURE_CONTEXT.incident (when present) is this incident's cross-run
+   memory: what earlier self-improvement runs already concluded/tried for
+   THIS domain. Build on it -- don't re-derive a root cause an earlier
+   attempt already established.
+3. Use browser_open/browser_diagnostics to inspect the LIVE login page at
+   LOGIN URL in the shared logged-in browser (the same profile the adapter
+   itself uses). Compare what you see against the adapter's assumptions.
+4. Choose exactly one verdict:
+   - fix: the live page's button text, field selectors, or login flow no
+     longer match what the adapter looks for (e.g. the Google SSO button
+     text changed, the email/password inputs no longer match the adapter's
+     locators, or an extra step was inserted). Name the exact stale
+     assumption and the corrected selector/text in fix_plan.
+   - noop: live inspection shows the flow actually works fine now (the
+     failure was transient -- a one-off timing issue, a momentary site
+     hiccup). Nothing to fix.
+   - email_user: live inspection reveals a genuine account/security state
+     (e.g. the account is locked, suspended, or a security review is
+     required) that the adapter's blocker detection didn't recognize as
+     such -- a human needs to act, not a code fix. Call send_user_email
+     yourself, then report email_sent true.
+   Be conservative about *scope*, but not about *whether to act*: if the live
+   page contradicts a specific selector/regex in the adapter, that is a fix,
+   not a noop.
+5. {_STOP_RULE}
 
 FAILURE_CONTEXT:
 {json.dumps(_redacted(context), ensure_ascii=False, indent=2)}
@@ -138,50 +144,48 @@ compatibility fallback if the tool is unavailable:
 DIAGNOSIS_JSON: {{"verdict":"noop|email_user|fix","root_cause":"...","fix_plan":"...","summary":"...","email_sent":false}}"""
 
 
-def _poller_patch_prompt(context: dict, diagnosis: dict,
-                         candidate_strategy: str = "") -> str:
-    p = context.get("poller") or {}
-    return f"""You are the PATCH phase for a broken POLLER PARSER. A diagnosis phase
-already ran and concluded a code fix is warranted for site
-{p.get('site_name')}. Trust its verdict as your starting point; verify against
-the sample and the code before editing.
+def _session_keeper_patch_prompt(context: dict, diagnosis: dict,
+                                 candidate_strategy: str = "") -> str:
+    sk = context.get("session_keeper") or {}
+    return f"""You are the PATCH phase for a stale SESSION KEEPER login adapter. A diagnosis
+phase already ran and concluded a code fix is warranted for the adapter
+covering {sk.get('domain')}. Trust its verdict as your starting point; verify
+against the live login page and the code before editing.
 
 DIAGNOSIS (from the diagnosis phase):
 {json.dumps(_redacted(diagnosis), ensure_ascii=False, indent=2)}
 
 CANDIDATE STRATEGY:
-{candidate_strategy or "parser_control_policy"} — keep the fix bounded to this
-angle unless the code proves it impossible. Preserve known-good parser behavior
-for unrelated sites; do not broaden a regex so far that it captures navigation,
-blog, or account links.
+{candidate_strategy or "smallest_fix"} — keep the fix bounded to this angle
+unless the code proves it impossible. Preserve the adapter's safety rules:
+never click a password-reset/forgot-password control, never expose a
+credential to an LLM message or a log line, never widen what counts as
+"logged in".
 
-SAVED SAMPLE HTML: {p.get('sample_path')}
-LIST URL: {p.get('list_url')}
+LOGIN URL: {sk.get('login_url')}
+PROBE URL: {sk.get('probe_url')}
 
 Steps:
-1. Read the sample and the site's entry in src/poller/registry.py (+ the
-   parser in src/poller/parsers.py). Confirm the diagnosis at the code level;
-   if it is wrong, stop with action fix_failed rather than improvising.
-2. Make the SMALLEST change that fixes it — typically an updated
-   `make_anchor_parser(<regex>)` pattern on this site's registry entry, a
-   switch to `parse_jsonld`/a different parser, or `enabled=False` if the site
-   is genuinely no longer pollable. Match the surrounding style (note the
-   `# VALIDATED: <n>` comments other entries carry) and keep the change scoped
-   to this one site.
-3. VERIFY the parser actually extracts listings now: run the run_verification
-   tool (`just check` — the deploy gate), and additionally confirm your parser
-   matches the sample using run_site_validation (`just poll-once
-   {p.get('site_name')}` under the hood).
-   Unit tests do NOT cover this site's live markup, so a green `just check`
-   alone is not proof the parser works — check the sample.
-4. Call commit_push_deploy with a conventional-commit message
-   (e.g. `fix(poller): repair {p.get('site_name')} parser`). Never run git
-   directly. After deploy the poller restarts and picks up the parser.
-5. If a tool refuses the change, email the user with the root cause instead of
-   working around it.
+1. Read `src/session_keeper.py`'s `ADAPTERS` entry and `login` function for
+   this domain. Use browser_open/browser_diagnostics against LOGIN URL to
+   confirm the diagnosis at the code level; if it's wrong, stop with action
+   fix_failed rather than improvising.
+2. Make the SMALLEST change that fixes it -- typically an updated button-text
+   regex, form-field selector, or blocker-detection regex in this domain's
+   `login` function. Match the surrounding style and keep the change scoped
+   to this one adapter; do not alter other domains' entries.
+3. Run the run_verification tool (`just check`). Additionally verify the
+   adapter actually restores the session against the live logged-in browser:
+   `uv run python -m src.session_keeper {sk.get('domain')}` should report
+   `outcome=ok` or `outcome=repaired`, not a blocker. Unit tests do not cover
+   live site markup, so a green `just check` alone is not proof.
+4. Call commit_push_deploy with a conventional-commit message (e.g.
+   `fix(session_keeper): repair {sk.get('domain')} login adapter`). Never run
+   git directly.
+5. If a tool refuses the change, email the user with the root cause instead
+   of working around it.
 6. commit_push_deploy records the authoritative terminal outcome. After it
-   returns, STOP immediately — do not inspect git state, restage files, verify
-   the pushed commit, or spend another turn narrating the result.
+   returns, STOP immediately.
 
 Constraints:
 {_SHARED_CONSTRAINTS}
@@ -193,8 +197,8 @@ SELF_IMPROVEMENT_JSON: {{"action":"fixed_deployed|fixed_review|fix_failed|error"
 
 def _patch_prompt(context: dict, diagnosis: dict,
                   candidate_strategy: str = "") -> str:
-    if context.get("kind") == "poller_zero_yield":
-        return _poller_patch_prompt(context, diagnosis, candidate_strategy)
+    if context.get("kind") == "session_keeper_adapter":
+        return _session_keeper_patch_prompt(context, diagnosis, candidate_strategy)
     result = context.get("result") or {}
     transcript = result.get("transcript_path") or ""
     return f"""You are the PATCH phase of the self-improvement agent. A diagnosis phase

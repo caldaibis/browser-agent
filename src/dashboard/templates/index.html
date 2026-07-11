@@ -19,11 +19,6 @@
     <div class="hint">detected → submitted</div>
   </div>
   <div class="metric">
-    <div class="big">{{ kpis.poller_wins_stekkies }} / {{ kpis.poller_wins_huurwoningen }}</div>
-    <div class="lbl">Race wins</div>
-    <div class="hint">beat Stekkies / Huurwoningen mail</div>
-  </div>
-  <div class="metric">
     <div class="big">{{ fmt_usd(kpis.spend_week_usd) }}</div>
     <div class="lbl">Spend · 7d</div>
     <div class="hint">{{ fmt_usd(kpis.cost_per_submission) }} / submission</div>
@@ -54,53 +49,31 @@
 
 {% include "_health.html" %}
 
-{% include "_poller_sites.html" %}
-
-<div class="grid2">
-  <article>
-    <header><strong>Recent Submissions</strong> · <a href="/submissions">all</a></header>
-    <table>
-      <thead><tr><th>When</th><th>Listing</th><th>Origin</th><th>Status</th><th>LLM</th></tr></thead>
-      <tbody>
-        {% for s in recent %}
-        <tr data-href="/submission/{{ s.permalink }}">
-          <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
-          <td>
-            <a href="/submission/{{ s.permalink }}">{{ s.address or s.source_url or 'Listing' }}</a>
-            <div class="muted-txt">{{ s.source or 'unknown source' }}</div>
-            {% if s.origin == 'poller' %}
-            <div class="muted-txt">Detected by {{ s.detected_by_label or 'unknown site' }}</div>
-            {% endif %}
-          </td>
-          <td><span class="badge origin">{{ s.origin_label }}</span></td>
-          <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
-          <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
-        </tr>
-        {% else %}
-        <tr><td colspan="5" class="muted-txt">No submissions yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-
-  <article>
-    <header><strong>Recent Mail Signals</strong> · <a href="/funnel">funnel &amp; race</a></header>
-    <table>
-      <thead><tr><th>Received</th><th>Provider</th><th>Subject</th></tr></thead>
-      <tbody>
-        {% for e in mail_events %}
-        <tr>
-          <td class="muted-txt nowrap">{{ e.received_ts[:16].replace('T',' ') }}</td>
-          <td><span class="badge origin">{{ e.provider }}</span></td>
-          <td><div class="truncate">{{ e.subject or e.source_url or e.stekkies_url or 'mail' }}</div></td>
-        </tr>
-        {% else %}
-        <tr><td colspan="3" class="muted-txt">No cached mail signals yet. Use refresh mail index.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-</div>
+<article>
+  <header><strong>Recent Submissions</strong> · <a href="/submissions">all</a></header>
+  <table>
+    <thead><tr><th>When</th><th>Listing</th><th>Origin</th><th>Status</th><th>LLM</th></tr></thead>
+    <tbody>
+      {% for s in recent %}
+      <tr data-href="/submission/{{ s.permalink }}">
+        <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
+        <td>
+          <a href="/submission/{{ s.permalink }}">{{ s.address or s.source_url or 'Listing' }}</a>
+          <div class="muted-txt">{{ s.source or 'unknown source' }}</div>
+          {% if s.origin == 'poller' %}
+          <div class="muted-txt">Detected by {{ s.detected_by_label or 'unknown site' }}</div>
+          {% endif %}
+        </td>
+        <td><span class="badge origin">{{ s.origin_label }}</span></td>
+        <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
+        <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted-txt">No submissions yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
 {% endblock %}
 
 {% block scripts %}

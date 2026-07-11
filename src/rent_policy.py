@@ -1,7 +1,7 @@
 """Shared rent cap helpers.
 
-The poller and apply stage both need the same hard maximum: never apply above
-the user's rent cap, even if a listing otherwise looks eligible.
+The apply stage needs a hard maximum: never apply above the user's rent cap,
+even if a listing otherwise looks eligible.
 """
 from __future__ import annotations
 
