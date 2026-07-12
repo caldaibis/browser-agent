@@ -19,17 +19,22 @@ default:
 sync:
     uv sync
 
-# offline sanity: lint + byte-compile + unit tests + import smoke + render the apply prompt (CI runs this)
 # The unit tests are part of this gate ON PURPOSE: the self-improvement agent's
 # verify step is `just check` (SELF_IMPROVEMENT_VERIFY_CMD), and an autonomous
 # patch that pushes straight to main must not pass on lint alone.
+# offline quality gate: docs + lint + types + compile + tests + harness + smoke (CI runs this)
 check:
+    uv run python scripts/check_docs.py
     uv run ruff check .
     uv run ty check src
     uv run python -m compileall -q src
     uv run pytest -q --cov --cov-report=term:skip-covered
     uv run python -m src.self_improvement_harness apply-eval
     uv run python -c "from src.apply import build_prompt; import src.browser_agent, src.orchestrator, src.stekkies, src.applicant_profile, src.credentials, src.gmail_watch, src.notify; build_prompt({'source_url': 'https://example.test/x', 'address': 'Teststraat 1', 'price': 'EUR 1500', 'source_name': 'Kamernet'}); print('check ok')"
+
+# validate all repository-local Markdown links without network access
+docs-check:
+    uv run python scripts/check_docs.py
 
 # print every runtime setting as resolved from the current environment
 settings:
@@ -90,8 +95,8 @@ dashboard:
 host:
     uv run python -m src.browser_host
 
-# run the LiteLLM proxy the self-improvement agent uses to reach DeepSeek
 # (Claude Code's ANTHROPIC_BASE_URL points here; loopback-only, like CDP :9222)
+# run the loopback LiteLLM proxy the self-improvement agent uses to reach DeepSeek
 litellm-proxy:
     uv run litellm --config deploy/litellm.config.yaml --port 4000 --host 127.0.0.1
 

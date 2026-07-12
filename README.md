@@ -1,115 +1,149 @@
 # Stekkies auto-responder
 
-Fully-autonomous responder for Stekkies rental matches.
+An autonomous responder for rental alerts: Gmail → Stekkies or Huurwoningen →
+source site → submitted application.
 
-**Pipeline:** Gmail (new Stekkies mail) → open Stekkies listing with your saved
-login, extract listing metadata + external "Go to listing" URL → hand off to
-our **browser agent** (`src/browser_agent/`), which opens the source site
-(Ik Wil Huren, Pararius, Funda, …), writes a customized message from the
-reference template, fills the application form, uploads your documents, and
-submits.
+Stekkies is usually only the notifier. The real application happens on a
+landlord, agency, or rental-platform site, so the last mile uses a DeepSeek
+browser agent over a pinned `agent-browser` MCP interface. It fills forms,
+customizes the reference message, uploads selected documents, and submits.
 
-Stekkies is only a *notifier/aggregator* — the real application happens on the
-external source site, which varies per listing. That variable last mile is why
-the apply stage uses an LLM browser agent rather than a fixed script.
+> **Safety:** there is no dry-run confirmation. A live single-listing or watcher
+> command can submit a real application and upload personal documents.
 
-## One shared logged-in browser (CDP)
-A single persistent Chromium — the **browser host** (`src.browser_host`) — runs
-with a CDP debugging port. Both the Stekkies extractor and the apply agent
-**attach to it over CDP**, so every session lives in one profile you sign into
-once: Google (enables "Sign in with Google" SSO on Funda etc.), Stekkies, and all
-rental sites. The apply agent drives it through pinned `agent-browser` attached
-to the same CDP endpoint. agent-browser is the sole apply browser backend.
-The agent also needs `DEEPSEEK_API_KEY` set.
+## How it fits together
 
-## Layout
-- `src/config.py`       — paths, URLs, `CDP_URL`.
-- `src/browser_host.py` — always-on shared Chromium (CDP port); `--login` opens sites to sign into.
-- `src/login_setup.py`  — (legacy) standalone Stekkies login; the browser host replaces it.
-- `src/stekkies.py`     — attach over CDP, open a listing, extract metadata + source URL.
-- `src/credentials.py`  — per-site logins matched by domain (from import_passwords).
-- `src/import_passwords.py` — load a Google Password Manager CSV into the creds JSON.
-- `src/message_template.py` — reference application message the agent customizes.
-- `src/apply.py`        — build the task prompt (SSO-first, creds, docs), run the agent.
-- `src/browser_agent/` — the agent loop, browser-backend adapter, guards, and structured result.
-- `src/gmail_watch.py`  — detect new Stekkies mails, extract the listing link.
-- `src/orchestrator.py` — ties it all together.
-- `state/`              — Chromium profile, creds, Gmail token, agent.env (do not commit).
-- `logs/`               — `activity.log`, `mail_summary.jsonl`, `transcripts/`.
+One persistent Chromium process keeps Google, Stekkies, and rental-site sessions
+in a shared profile. Deterministic extraction and health/session probes attach
+to CDP directly; the apply loop attaches through the normalized agent-browser
+adapter. Cross-process access is serialized by a browser lock.
 
-## Setup
-Uses [uv](https://docs.astral.sh/uv/). `uv sync` creates `.venv` from
-`pyproject.toml` + `uv.lock`. Prefix commands with `uv run` (no manual activate).
+```text
+Gmail -> orchestrator -> extract/deduplicate/policy -> apply agent -> outcome
+                                                        |
+                                                        +-> shared Chromium
+                                                        +-> documents
+outcome -> SQLite + redacted evidence + notification + optional repair queue
+```
+
+For the full process, data, and module map, see
+[`docs/architecture.md`](docs/architecture.md).
+
+## Repository map
+
+| Path | Purpose |
+|---|---|
+| `src/orchestrator.py` | Listing lifecycle, dedup, persistence, mail, notifications |
+| `src/stekkies.py`, `src/gmail_watch.py` | Deterministic intake and extraction |
+| `src/apply.py` | Apply-stage pre-flight and agent facade |
+| `src/browser_agent/` | Model loop, normalized MCP adapter, guards, result contract |
+| `src/prompts/apply_prompt.py` | Operational application policy and document ordering |
+| `src/self_improvement_agent.py`, `src/self_improvement/` | Isolated diagnosis/patch control plane |
+| `src/dashboard/` | Read-mostly FastAPI/htmx operator dashboard |
+| `src/settings.py`, `src/models.py`, `src/store.py` | Typed config, domain records, SQLite state |
+| `tests/` | Offline unit, harness, and opt-in browser-contract tests |
+| `deploy/` | VPS provisioning, systemd, Caddy, LiteLLM, browser policy |
+| `documents/`, `state/`, `logs/` | Private/runtime data; gitignored |
+
+Coding agents should start with [`AGENTS.md`](AGENTS.md). All documentation is
+indexed in [`docs/README.md`](docs/README.md).
+
+## Prerequisites
+
+- Python 3.12 and [uv](https://docs.astral.sh/uv/)
+- Node 20+ for agent-browser and the optional Claude CLI
+- WSL2 + WSLg locally, or Xvfb on the VPS
+- A DeepSeek API key
+- Google Desktop OAuth credentials for Gmail
+
+## Local setup
+
 ```bash
-uv sync
+just sync
 uv run playwright install chromium
 just ensure-agent-browser
-
-# 1. Start the shared browser host and log into everything ONCE:
-uv run python -m src.browser_host --login   # opens Google, Stekkies, rental sites
-#   -> in that window: sign into Google first (for SSO), then Stekkies and the
-#      rental sites. Leave this process running (own terminal / service).
-
-# 2. Import rental-site passwords (optional, for non-SSO sites):
-uv run python -m src.import_passwords passwords.csv   # then delete the CSV
-
-# 3. Gmail access: create a Desktop OAuth client in your own Google Cloud
-#    project, download JSON to state/gmail_client_secret.json
-#    First run authorizes in the browser and caches state/gmail_token.json.
+cp .env.example .env              # edit locally; never commit
+just doctor
 ```
 
-### Self-improvement agent (optional)
-After an apply attempt fails in a non-terminal way, `src/self_improvement_agent.py`
-diagnoses and can patch the repo itself. It needs two things beyond the core
-setup above — both one-off, both idempotent:
+Create a Google Desktop OAuth client and save it as
+`state/gmail_client_secret.json`. The first Gmail authorization stores
+`state/gmail_token.json`.
+
+Place personal application files in `documents/` using the naming guide in
+[`documents/README.md`](documents/README.md). Everything except that README is
+ignored by Git.
+
+For one-time browser sign-ins:
+
 ```bash
-just ensure-claude-cli   # installs the `claude` CLI if missing (npm install -g)
-just litellm-proxy       # own terminal/service, like `just host` — routes the
-                          # agent through DeepSeek instead of spending real
-                          # Anthropic credit; no extra API key needed
+just login
 ```
-`just doctor` checks both. See `AGENTS.md` for the full architecture (isolated
-git worktrees, push-to-main-triggers-CI/CD deploy, cost caveats).
 
-`just agent-browser-smoke` runs the real agent-browser MCP contract against a
-disposable local page and Chromium profile.
+Sign into Google first, then Stekkies and rental sites in the opened persistent
+browser. For non-SSO credentials, optionally import a Google Password Manager
+CSV and delete the CSV immediately afterward:
+
+```bash
+just import-passwords passwords.csv
+```
+
+## Optional self-improvement service
+
+Non-terminal failures can be diagnosed and patched in isolated Git worktrees.
+The Claude Agent SDK is routed through a loopback LiteLLM proxy backed by the
+same DeepSeek account.
+
+```bash
+just ensure-claude-cli
+just litellm-proxy     # keep this terminal running locally
+```
+
+`just doctor` reports whether these optional dependencies are available. The
+control plane, publish rules, and cost caveats are documented in
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Run
-```bash
-# Process a single Stekkies listing (applies + submits autonomously):
-uv run python -m src.orchestrator --once "https://www.stekkies.com/en/api/v1/h/redirect/5338905"
 
-# Live: watch inbox and auto-respond:
-uv run python -m src.orchestrator
+```bash
+just host            # terminal/service 1: persistent shared Chromium
+just once <url>      # real autonomous application for one listing
+just watch           # real live Gmail watcher
 ```
 
-The agent applies and **submits** autonomously — there is no dry-run guard.
+Use `just dry-prompt <listing-json>` to render task text without opening a
+browser. It can print private document filenames, so handle its output as
+sensitive.
 
-## Monitoring
-For a concise operational view over SSH:
+## Develop and verify
+
 ```bash
-tail -f logs/activity.log
-tail -f logs/mail_summary.jsonl
+just --list
+just docs-check
+just check
 ```
-`activity.log` is human-readable: one short line per handled email/listing.
-`mail_summary.jsonl` is structured JSONL with message id, status, listing URLs,
-address/source when known, return code, duration, and the short outcome message.
 
-## Dashboard
-`src/dashboard/` is a FastAPI app (run `uv run uvicorn src.dashboard.app:app`)
-showing stats/charts, submissions, per-listing **redacted** transcripts, a live
-health panel (services + DeepSeek credit + Stekkies login), and safe actions
-(retry / pause / resume / run health check). On the VPS it runs as
-`dashboard.service` on `127.0.0.1:8000` behind **Caddy** (auto-HTTPS + Basic
-Auth) at the DuckDNS domain. Transcripts are scrubbed of credentials and
-`*.prompt.txt` is never served.
+`just check` is the one offline quality gate: documentation links, Ruff, `ty`,
+byte compilation, pytest with coverage ratchet, apply-harness regression, and
+import/prompt smoke. Task-specific test routing is in
+[`docs/development.md`](docs/development.md).
 
-## Deploy (24/7)
-See [`deploy/README.md`](deploy/README.md) — Hetzner VM + Xvfb + systemd + VNC +
-Caddy dashboard.
+The opt-in `just agent-browser-smoke` validates the real pinned MCP contract
+against a disposable local page/profile. It is not part of ordinary unit
+development.
 
-## Open items / required input
-- **Latency.** Polling is every 5s (`src/gmail_watch.py`). For lower latency,
-  use Gmail push (Pub/Sub `users().watch()` + a webhook endpoint / tunnel).
-- **Gmail query.** Tune `GMAIL_QUERY` in `src/gmail_watch.py` to your real
-  Stekkies sender/subject.
+## Observe and operate
+
+- `logs/activity.log`: concise human-readable handled-listing events.
+- `logs/mail_summary.jsonl`: structured trigger and result events.
+- `logs/transcripts/`: per-run transcripts; treat as sensitive.
+- `logs/trajectories/`: redacted structured per-turn evidence.
+- `just dashboard`: local dashboard at `http://127.0.0.1:8000`.
+- `just digest`: weekly-style outcome and self-improvement summary.
+
+The dashboard includes submissions, funnel, health, self-improvement, and
+redacted forensics. Its pause/resume/health actions affect services; its retry
+action starts another real autonomous application.
+
+For 24/7 VPS provisioning, CI/CD, VNC login, backups, and service operations,
+see [`deploy/README.md`](deploy/README.md).

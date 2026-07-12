@@ -2,7 +2,7 @@
 
 Always-on responder: headful Chromium under **Xvfb**, **systemd**-managed, with
 **VNC** (over SSH tunnel) for the one-time interactive logins, plus a **Caddy**
-dashboard (HTTPS + Basic Auth). No Hermes - the agent is `src/browser_agent/`
+dashboard (HTTPS + Basic Auth). The apply agent is `src/browser_agent/`
 (DeepSeek + pinned agent-browser MCP). Most steps below are wrapped as `just`
 commands.
 
@@ -78,7 +78,8 @@ just restart browser-host         # reattach a clean browser if a session goes s
 
 ## CI / CD (GitHub Actions)
 - **CI** (`.github/workflows/ci.yml`) runs on every push/PR: `just check`
-  (byte-compile + import smoke + render the apply prompt). No browser/secrets.
+  (docs, lint, types, byte-compile, tests/coverage, apply harness, and
+  import/prompt smoke). No browser/secrets.
 - **CD** (`.github/workflows/deploy.yml`) auto-deploys on push to `main` *after*
   CI passes — same steps as `just deploy` (ff pull → `uv sync` → restart
   orchestrator + dashboard). One-time setup:

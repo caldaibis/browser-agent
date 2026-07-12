@@ -1,459 +1,195 @@
-# AGENTS.md
+# Coding-agent guide
 
-Stekkies rental auto-responder. Pipeline: Gmail (new Stekkies mail) → extract
-listing metadata + external source URL → our browser agent applies on the source
-site using the reference message in `src/message_template.py` (logs in, fills
-form, uploads docs, submits).
+This repository is the Stekkies rental auto-responder. It watches Gmail for a
+new listing, resolves the Stekkies or aggregator link, and uses a browser agent
+to apply on the source site. The final action is a real submission: there is no
+dry-run confirmation step.
 
-## Architecture
-- **One shared browser** (`src/browser_host.py`): persistent Chromium on CDP
-  port 9222. The Stekkies extractor and the apply agent both attach over CDP, so
-  all logins (Google SSO + rental sites) live in one profile signed into once.
-- `src/stekkies.py` — attach over CDP, extract listing/source URL (deterministic).
-- `src/browser_agent/` — our own lightweight agent loop (replaced Hermes):
-  AsyncOpenAI (DeepSeek) tool-calling over pinned **agent-browser MCP**, attached
-  to `http://127.0.0.1:9222`. `transport.py` exposes a small normalized surface
-  instead of its 150+ raw tools: compact/full/scoped snapshots, snapshot diffs,
-  semantic find, stable tabs, click/fill/batched-fill/select/upload, waits, and
-  dialogs. A deny-by-default daemon policy independently blocks eval, state and
-  network mutation, downloads, and administration; uploads are confined to
-  `DOCS_DIR`. `login_with_credential` uses agent-browser's encrypted local auth
-  vault so passwords do not enter model context. agent-browser is the sole
-  browser MCP backend. The loop has a
-  repeat-action guard + capped nudges, a
-  one-shot nudge when `browser_snapshot` dominates the turns so far
-  (`_should_nudge_snapshot_overuse` — the exact/short-cycle repeat guard
-  can't catch this: the *type* of call repeats, not its arguments, since
-  each snapshot follows a *different* click), prunes stale page dumps from
-  the conversation each turn (`_prune_stale_page_dumps` — all but the newest
-  2 large tool results are stubbed in place, since the model only ever acts
-  on the latest snapshot; without this cumulative input tokens grow
-  quadratically with turns — see the hard-won lesson below), and returns a
-  structured
-  `AgentResult(rc, outcome, summary, resolved_url)`. Five local (non-MCP)
-  fallback tools (`src/browser_dom_tools.py`, shared with self-improvement's
-  own browser diagnostics) give the model a way past HTML dialogs/overlays
-  that lack proper ARIA roles and never get a `browser_snapshot` ref:
-  `dom_scan` (raw-DOM report), `click_by_text` (click by visible text),
-  `fill_by_label` (type into a text/email/tel/textarea input by its `<label>`
-  text — there is no other way to reach a ref-less input at all, since
-  `browser_type`/`browser_fill_form` need a snapshot ref and `click_by_text`
-  only clicks), `select_option_by_label` (operate a custom dropdown whose
-  toggle has no text of its own, so `click_by_text` can't target it — clicks
-  the nearest ancestor-with-a-button, then the option text; guards every
-  `<form>` against a premature real submit first, since option buttons on
-  real sites often default to `type="submit"`), and `aggregator_hop` (a
-  composite fast path for the huurwoningen.nl aggregator gateway: clicks the
-  "Contact met de verhuurder" control — its visible text varies, "Bekijk
-  opnieuw"/"Reageer op deze woning"/"Reageer" all seen — then "Ga verder" in
-  the dialog it opens, as ONE tool call instead of the 7-19 turns of
-  `browser_find`/`dom_scan` trial-and-error a paired replay measured,
-  10-07-2026, one session ballooning from 85k to 211k tokens on exactly this
-  gateway). The first four are scoped to the currently *open* `<dialog>`
-  first when one exists (`dialog_scope`) — sites can reuse the same field ids
-  across several hidden dialogs on one page
-  (verified: REBO Groep's viewing-request, brochure-download, and
-  email-upsell dialogs all use `id="first_name"` etc), so an unscoped
-  `getElementById`/`get_by_label`/`get_by_text` silently resolves to a hidden
-  duplicate — a 0×0 bounding box for a fill, or a `click_by_text` timeout for
-  a click, not an error pointing at the real cause. None of this is arbitrary
-  JS: each is one fixed, narrow operation, unlike the still-blocked
-  `browser_evaluate`. The DeepSeek adapter also normalizes tool-call
-  arguments against each agent-browser tool's own declared schema
-  (`transport._normalize_tool_args`) before dispatch — the same paired replay
-  found DeepSeek emitting booleans/numbers as strings (`interactive="True"`,
-  26 times in a 10-session sample) and `browser_find` calls omitting
-  `action` entirely (defaulted to `"text"`, a safe read, instead of erroring)
-  — and the snapshot-overuse guard now counts `browser_snapshot`,
-  `browser_snapshot_diff`, `browser_read_page`, and `dom_scan` together
-  (`observation_calls`), since a run leaning on any mix of those four to
-  avoid a plain-snapshot-only counter looks identical in effect. `_run()`
-  also does a cross-source duplicate check once
-  per turn: if the browser's current tab lands on a URL already recorded as
-  processed under a *different* URL than this run's input (see
-  `dedup.py`'s `known_processed_urls`), it stops immediately with
-  `already_applied` instead of re-filling/resubmitting a form the site itself
-  gives no "already applied" signal for.
-- `src/apply.py` — pre-flight vetoes (rent cap, payment gates), run the agent,
-  persist a per-run transcript to `logs/transcripts/<ts>_<source>_<address>.log`.
-  Apply model: `deepseek-v4-pro` (override via `APPLY_MODEL`);
-  gemini-3.5-flash was too flaky. The task prompt itself lives in
-  `src/prompts/apply_prompt.py` (re-exported as `apply.build_prompt`) so
-  prompt diffs review apart from pipeline code.
-- **Cross-cutting substrate** (08-07-2026 overhaul, see
-  `docs/engineering-roadmap.md`): `src/settings.py` — every env knob, typed,
-  in one place (`just settings` prints the resolved values; modules bind
-  from `settings()`, never parse `os.environ` themselves);
-  `src/models.py` — typed `Listing`/`ProcessedRecord` with the ONE
-  `dedup_keys()`/`keys()` identity derivation; `src/store.py` — SQLite
-  state store (`state/store.db`, WAL) for processed listings + dedup keys +
-  incidents, authoritative for both reads and writes;
-  `src/eventlog.py` — UTC timestamps, shared JSONL append + activity log,
-  redaction-before-write (`src/redaction.py` holds the one `redact()`);
-  `src/self_improvement/` — the SI agent's split-out prompts / worktree /
-  cost / browser-tools modules (`self_improvement_agent.py` stays the
-  facade); `src/agent_tools.py` — the apply agent's local tool schemas.
-- `src/message_template.py` — reference application message; the agent customizes
-  it per listing instead of pasting verbatim.
-- `documents/` — your application PDFs/JPG. **Gitignored** (never committed —
-  they hold personal data); place your own files here and copy them to the VPS
-  out of band. `DOCS_DIR` (config) points here; override with the env var.
-- `src/credentials.py` / `import_passwords.py` — per-site logins by domain.
-- `src/gmail_watch.py` — poll inbox (5s), extract Stekkies link.
-- `src/orchestrator.py` — ties it together (`--once URL` or live watch); logs
-  the true `outcome` (submitted / already_applied / not_available / …).
-  **One attempt per listing — no automatic retries** (02-07-2026): a retry
-  re-runs the identical prompt against the same page at full LLM cost —
-  nothing carries over from the failed attempt, so it's the same coin flip
-  again (seen: `Hof van Oslo` retried 15+ times over several hours on
-  2026-07-01, several million tokens each, all `incomplete`). Every completed
-  agent run marks the listing processed whatever the outcome, terminal or
-  not — the one exception is `no_credit` (see the hard-won lesson below),
-  which leaves the mail unread and consumes nothing.
-- `src/site_playbooks.py` — **per-domain playbooks: persistent memory of how
-  each site works.** After every real agent run, one cheap LLM pass per
-  touched domain (source + resolved) distills the redacted transcript into
-  `state/site_playbooks/<domain>.md` — durable site mechanics only (login
-  quirks, where the real apply action is, upsell traps, ref-less dialogs), no
-  listing facts, no personal data. `apply.build_prompt` injects the listing
-  domain's playbook into the next run on that site, so lessons compound
-  instead of every run rediscovering the site from scratch (the whole Hof van
-  Oslo saga was exactly that rediscovery). Fail-open everywhere: a playbook
-  failure never fails an apply. Env: `PLAYBOOK_MODEL`, `PLAYBOOK_MAX_CHARS`,
-  `PLAYBOOK_TIMEOUT_SECONDS`.
-- `src/self_improvement_harness.py` — **structured failure evidence** (offline,
-  fail-open). `record_trajectory_event` is called from `browser_agent._run` to
-  write redacted, typed JSONL per run (`logs/trajectories/`): turn usage, tool
-  calls/results, guard firings, final outcome — the machine-readable
-  counterpart of the transcript (`APPLY_TRAJECTORY_ENABLED=0` disables).
-  `classify_failure` is the deterministic weakness classifier shared by
-  incident fingerprinting, `just self-improve-mine` (cluster recent failed
-  transcripts into evidence bundles) and `just self-improve-eval` (fixture
-  regressions in `tests/fixtures/self_improvement_harness/` that keep this
-  file's hard-won lessons executable; also runs inside `just check` via the
-  test suite). Deliberately NOT here: autonomous "harness evolution"
-  self-patching — that duplicated `self_improvement_agent.py` with weaker
-  guardrails and was dropped (07-07-2026); code changes go through the
-  guarded agent only.
-- `src/incident_store.py` — **cross-run memory: incidents, not episodes.**
-  Production data (48 runs to 07-07-2026) showed ~half of all
-  self-improvement runs re-diagnosed a failure another run had already worked
-  on the same day (the 03-07 browser_lock hang: FIVE full runs in seven
-  hours). Every failure gets a deterministic fingerprint
-  (`classify_failure` signature, domain-scoped for site-specific classes,
-  global for infrastructure classes so cross-listing infra failures collapse
-  into one incident); `state/store.db` records every
-  occurrence and attempt. `improve_after_apply` skips the run when the
-  fingerprint already had one within `SELF_IMPROVEMENT_DEDUP_HOURS` (24h
-  default — the occurrence is still recorded, so prevented spend stays
-  observable) and otherwise injects `attempt_history` into the context so
-  run N starts from run N-1's findings.
-- `src/known_gates.py` — **a data lever for diagnosed external gates.**
-  `state/known_gates.json` holds per-domain gates the self-improvement agent
-  records via its `record_known_gate` tool at diagnosis time
-  (paid_registration / account_cap / region_registration / delayed_access /
-  eligibility, optional `expires_ts` for temporary caps). `apply.apply`
-  pre-flight skips paid_registration domains as `payment_required` before
-  the browser opens (merged into `_payment_required_reason`);
-  `apply.build_prompt` injects the other kinds as KNOWN GATES warnings. A
-  diagnosis becomes deterministic prevention with no commit/CI/deploy, and
-  is reversible by deleting a JSON entry. (Why: your-house.nl's €25 gate was
-  correctly diagnosed twice in one day, but turning that into prevention
-  needed a human commit.)
-- `src/digest.py` — weekly outcome digest (`just digest`; sent by the
-  healthcheck every `DIGEST_INTERVAL_DAYS`, default 7): outcomes by trigger,
-  apply-loop guard fire counts (from trajectories), self-improvement actions
-  + landing rate, top incident fingerprints, **unlanded pending patches**,
-  active known gates. Exists because nobody could tell whether a change
-  improved the pipeline without aggregating logs by hand.
-- `src/self_improvement_agent.py` — runs after a non-terminal apply outcome
-  (blocked/error/incomplete/timeout/not_available/…, see
-  `SELF_IMPROVEMENT_OUTCOMES`) **and** after the session keeper's login
-  adapter fails to repair a dead session (`session_keeper_adapter`).
-  Both triggers share `_run_for_incident` (incident dedup + logging) and
-  dispatch the diagnosis/patch prompts on `context["kind"]`. Drives the
-  **Claude Agent SDK**
-  (`claude_agent_sdk.query()` — the same engine behind Claude Code: real
-  `Read`/`Edit`/`Bash`/`Grep`/`Glob`). Each run creates a **throwaway git
-  worktree** (`_create_worktree`, a sibling dir
-  `../browser-agent-self-improvement-worktrees/<ts>` branched off a
-  freshly-fetched `origin/main` — never `PROJECT_ROOT` itself, so a run can
-  never collide with the live checkout or in-progress human edits) and
-  always removes it in a `finally` (`_remove_worktree`), even on timeout.
-  **Two phases** (07-07-2026 — 3 production runs died at "Reached maximum
-  number of turns (30)" because ONE budget had to cover diagnose+patch+verify):
-  a read-only, evidence-first diagnosis run
-  (`SELF_IMPROVEMENT_DIAGNOSIS_MAX_TURNS`, 20) ends with a `DIAGNOSIS_JSON`
-  verdict (noop / email_user / fix, plus
-  `record_known_gate` for external gates); only a `fix` verdict starts the
-  patch run, which gets the full `SELF_IMPROVEMENT_MAX_TURNS` budget to
-  itself and the diagnosis injected. Diagnoses the failure from the redacted
-  transcript/logs/code (plus `incident.prior_attempts` — see
-  `incident_store`), then either
-  does nothing, emails the user, or patches + verifies (`just check` in the
-  worktree, which finds an already-installed environment via a `.venv`
-  *symlink* to `PROJECT_ROOT`'s real one — `uv run` follows it transparently
-  since the checked-out `pyproject.toml`/`uv.lock` are byte-identical, so
-  there's no per-run `uv sync`. Setting `VIRTUAL_ENV` alone does **not**
-  achieve this — `uv` only prefers an external venv via the `--active` CLI
-  flag, which has no env-var equivalent and isn't in the justfile's `uv run`
-  calls; that was tried, empirically failed, and was replaced with the
-  symlink) + commits + pushes via a dedicated `commit_push_deploy` tool (never
-  raw `git` — a `can_use_tool` callback denies `git commit`/`git push`/`git
-  reset` through `Bash`). If `SELF_IMPROVEMENT_ALLOW_DEPLOY=1` and a
-  fast-forward is still possible, it pushes straight to `origin main` —
-  **that push is the deploy trigger**, picked up by the existing `ci.yml` ->
-  `deploy.yml` pipeline; there is no separate local deploy script anymore.
-  Otherwise (deploy disabled, or `main` moved during the run) it pushes a
-  `self-improvement/<ts>` review branch instead and emails the user to merge
-  by hand. **When every push fails** (verified in production: the VPS deploy
-  key was read-only, so five correct fixes in a row were written and lost),
-  the commit is saved as a `git am`-able patch in `state/pending_patches/`
-  and attached to the alert email — a verified fix must never die with the
-  worktree. Browser diagnostics (`browser_open`, `browser_diagnostics`,
-  `browser_safe_click`, `browser_screenshot`) are custom MCP tools over the
-  same shared CDP browser, guarded by `browser_lock`. Routed through a local
-  **LiteLLM proxy** (`deploy/litellm.config.yaml`, `just litellm-proxy`)
-  that presents an Anthropic-Messages-API-shaped endpoint backed by
-  `deepseek/deepseek-v4-pro` — real Anthropic credit is not spent. Model/
-  turns/budget/timeout via `SELF_IMPROVEMENT_PROXY_MODEL` (default
-  `self-improvement-deepseek`), `SELF_IMPROVEMENT_MAX_TURNS`,
-  `SELF_IMPROVEMENT_MAX_BUDGET_USD`, `SELF_IMPROVEMENT_TIMEOUT_SECONDS`.
-- `src/self_improvement_queue.py` / `src/self_improvement_worker.py` — failed
-  applies enqueue redacted durable jobs instead of running repair inline. A
-  30-second systemd timer drains them under one global flock, recovers jobs
-  and worktrees left by killed processes, and is deliberately not restarted
-  by application deploys. This prevents concurrent agents racing `main` and
-  a self-deploy killing sibling diagnosis runs. Diagnosis is submitted via an
-  authoritative tool; commit/push tool state survives later model turn-limit
-  errors. SDK `tools=` is the real availability boundary (`allowed_tools`
-  only auto-approves), and writes are enforced inside the isolated worktree.
-- `src/notify.py` — emails `NOTIFY_TO` after each handled listing
-  (outcome + redacted summary) via Gmail `send` scope. Also the single
-  integration point for web push: `send_status_email` calls
-  `push_notify.push_status` first (own flag/filter, never raises).
-- `src/push_notify.py` — **native notifications (Chrome desktop + Android)**
-  via the standard Web Push API + VAPID; no third-party account. VAPID keys
-  auto-generate into `state/vapid.json`; per-device subscriptions live in
-  `state/push_subscriptions.jsonl` (expired endpoints pruned on send). The
-  dashboard serves the plumbing (`/sw.js` from root scope, `/push/public-key`,
-  `/push/subscribe`, `/push/unsubscribe`, `/push/test`) and a 🔔 toggle in the
-  nav; the actual send happens in the orchestrator process, via
-  `send_status_email`. Enable per device: open the dashboard, click 🔔 once.
-  Env: `WEB_PUSH_ENABLED=0` to disable, `WEB_PUSH_OUTCOMES` (default
-  `submitted`) to widen.
-- `src/healthcheck.py` (+ systemd timer, 30 min) — alerts (push + email) when:
-  DeepSeek credit is low; a pipeline systemd unit is down (orchestrator/
-  browser-host/litellm-proxy — a crash-looping orchestrator is otherwise
-  invisible, see hard-won lessons); a session expired on Stekkies or a top
-  apply site (`SITE_PROBES`: huurwoningen.nl, kamernet.nl — extend via
-  `HEALTHCHECK_SITE_PROBES` JSON); or the **last
-  `SELF_IMPROVEMENT_HEALTH_WINDOW` (5) self-improvement runs all failed**
-  (27 identical crashes on 01-07-2026 went unnoticed as a pattern — the
-  layer that repairs failures needs its own watcher). Also sends the weekly
-  `src/digest.py` summary, piggybacked on this timer. Site probes run in the real shared browser
-  under `browser_lock(timeout=60)` and are skipped when an apply is in flight.
-  Optionally GETs `HEALTHCHECK_PING_URL` (dead-man's switch, e.g.
-  healthchecks.io) at the end of each run — its *absence* alerts on total-box
-  death. `remaining_credit()` shared here.
-- `src/listing_context.py` — one cheap httpx GET of a listing's own detail
-  page (JSON-LD): description/price/surface, used by `apply.build_prompt`
-  (description + aggregator warning in the prompt up front). Strictly
-  fail-open; tier-3 pages just fail the fetch and nothing changes.
-- `src/dashboard/` — FastAPI + htmx/Chart.js read-mostly dashboard behind Caddy
-  (HTTPS + Basic Auth), organized around four decision questions. **Overview**
-  (`/`): an action-needed strip (`healthinfo.attention_items` — service down,
-  low credit, logged-out session, unlanded pending patches, active paid gates,
-  self-improvement failing streak, stuck browser lock) plus mission KPIs
-  (submissions, success rate, detection→submitted latency, weekly spend +
-  cost/submission). **Funnel** (`/funnel`, `src/dashboard/funnel.py`):
-  attempted→submitted by mail trigger, plus failure + incident Paretos.
-  **Self-improvement** (`/self-improvement`, `src/dashboard/si.py`): SI runs
-  with per-run cost, incidents, editable known-gates table (delete a
-  wrongly-gated site via `known_gates.remove_gate`), pending patches
-  (read-only, copyable `git am`), guard-fire trend, playbooks. **Forensics**
-  (`/submission/{key}`): a per-turn trajectory timeline
-  (`src/dashboard/trajectories.py`, from `logs/trajectories/*.jsonl` with a
-  transcript-regex fallback) + token-per-turn chart + collapsed redacted
-  transcript. Data layer: `src/dashboard/cache.py` (`JsonlTail` incremental
-  append-only parse + `memo` TTL cache — the overview used to trigger 5+ full
-  re-reads/request), `costs.py` (trajectory-first per-run cost + weekly
-  rollups, rates from `src/llm_pricing.py` shared with the self-improvement
-  agent). Stable content-hash permalinks (`Submission.permalink`; legacy
-  `/submission/<int>` still resolves). Never serves `*.prompt.txt`;
-  everything user-visible goes through `data.redact()`. Static assets in
-  `static/` (theme-aware light/dark). Safe POST actions return an htmx toast.
-- `justfile` — every workflow as a `just` command (local + VPS ops + secret push).
+## Start here
 
-## Conventions
-- Python 3.12, managed by **uv** (`pyproject.toml` + `uv.lock`). `uv sync` to
-  install; prefix commands with `uv run` (no manual venv activate).
+Read only the context needed for the task, in this order:
+
+1. This file for repository-wide constraints.
+2. [`docs/architecture.md`](docs/architecture.md) for processes, data flow,
+   ownership, and the module map.
+3. [`docs/development.md`](docs/development.md) for task routing, commands, and
+   validation.
+4. The nearest nested `AGENTS.md` for files you will edit.
+5. The linked incident lesson before changing code protected by a hard-won
+   rule.
+
+[`docs/README.md`](docs/README.md) is the documentation index. Do not read the
+roadmap, every incident, or deployment guide by default.
+
+## Non-negotiable safety rules
+
+- The apply path submits autonomously. A local smoke run can send a real rental
+  application, upload personal documents, or trigger site actions. Do not run
+  `just once`, `just watch`, the live dashboard retry action, or production
+  browser flows merely to validate a code change.
+- One persistent Chromium instance is shared over CDP port 9222. The extractor,
+  apply agent, session keeper, health probes, and browser diagnostics must
+  attach to it under `browser_lock`; do not launch a competing browser backend.
+- `agent-browser` is the sole apply browser backend. Its version is pinned in
+  `deploy/agent-browser.version`; its daemon policy is deny-by-default. Do not
+  restore raw JavaScript evaluation or a second browser tool contract.
+- `state/`, `logs/`, `.env`, and all files in `documents/` except its README are
+  local/production data. They can contain credentials, prompts, transcripts,
+  tokens, and personal documents. Never print, stage, or commit them.
+- Runtime VPS configuration is `state/agent.env`, loaded by systemd. `.env` is
+  only for local `just` variables. Do not `source state/agent.env`: values may
+  contain spaces or parentheses that systemd accepts but a shell does not.
+- Every completed apply run consumes the listing, regardless of outcome, except
+  `no_credit` (`rc=126`). Never turn HTTP 402 into a listing verdict or mark its
+  mail read.
+- One listing gets one automatic attempt. Do not add automatic retries; they
+  repeat the same expensive run without carrying browser-agent reasoning over.
+- Already applied means stop. Saved or pre-filled form data is not proof; site
+  wording such as “Aanvraag wijzigen”, “Reactie intrekken”, “je hebt
+  gereageerd”, or “Doorgaan met gesprek” is.
+- Paid registration, account caps, regional registration, delayed access, and
+  eligibility failures are real external gates. Report or record them; do not
+  bypass payment or registration controls.
+- Redact before persistence, not just at presentation time. `src/redaction.py`
+  owns redaction and `src/eventlog.py` owns persisted event writes.
+
+## System at a glance
+
+```text
+Gmail alert
+  -> orchestrator
+  -> deterministic Stekkies/source extraction
+  -> policy + duplicate pre-flight
+  -> shared-browser apply agent
+  -> SQLite outcome + redacted logs + notification
+                         |
+                         +-> non-terminal failure queue
+                             -> isolated self-improvement worktree
+```
+
+Canonical ownership:
+
+| Concern | Source of truth |
+|---|---|
+| Runtime settings and defaults | `src/settings.py` (`just settings`) |
+| Paths and fixed URLs | `src/config.py` |
+| Listing and processed-record schemas | `src/models.py` |
+| Listing identity/canonicalization | `Listing.dedup_keys()`, `ProcessedRecord.keys()`, `src/dedup.py` |
+| Durable processed/incident state | `src/store.py` → `state/store.db` |
+| Event writes and timestamps | `src/eventlog.py` |
+| Redaction | `src/redaction.py` |
+| Apply prompt policy | `src/prompts/apply_prompt.py` |
+| Reference application wording | `src/message_template.py` |
+| Apply outcomes | `src/browser_agent/result.py` |
+| Browser tool exposure | `src/browser_agent/transport.py`, `src/agent_tools.py` |
+| Browser daemon policy | `deploy/agent-browser-action-policy.json` |
+| Per-domain learned mechanics | `src/site_playbooks.py` → `state/site_playbooks/` |
+| Diagnosed external gates | `src/known_gates.py` → `state/known_gates.json` |
+
+Subsystem guides:
+
+- General Python/data boundaries: [`src/AGENTS.md`](src/AGENTS.md)
+- Apply browser loop: [`src/browser_agent/AGENTS.md`](src/browser_agent/AGENTS.md)
+- Prompt policy: [`src/prompts/AGENTS.md`](src/prompts/AGENTS.md)
+- Self-improvement: [`src/self_improvement/AGENTS.md`](src/self_improvement/AGENTS.md)
+- Dashboard: [`src/dashboard/AGENTS.md`](src/dashboard/AGENTS.md)
+- Tests and fixtures: [`tests/AGENTS.md`](tests/AGENTS.md)
+- Deployment/systemd: [`deploy/AGENTS.md`](deploy/AGENTS.md)
+
+## Working conventions
+
+- Python 3.12 is managed by `uv`. Use `uv run`; do not manually activate the
+  virtualenv.
+- Use `just` recipes for established workflows. `just check` is the single
+  required quality gate and is also the autonomous self-improvement verifier.
 - Run modules as packages: `uv run python -m src.<module>`.
-- **`just check` is the one quality gate**: ruff (rule sets F,B,UP,ASYNC,SIM),
-  the `ty` type checker over `src/`, byte-compile, pytest with a coverage
-  ratchet (`fail_under` in pyproject — raise it when coverage rises, never
-  lower it), the apply-harness eval, and an import/prompt smoke. This is
-  deliberate: it is also the self-improvement agent's verify gate
-  (`SELF_IMPROVEMENT_VERIFY_CMD`), and an autonomous patch that pushes
-  straight to main must not pass on lint alone (found the hard way: the
-  suite sat broken for a while because nothing ran it).
-- **Use the `justfile` recipes for common workflows** instead of reinventing
-  commands — run `just` (or read the `justfile`) to list them. Covers local dev
-  (`sync`, `host`, `login`, `watch`, `dashboard`, `healthcheck`, `reauth`,
-  `ensure-claude-cli`, `litellm-proxy`), VPS ops (`deploy`, `pull`, `shell`,
-  `logs`, `status`, `pause`/`resume`, `credits`, `vnc`), and secret push
-  (`push-creds`, `push-token`, `push-env`). `deploy` (and CI's `deploy.yml`)
-  both call `deploy/ensure-self-improvement.sh` on every deploy — an
-  already-provisioned VPS self-heals to whatever `claude`
-  CLI/`litellm-proxy.service` state the repo now expects, not just a fresh
-  `deploy/setup.sh` install.
-- Local dev: WSL2 + WSLg (DISPLAY=:0) for headed Chromium. VPS: Xvfb (DISPLAY
-  =:99). No system Chrome — use bundled Chromium. Docs live in `documents/`.
-- `state/` (profile, creds, tokens) and `logs/` are gitignored — never commit.
-- The agent applies and **submits** autonomously — there is no dry-run guard.
-- Secrets: `state/sources_credentials.json` (plaintext, local-only). Never print
-  passwords in logs or commits.
+- Runtime settings belong in the frozen `Settings` dataclass and
+  `load_settings()`; modules bind from `settings()`. The deliberate exception is
+  the applicant's `APPLICANT_*` profile, owned by `src/applicant_profile.py`.
+  Passing a copied environment to a subprocess is not a new settings source.
+- Carry a typed `Listing` through the core pipeline. Convert at explicit
+  compatibility or persistence boundaries with `from_json()` / `to_json()`.
+- SQLite is authoritative for processed listings, dedup keys, and incidents.
+  Append-only operational evidence remains in JSONL/transcript files.
+- Fail-open enrichments must never fail an apply: listing-context fetches,
+  playbook updates, notifications, and self-improvement enqueueing are examples.
+  Safety vetoes, duplicate prevention, payment prevention, and browser policy
+  remain fail-closed.
+- Keep imports and public facades compatible unless a task explicitly changes
+  them. Tests patch seams such as `src.browser_agent.loop`, not only package
+  re-exports.
+- Preserve a dirty worktree. Do not overwrite unrelated user changes or use
+  destructive Git commands.
 
-## Gotchas
-- Google blocks automation browsers; host launches with
-  `--disable-blink-features=AutomationControlled` + no `--enable-automation`.
-- The agent needs `DEEPSEEK_API_KEY` (env; on the VPS via `state/agent.env`,
-  loaded by the orchestrator systemd unit). Watch for HTTP 402 (credits).
-- **VPS runtime config = `state/agent.env`**, not `.env`. Both `orchestrator`
-  and `dashboard` systemd units read it via `EnvironmentFile=`. Besides
-  `DEEPSEEK_API_KEY` it carries `GOOGLE_ACCOUNT`, `NOTIFY_TO`, and the
-  `APPLICANT_*` profile vars. systemd parses `KEY=VALUE` with spaces/parens
-  fine (e.g. an `APPLICANT_EMPLOYMENT` with commas), but bash `source` chokes on
-  those — verify what a service actually sees via
-  `/proc/$(systemctl show -p MainPID --value orchestrator)/environ`, not by
-  sourcing the file.
-- **Back up `documents/` before any `git reset --hard`/pull on the VPS.** The
-  PDFs are gitignored now, but an older checkout may still have them *tracked*;
-  a hard reset to a tree where they're absent deletes them. Always
-  `tar czf <backup> documents state` first, reset, then `tar xzf <backup>
-  documents`. Run git as the deploy user (the repo is deploy-owned).
-- The pinned agent-browser version in `deploy/agent-browser.version` is required
-  at runtime (`just ensure-agent-browser`). Deploy and healthcheck verify the
-  agent-browser MCP subcommand before applications are allowed to run.
-- Node 20+ is required by the Claude CLI used by self-improvement. The apply
-  browser contract itself is agent-browser only; there is no rollback backend.
-- The self-improvement agent needs the **`claude` CLI on PATH**
-  (`npm install -g @anthropic-ai/claude-code` — `claude-agent-sdk` shells out
-  to it) and the **LiteLLM proxy running** (`litellm-proxy.service` on the
-  VPS, `just litellm-proxy` locally) — it points `ANTHROPIC_BASE_URL` at the
-  proxy (`127.0.0.1:4000`) instead of api.anthropic.com, so no real
-  `ANTHROPIC_API_KEY` is needed; `ANTHROPIC_AUTH_TOKEN` is a placeholder that
-  only satisfies the CLI's own "am I configured" check. The proxy reuses the
-  same `DEEPSEEK_API_KEY` already in `state/agent.env`.
-- **DeepSeek via LiteLLM silently mishandles two Claude-specific request
-  params — do not send them on this path.** `thinking`/`effort` wrap
-  DeepSeek's entire reply in a fake `thinking` block that rambles until it
-  hits `max_tokens` with zero real output (same "reasoning truncation =
-  silent stall" failure class as the hard-won lesson below, via a new path).
-  `output_config.format` (structured output) is silently ignored — no
-  error, just a free-text reply instead of schema-JSON — so
-  `self_improvement_agent.py` extracts the final result from a text marker,
-  not `ResultMessage.structured_output`. Verified directly against the
-  proxy with curl, not assumed.
-- **`ResultMessage.total_cost_usd` / `model_usage[...].costUSD` are wrong for
-  this proxied model — off by ~19.5x, verified, not estimated.** Claude
-  Code's own client-side cost calculator doesn't recognize a custom
-  `model_name` like `self-improvement-deepseek` and falls back to some
-  default rate. A run whose real cost (computed from the logged raw
-  `usage` tokens × deepseek-v4-pro's actual published per-token rates) was
-  $0.030 was reported by the SDK as $0.586. Trust
-  `_estimate_deepseek_cost_usd()`'s logged `estimated_cost_usd`, not the
-  SDK's own cost field — and note `max_budget_usd` is checked against the
-  SDK's *inflated* number, so it's set ~20x higher than the real dollar
-  ceiling you actually want (see the constant's comment).
-- Stekkies only notifies; the real application is on the external source site,
-  which varies per listing — hence the LLM agent for the last mile.
-- Transcripts/prompts can contain plaintext site passwords — the dashboard
-  redacts them and never serves `*.prompt.txt`. Don't undo that.
+## Change workflow
 
-## Hard-won lessons (don't relearn these)
-The standing rules are below; each dated incident's full postmortem lives in
-`docs/lessons/` — read the linked file before touching the related code.
+1. Inspect `git status --short` and the relevant call sites/tests.
+2. Read the closest subsystem guide and any incident it names.
+3. Make the smallest coherent change at the canonical owner above; do not add
+   a second source of truth.
+4. Run focused tests from the routing table in
+   [`docs/development.md`](docs/development.md), then run `just check`.
+5. Review the diff for secrets, generated runtime data, prompt changes, policy
+   widening, outcome changes, and stale documentation references.
 
-- **Alerting must not share a failure mode with what it monitors.** Push
-  (web push) BEFORE email; the healthcheck watches unit liveness + a
-  dead-man ping. NB: a Google OAuth app in *Testing* status expires refresh
-  tokens every 7 days — publish to Production or the 04-07-2026 outage
-  recurs weekly. → `docs/lessons/2026-07-04-alerting-shared-failure-mode.md`
-- **asyncio's default executor is tiny and DNS shares it.** Never park many
-  threads on locks: 64-thread executor (`POLL_EXECUTOR_THREADS`), tier-3
-  polls give up on the flock after 120s, startup polls staggered.
-  → `docs/lessons/2026-07-07-asyncio-executor-dns-starvation.md`
-- **`asyncio.wait_for` cannot unwedge a hung MCP teardown.** `run_agent`
-  arms a `threading.Timer` watchdog that SIGKILLs wedged MCP descendants
-  `APPLY_TEARDOWN_GRACE_SECONDS` past the timeout; `browser_lock` records
-  its holder and alerts after a 300s wait.
-  → `docs/lessons/2026-07-03-hung-mcp-teardown-watchdog.md`
-- **HTTP 402 (out of credit) is not a verdict on the listing.** Outcome
-  `no_credit` (rc=126) never consumes the listing: the orchestrator leaves
-  the mail unread and alerts (deduped).
-  → `docs/lessons/2026-07-05-no-credit-is-not-a-verdict.md`
-- **Model:** `deepseek-v4-pro` is the default apply model. Keep
-  `gemini-3.5-flash` avoided; it falls into degenerate loops (e.g. ArrowDown ×30).
-- **Reasoning truncation = silent stall.** Thinking is disabled by default
-  for the apply agent (re-enable via `APPLY_REASONING_EFFORT`); truncated
-  empty turns (`finish_reason=length`) are retried, never treated as a
-  conclusion; per-turn `finish_reason` + token counts are logged.
-  → `docs/lessons/2026-06-29-reasoning-truncation-silent-stall.md`
-- **Use the normalized agent-browser high-level tools** (compact/full/scoped
-  snapshot -> ref -> click/fill_form, snapshot diff after same-page changes,
-  semantic find when refs are absent). Raw JavaScript remains blocked by both
-  tool filtering and daemon policy; it previously caused 50+ calls and
-  full-page dumps for one task.
-- **Accessibility-tree snapshots miss dialogs built without proper ARIA
-  roles.** `dom_scan`/`click_by_text`/`fill_by_label`/
-  `select_option_by_label` (`src/browser_dom_tools.py`) are the narrow,
-  dialog-scoped fallback — not a reopening of raw JS; a one-shot code nudge
-  fires on snapshot overuse (`_should_nudge_snapshot_overuse`).
-  → `docs/lessons/2026-07-01-aria-less-dialogs-snapshot-blindspot.md`
-- **Already-applied = STOP, never resubmit.** Detect by control wording
-  ("Aanvraag wijzigen", "Reactie intrekken", "je hebt gereageerd", "Doorgaan
-  met gesprek"). Pre-filled fields / saved docs alone do NOT mean already-applied.
-- **Ref-less dialogs end-to-end (Hof van Oslo).** Current-tab detection via
-  `browser_tabs`, recoverable `click_by_text` timeouts, `fill_by_label` /
-  `select_option_by_label` for typing/selecting where no ref exists; beware
-  the paid "Inschrijven huuraanbod" email-alert upsell (named in the apply
-  prompt). → `docs/lessons/2026-07-02-hof-van-oslo-resolution.md`
-- **Duplicate HTML ids break scoped lookups.** Every raw-DOM tool scopes to
-  the currently open `<dialog>` first (`dialog_scope`); inputs are found by
-  walking up from a text-matched `<label>`, never trusting `for=id`.
-  → `docs/lessons/2026-07-02-duplicate-html-ids-break-scoped-lookups.md`
-- **Custom dropdown options can default to `type="submit"`.**
-  `select_option_by_label` attaches a one-time submit-preventing guard to
-  every form before clicking an option.
-  → `docs/lessons/2026-07-02-dropdown-options-default-to-submit.md`
-- **One site, one listing, several URL shapes.** `dedup.canonical_url`
-  collapses known per-site shapes to a synthetic listing key
-  (`_site_listing_key` — extend it when another site shows the disease);
-  readers re-canonicalize stored keys at load time; prevented duplicates are
-  deliberately visible as `skipped_duplicate` rows.
-  → `docs/lessons/2026-07-02-kaatstraat-one-listing-many-url-shapes.md`
-- **Cross-source dedup gap: same listing, two different keys.**
-  `AgentResult.resolved_url` (the destination an apply run actually reached)
-  is persisted as an extra dedup key, and the agent checks the current tab
-  URL against all known keys once per turn, stopping with `already_applied`.
-  → `docs/lessons/2026-07-02-cross-source-dedup-gap.md`
-- **Stale page dumps in history = quadratic input tokens.**
-  `_prune_stale_page_dumps` stubs all but the newest 2 large tool results
-  in place each turn (`APPLY_PRUNE_MIN_CHARS`/`APPLY_PRUNE_KEEP_RECENT`).
-  → `docs/lessons/2026-07-02-stale-page-dumps-quadratic-tokens.md`
-- **Source sites gate you:** ikwilhuren Plus paywall (2-day delay for standard
-  accounts), MijnDak needs a per-region inschrijving + eligibility recompute.
-  These are real states to report, not bugs — stop early and label them.
-- **Turn-budget and navigation friction have deterministic mitigations.**
-  `APPLY_GRACE_TURNS` grants one extension when a run is demonstrably
-  mid-form; a deterministic cookie-banner sweep runs after every navigation.
-  → `docs/lessons/2026-07-02-eligibility-gates-readable-at-poll-time.md`
-- **Gmail listing mails:** from `help@stekkies.com`; the listing link is a
-  hex-hash `http://www.stekkies.com/.../redirect/<hash>` and the body is
-  quoted-printable (must QP-decode before regex).
-- **Documents** are uploaded in a fixed priority order with a one-line purpose
-  each (see `_classify` in `src/prompts/apply_prompt.py`): ID →
-  werkgeversverklaring → recent payslips → landlord ref → profile →
-  motivatiebrief → UWV → jaaropgave → bank → degiro. Keep the expired
-  arbeidsovereenkomst OUT; keep the bank statement trimmed.
+For documentation-only changes, `just docs-check` is the focused check, but
+`just check` remains the final gate.
+
+## Hard-won constraints
+
+Read the linked lesson before touching the related path.
+
+- Alerting must not share a failure mode with the monitored component. Push is
+  attempted before email; health checks include unit liveness and a dead-man
+  ping. [`2026-07-04`](docs/lessons/2026-07-04-alerting-shared-failure-mode.md)
+- Threads waiting on file locks can starve asyncio DNS. Preserve the large poll
+  executor, bounded tier-3 lock wait, and staggered startup.
+  [`2026-07-07`](docs/lessons/2026-07-07-asyncio-executor-dns-starvation.md)
+- `asyncio.wait_for` cannot unwind a stuck MCP teardown. Preserve the descendant
+  watchdog and browser-lock holder diagnostics.
+  [`2026-07-03`](docs/lessons/2026-07-03-hung-mcp-teardown-watchdog.md)
+- HTTP 402 is `no_credit`, not an apply result.
+  [`2026-07-05`](docs/lessons/2026-07-05-no-credit-is-not-a-verdict.md)
+- Apply reasoning is off by default; an empty length-truncated model turn is
+  retried and token/finish metadata stays observable.
+  [`2026-06-29`](docs/lessons/2026-06-29-reasoning-truncation-silent-stall.md)
+- Accessibility snapshots can miss ARIA-less dialogs. Use only the narrow,
+  open-dialog-scoped DOM fallbacks; do not reopen arbitrary evaluation.
+  [`2026-07-01`](docs/lessons/2026-07-01-aria-less-dialogs-snapshot-blindspot.md)
+- Duplicate HTML ids require open-dialog scoping and label-relative lookup.
+  [`2026-07-02`](docs/lessons/2026-07-02-duplicate-html-ids-break-scoped-lookups.md)
+- Custom dropdown option buttons can submit forms unless guarded.
+  [`2026-07-02`](docs/lessons/2026-07-02-dropdown-options-default-to-submit.md)
+- Ref-less dialogs need the local fallback tool chain and current-tab
+  detection. [`Hof van Oslo`](docs/lessons/2026-07-02-hof-van-oslo-resolution.md)
+- One listing may have several URL shapes; preserve raw and canonical keys.
+  [`Kaatstraat`](docs/lessons/2026-07-02-kaatstraat-one-listing-many-url-shapes.md)
+- The resolved destination is also a dedup key, including during an active run.
+  [`cross-source dedup`](docs/lessons/2026-07-02-cross-source-dedup-gap.md)
+- Keep stale large page dumps pruned in place or token input grows
+  quadratically. [`2026-07-02`](docs/lessons/2026-07-02-stale-page-dumps-quadratic-tokens.md)
+- Grace turns and the deterministic cookie sweep protect turn-budget progress.
+  [`2026-07-02`](docs/lessons/2026-07-02-eligibility-gates-readable-at-poll-time.md)
+- Self-improvement diagnosis authority, tool availability, worktree isolation,
+  and pending-patch recovery are separate control-plane guarantees.
+  [`2026-07-10`](docs/lessons/2026-07-10-self-improvement-control-plane-failures.md)
+
+Additional fixed facts: the apply model defaults to `deepseek-v4-pro`; do not
+restore `gemini-3.5-flash`. Gmail listing bodies are quoted-printable and the
+Stekkies redirect id is an alphanumeric hash. Document priority is owned by
+`_classify()` in `src/prompts/apply_prompt.py`; keep expired contracts out and
+bank statements trimmed.
+
+## Documentation contract
+
+- `AGENTS.md` contains global constraints, not subsystem implementation prose.
+- Nested `AGENTS.md` files contain only local ownership, invariants, and focused
+  verification.
+- `docs/architecture.md` describes the current system; update it in the same
+  change when a boundary or flow changes.
+- Incident history goes in `docs/lessons/YYYY-MM-DD-<slug>.md`; add its standing
+  rule here or in the relevant nested guide.
+- Future ideas go in `docs/planned-features.md`; completed migration history
+  remains in `docs/engineering-roadmap.md`.
+- Use relative Markdown links for repository navigation so `just docs-check`
+  can catch moved or missing targets.
