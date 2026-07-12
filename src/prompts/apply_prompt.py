@@ -120,6 +120,23 @@ click_by_text if aggregator_hop itself reports failure.
     return clause
 
 
+def _bedroom_filter_clause() -> str:
+    """Prompt clause for the opt-in separate-bedroom eligibility filter."""
+    if not settings().require_separate_bedroom:
+        return ""
+    return """
+  - SEPARATE BEDROOM (enabled): the applicant needs a bedroom that is a
+    separate room from the general/living area. Reject a listing when its live
+    text clearly describes a studio, one-room home, combined living/sleeping
+    room, sleeping nook, or sleeping loft without a separate bedroom. A
+    statement such as "aparte slaapkamer", "separate bedroom", "1 slaapkamer",
+    or a conventional two-room-or-more layout is sufficient evidence to
+    proceed, even if a portal loosely labels the home a studio. If the text is
+    missing, vague, contradictory, or does not clearly establish the layout,
+    proceed with the application: this filter must be fail-open for ambiguity.
+"""
+
+
 def _tool_use_clause() -> str:
     return """TOOL USE - AGENT-BROWSER (BE EFFICIENT AND CORRECT):
 - Start with browser_snapshot. It defaults to a compact INTERACTIVE-only tree with refs such as `@e37` and link URLs. For the eligibility gate, validation errors, status, or submission confirmation, call it with interactive=false so important static text is included. Scope large pages with selector (for example `main` or `dialog[open]`) and/or depth.
@@ -242,6 +259,7 @@ Compare each stated HARD requirement against the APPLICANT PROFILE above.
     does NOT allow assets/savings to compensate.
   - If the listing excludes students/woningdelers, the applicant is neither, so
     that exclusion does NOT block this application.
+{_bedroom_filter_clause()}
 If ANY hard requirement is clearly NOT met, DO NOT fill or submit anything:
 STOP immediately and report `OUTCOME: not_eligible`, stating the requirement,
 the applicant's value, and the gap. Only proceed to fill the form when the

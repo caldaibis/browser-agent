@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from src import apply
 from src.models import Listing
@@ -34,6 +35,53 @@ class TestRentPolicy(unittest.TestCase):
         self.assertEqual(result.outcome, "payment_required")
         self.assertEqual(result.rc, 0)
         self.assertIn("requires payment", result.summary)
+
+    def test_apply_short_circuits_single_room_when_filter_enabled(self):
+        old = apply.REQUIRE_SEPARATE_BEDROOM
+        apply.REQUIRE_SEPARATE_BEDROOM = True
+        try:
+            result = apply.apply({
+                "source_url": "https://example.test/listing",
+                "source_name": "Example",
+                "address": "Teststraat 1",
+                "title": "Studio in Utrecht",
+                "description": "Studio, alles in één ruimte.",
+                "price": "€ 1.500 per maand",
+            })
+        finally:
+            apply.REQUIRE_SEPARATE_BEDROOM = old
+        self.assertEqual(result.outcome, "not_eligible")
+        self.assertEqual(result.rc, 0)
+        self.assertIn("separate bedroom is required", result.summary)
+
+    def test_apply_bedroom_filter_is_fail_open_for_ambiguous_text(self):
+        old = apply.REQUIRE_SEPARATE_BEDROOM
+        apply.REQUIRE_SEPARATE_BEDROOM = True
+        try:
+            with mock.patch.object(
+                apply, "run_agent",
+                return_value=apply.AgentResult(rc=0, outcome="blocked", summary="test"),
+            ):
+                with mock.patch.object(apply, "try_fast_apply", return_value=None):
+                    result = apply.apply({
+                        "source_url": "https://example.test/listing",
+                        "source_name": "Example",
+                        "address": "Teststraat 1",
+                        "description": "Ruim appartement nabij het centrum.",
+                        "price": "€ 1.500 per maand",
+                    })
+        finally:
+            apply.REQUIRE_SEPARATE_BEDROOM = old
+        self.assertEqual(result.outcome, "blocked")
+
+    def test_bedroom_filter_does_not_classify_agency_name(self):
+        with mock.patch.object(apply, "fetch_context", return_value=None):
+            reason = apply._separate_bedroom_required_reason(Listing.from_json({
+                "source_url": "https://example.test/listing",
+                "source_name": "Studio Wonen",
+                "title": "Appartement nabij het centrum",
+            }))
+        self.assertIsNone(reason)
 
     def test_payment_wording_detected_without_browser(self):
         reason = apply._payment_required_reason(Listing.from_json({

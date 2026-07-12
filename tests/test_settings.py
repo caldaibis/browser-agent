@@ -15,6 +15,7 @@ class TestLoadSettings(unittest.TestCase):
         self.assertEqual(s.apply_max_turns, 60)
         self.assertEqual(s.self_improvement_diagnosis_max_turns, 20)
         self.assertEqual(s.max_rent, 1750.0)
+        self.assertFalse(s.require_separate_bedroom)
         self.assertTrue(s.notify_enabled_flag)
         self.assertEqual(s.web_push_outcomes, frozenset({"submitted"}))
         self.assertIsNone(s.deepseek_api_key)
@@ -32,6 +33,12 @@ class TestLoadSettings(unittest.TestCase):
     def test_flag_convention_only_zero_disables(self):
         self.assertFalse(load_settings({"APPLY_FASTPATH_ENABLED": "0"}).apply_fastpath_enabled)
         self.assertTrue(load_settings({"APPLY_FASTPATH_ENABLED": "yes"}).apply_fastpath_enabled)
+
+    def test_separate_bedroom_filter_flag(self):
+        self.assertTrue(
+            load_settings({"REQUIRE_SEPARATE_BEDROOM": "1"}).require_separate_bedroom)
+        self.assertFalse(
+            load_settings({"REQUIRE_SEPARATE_BEDROOM": "0"}).require_separate_bedroom)
 
     def test_playbook_model_falls_back_to_apply_model(self):
         s = load_settings({"APPLY_MODEL": "some-model"})

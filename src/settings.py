@@ -123,6 +123,7 @@ class Settings:
 
     # --- Rent cap (apply pre-flight)
     max_rent: float
+    require_separate_bedroom: bool
 
     browser_lock_wait_alert_seconds: float
 
@@ -228,6 +229,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         watch_retry_seconds=_int(e, "WATCH_RETRY_SECONDS", 300),
 
         max_rent=_float(e, "MAX_RENT", 1750.0),
+        require_separate_bedroom=_flag(
+            e, "REQUIRE_SEPARATE_BEDROOM", False),
 
         browser_lock_wait_alert_seconds=_float(
             e, "BROWSER_LOCK_WAIT_ALERT_SECONDS", 300.0),

@@ -10,6 +10,7 @@ Run standalone:  python -m src.apply logs/last_listing.json
 import json
 import re
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ from .listing_context import fetch_context
 from .message_template import REFERENCE_APPLICATION_MESSAGE
 from .browser_agent import run_agent, AgentResult
 from .browser_lock import browser_lock
+from .bedroom_policy import disallowed_reason
 from .rent_policy import MAX_RENT, parse_rent
 from .eventlog import get_logger
 from .models import Listing
@@ -34,6 +36,7 @@ APPLY_MODEL = settings().apply_model
 APPLY_MAX_TURNS = settings().apply_max_turns
 APPLY_TIMEOUT_SECONDS = settings().apply_timeout_seconds
 APPLY_FASTPATH_ENABLED = settings().apply_fastpath_enabled
+REQUIRE_SEPARATE_BEDROOM = settings().require_separate_bedroom
 
 # Google account used for "Sign in with Google" SSO on source sites (Funda etc.).
 GOOGLE_ACCOUNT = settings().google_account
@@ -94,6 +97,23 @@ def _payment_required_reason(listing: Listing) -> str | None:
     return None
 
 
+def _separate_bedroom_required_reason(listing: Listing) -> str | None:
+    """Return layout evidence that makes an opt-in listing ineligible."""
+    description = listing.description.strip()
+    if not description:
+        ctx = fetch_context(listing.source_url)
+        if ctx:
+            description = ctx.description
+    # Do not classify the source/agency name or address: brands such as
+    # "Studio Wonen" and apartment numbers can contain layout words without
+    # describing this listing.
+    text = "\n".join((listing.title, description))
+    evidence = disallowed_reason(text)
+    if evidence:
+        return f"listing text describes a single shared room ({evidence})"
+    return None
+
+
 def _slug(text: str) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "-", (text or "").strip()).strip("-").lower()
     return (s or "listing")[:50]
@@ -112,6 +132,24 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL) -> AgentResult:
         )
         _LOG.info(f"{summary}")
         return AgentResult(rc=0, outcome="not_eligible", summary=summary)
+
+    # Enrich once before the deterministic gates. This keeps the fetched
+    # description available to the payment gate and prompt without another
+    # network request, while fetch_context remains fail-open.
+    if not listing.description.strip():
+        ctx = fetch_context(listing.source_url)
+        if ctx and ctx.description.strip():
+            listing = replace(listing, description=ctx.description.strip())
+
+    if REQUIRE_SEPARATE_BEDROOM:
+        bedroom_reason = _separate_bedroom_required_reason(listing)
+        if bedroom_reason:
+            summary = (
+                "Skipped before opening the browser: a separate bedroom is "
+                f"required, but {bedroom_reason}."
+            )
+            _LOG.info(f"{summary}")
+            return AgentResult(rc=0, outcome="not_eligible", summary=summary)
 
     payment_reason = _payment_required_reason(listing)
     if payment_reason:
