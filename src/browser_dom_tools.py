@@ -161,7 +161,7 @@ async def dom_scan(cdp_url: str, settle_ms: int = 500, current_url: str | None =
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
         try:
             page = await current_page(browser, hint_url=current_url)
             if settle_ms:
@@ -255,7 +255,7 @@ async def dismiss_cookie_banner(cdp_url: str, current_url: str | None = None) ->
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
         try:
             page = await current_page(browser, hint_url=current_url)
             for kind, selectors in (("accepted", _COOKIE_ACCEPT_SELECTORS),
@@ -293,7 +293,7 @@ async def click_by_text(cdp_url: str, text: str, settle_ms: int = 600, current_u
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
         try:
             page = await current_page(browser, hint_url=current_url)
             scope = await dialog_scope(page)
@@ -342,7 +342,7 @@ async def aggregator_hop(cdp_url: str, settle_ms: int = 700, current_url: str | 
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
         try:
             page = await current_page(browser, hint_url=current_url)
             start_url = page.url
@@ -421,7 +421,7 @@ async def fill_by_label(cdp_url: str, label: str, value: str, settle_ms: int = 3
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
         try:
             page = await current_page(browser, hint_url=current_url)
             scope = await dialog_scope(page)
@@ -467,7 +467,7 @@ async def select_option_by_label(cdp_url: str, label: str, option: str, settle_m
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(cdp_url)
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
         try:
             page = await current_page(browser, hint_url=current_url)
             scope = await dialog_scope(page)
