@@ -99,8 +99,9 @@ def _try_pararius(cdp_url: str, url: str, message: str, log_path: Path) -> Agent
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url, timeout=30000)
+        browser = None
         try:
+            browser = p.chromium.connect_over_cdp(cdp_url, timeout=30000)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
             page = ctx.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -154,10 +155,11 @@ def _try_pararius(cdp_url: str, url: str, message: str, log_path: Path) -> Agent
             _log(log_path, f"pararius failed, falling back: {type(e).__name__}: {e}")
             return None
         finally:
-            try:
-                browser.close()
-            except Exception:
-                pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
 
 def try_fast_apply(listing: dict, cdp_url: str, log_path: Path,
