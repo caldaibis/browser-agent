@@ -85,6 +85,17 @@ class ApplicantProfile:
     employment: str = _env_str(
         "APPLICANT_EMPLOYMENT", "Loondienst, vast contract"
     )
+    # Language-specific prose for the bilingual reference message. Keep the
+    # legacy ``employment`` field above for compatibility with existing prompt
+    # consumers, but never interpolate one free-text value into both languages.
+    employment_nl: str = _env_str(
+        "APPLICANT_EMPLOYMENT_NL",
+        "loondienst met een vast contract als data scientist bij het NFI",
+    )
+    employment_en: str = _env_str(
+        "APPLICANT_EMPLOYMENT_EN",
+        "permanent employment as a data scientist at NFI",
+    )
     household_size: int = _env_int("APPLICANT_HOUSEHOLD_SIZE", 1)  # solo by default
     is_student: bool = _env_bool("APPLICANT_IS_STUDENT", False)
     is_woningdeler: bool = _env_bool("APPLICANT_IS_WONINGDELER", False)
@@ -129,7 +140,8 @@ class ApplicantProfile:
             f"- Gross monthly income (bruto maandinkomen): "
             f"EUR {self.gross_monthly_income:,.2f} "
             f"(approx EUR {self.gross_yearly_income:,.0f} per year)\n"
-            f"- Employment: {self.employment}\n"
+            f"- Employment (Dutch wording): {self.employment_nl}\n"
+            f"- Employment (English wording): {self.employment_en}\n"
             f"- Savings / eigen vermogen: {_ja_nee(self.has_savings)}"
             f", EUR {self.savings_amount:,.0f}\n"
             f"- Credits or other financial obligations: "

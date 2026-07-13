@@ -46,7 +46,7 @@ def build_reference_application_message() -> str:
 
 Graag kom ik in aanmerking voor de huurwoning aan de [[ADDRESS]]. De woning sprak mij direct aan en past goed bij mijn situatie vanwege de locatie, huurprijs en indeling. Ik zoek een nette, zelfstandige woning voor mijzelf, zonder partner of huisgenoten, waar ik voor langere tijd prettig kan wonen.
 
-Ik ben een {PROFILE.age}-jarige {_dutch_identity()} en werk op dit moment in {PROFILE.employment.lower()}. Mijn bruto maandinkomen is EUR {PROFILE.gross_monthly_income:,.2f} en mijn huurdossier is compleet.{savings_nl} {smoke_phrase_nl} {pet_phrase_nl}
+Ik ben een {PROFILE.age}-jarige {_dutch_identity()} en werk op dit moment in {PROFILE.employment_nl}. Mijn bruto maandinkomen is EUR {PROFILE.gross_monthly_income:,.2f} en mijn huurdossier is compleet.{savings_nl} {smoke_phrase_nl} {pet_phrase_nl}
 
 Ik kan op korte termijn bezichtigen en bij een passende match snel beslissen. Mijn documenten, waaronder ID met BSN afgeschermd, werkgeversverklaring, recente loonstroken, bewijs van salarisstorting en verhuurdersverklaring, kan ik direct aanleveren.
 
@@ -65,7 +65,7 @@ Dear,
 
 I would like to apply for the rental property at [[ADDRESS]]. The property immediately caught my attention and seems to fit my situation well in terms of location, rent and layout. I am looking for a neat, independent home for myself, without a partner or housemates, where I can live comfortably for the longer term.
 
-I am {PROFILE.age} years old and currently employed with {PROFILE.employment.lower()}. My gross monthly income is EUR {PROFILE.gross_monthly_income:,.2f}, and my rental file is complete.{savings_en} {smoke_phrase_en} {pet_phrase_en}
+I am {PROFILE.age} years old and currently in {PROFILE.employment_en}. My gross monthly income is EUR {PROFILE.gross_monthly_income:,.2f}, and my rental file is complete.{savings_en} {smoke_phrase_en} {pet_phrase_en}
 
 I am available for a viewing on short notice and can decide quickly if there is a good match. I can immediately provide my documents, including ID with BSN shielded, employer statement, recent payslips, proof of salary payment and a landlord reference.
 
