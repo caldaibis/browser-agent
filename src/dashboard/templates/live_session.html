@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Live submission{% endblock %}
+{% block content %}
+<p><a href="/submissions">← submissions</a></p>
+<h3>
+  {{ session.address or session.source or 'Submission session' }}
+  <span id="live-status" class="badge {{ 'live' if session.live else ('bad' if session.error else 'muted') }}">
+    {{ 'LIVE' if session.live else session.status.upper() }}
+  </span>
+</h3>
+
+<article>
+  <header><strong>Session</strong></header>
+  <table><tbody>
+    <tr><th>Started</th><td>{{ session.created_ts.replace('T', ' ') }}</td></tr>
+    <tr><th>Phase</th><td id="live-phase">{{ session.phase.replace('_', ' ') }}</td></tr>
+    <tr><th>Listing</th><td>
+      {% set listing_url = session.source_url or session.stekkies_url %}
+      {% if listing_url %}<a href="{{ listing_url }}" target="_blank" rel="noopener">{{ listing_url }}</a>{% else %}Resolving…{% endif %}
+    </td></tr>
+    <tr id="live-outcome-row" {{ '' if session.outcome else 'hidden' }}><th>Outcome</th><td id="live-outcome">{{ session.outcome }}</td></tr>
+    <tr id="live-error-row" {{ '' if session.error else 'hidden' }}><th>Error</th><td id="live-error">{{ session.error }}</td></tr>
+  </tbody></table>
+</article>
+
+<article>
+  <header>
+    <strong>Agent transcript</strong>
+    <span class="muted-txt">· complete replay, updating message by message</span>
+  </header>
+  <pre id="live-transcript" class="transcript live-transcript">{{ transcript }}</pre>
+  <p id="live-waiting" class="muted-txt" {{ 'hidden' if transcript else '' }}>
+    Waiting for the agent transcript…
+  </p>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const transcript = document.getElementById('live-transcript');
+  const waiting = document.getElementById('live-waiting');
+  const status = document.getElementById('live-status');
+  const phase = document.getElementById('live-phase');
+  const outcomeRow = document.getElementById('live-outcome-row');
+  const outcome = document.getElementById('live-outcome');
+  const errorRow = document.getElementById('live-error-row');
+  const error = document.getElementById('live-error');
+  const stream = new EventSource('/session/{{ session.id }}/events?offset={{ offset }}');
+
+  stream.addEventListener('message', (event) => {
+    const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+    transcript.textContent += JSON.parse(event.data) + '\n';
+    waiting.hidden = true;
+    if (nearBottom) transcript.scrollTop = transcript.scrollHeight;
+  });
+  stream.addEventListener('status', (event) => {
+    const state = JSON.parse(event.data);
+    status.textContent = state.live ? 'LIVE' : state.status.toUpperCase();
+    status.className = 'badge ' + (state.live ? 'live' : (state.error ? 'bad' : 'muted'));
+    phase.textContent = state.phase.replaceAll('_', ' ');
+    if (state.outcome) { outcome.textContent = state.outcome; outcomeRow.hidden = false; }
+    if (state.error) { error.textContent = state.error; errorRow.hidden = false; }
+  });
+  stream.addEventListener('complete', () => stream.close());
+})();
+</script>
+{% endblock %}

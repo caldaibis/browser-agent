@@ -5,6 +5,7 @@
 <h3>{{ sub.address or 'Listing' }}
   <span class="badge {{ status_class(sub.status) }}">{{ sub.status }}</span>
   <span class="badge origin">{{ sub.origin_label }}</span>
+  {% if live_session %}<a class="badge live" href="/session/{{ live_session.id }}">● LIVE</a>{% endif %}
 </h3>
 
 <article>
@@ -56,6 +57,10 @@
   <button class="contrast">Retry this listing</button>
   <small class="muted-txt">Re-runs the Stekkies flow now.</small>
 </form>
+{% endif %}
+
+{% if live_session %}
+<p><a href="/session/{{ live_session.id }}">Open the live agent session →</a></p>
 {% endif %}
 
 {% if timeline and timeline.turns %}

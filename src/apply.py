@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import known_gates, session_keeper, site_playbooks
+from . import apply_sessions, known_gates, session_keeper, site_playbooks
 from .config import LOG_DIR, CDP_URL
 from .listing_context import fetch_context
 from .message_template import REFERENCE_APPLICATION_MESSAGE
@@ -119,11 +119,7 @@ def _slug(text: str) -> str:
     return (s or "listing")[:50]
 
 
-def apply(listing: Listing | dict, model: str = APPLY_MODEL) -> AgentResult:
-    """Run the apply agent on one listing. Returns an AgentResult with the true
-    outcome (submitted / already_applied / not_available / ... / timeout)."""
-    if not isinstance(listing, Listing):
-        listing = Listing.from_json(listing)
+def _apply_impl(listing: Listing, model: str, session_id: str) -> AgentResult:
     listing_price = parse_rent(listing.price)
     if listing_price is not None and listing_price > MAX_RENT:
         summary = (
@@ -180,9 +176,18 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL) -> AgentResult:
 
     _LOG.info(f"launching agent ({model}) for {listing.source_url}")
     _LOG.info(f"transcript: {transcript}")
+    apply_sessions.update_session(
+        session_id,
+        phase="waiting_browser",
+        transcript_path=str(transcript),
+        source_url=listing.source_url,
+        source=listing.source_name,
+        address=listing.address,
+    )
     # Exclusive browser lock: only one component drives the shared CDP browser
     # at a time.
     with browser_lock(holder=f"apply:{slug}"):
+        apply_sessions.update_session(session_id, phase="agent")
         result = None
         if APPLY_FASTPATH_ENABLED:
             result = try_fast_apply(
@@ -213,6 +218,40 @@ def apply(listing: Listing | dict, model: str = APPLY_MODEL) -> AgentResult:
     # Distill durable site knowledge out of this run for the next one on the
     # same domain(s). Fail-open and outside the browser lock — see the module.
     site_playbooks.update_after_run(listing, result)
+    return result
+
+
+def apply(listing: Listing | dict, model: str = APPLY_MODEL,
+          session_id: str = "") -> AgentResult:
+    """Run one autonomous application and expose its lifecycle to observers."""
+    if not isinstance(listing, Listing):
+        listing = Listing.from_json(listing)
+    if not session_id:
+        session_id = apply_sessions.create_session(
+            source_url=listing.source_url,
+            source=listing.source_name,
+            address=listing.address,
+        ).id
+    apply_sessions.claim_session(
+        session_id,
+        phase="preflight",
+        source_url=listing.source_url,
+        source=listing.source_name,
+        address=listing.address,
+    )
+    try:
+        result = _apply_impl(listing, model, session_id)
+    except Exception as exc:
+        apply_sessions.finish_session(
+            session_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    apply_sessions.finish_session(
+        session_id,
+        outcome=result.outcome,
+        transcript_path=result.transcript_path,
+    )
     return result
 
 

@@ -65,6 +65,22 @@ nav.top a.active { font-weight: 700; color: var(--accent); }
 .badge.bad  { background:var(--badge-bad-bg); color:var(--bad); border-color:var(--badge-bad-bd); }
 .badge.muted{ background:var(--badge-muted-bg); color:var(--badge-muted-fg); border-color:var(--badge-muted-bd); }
 .badge.origin { background:var(--badge-origin-bg); color:var(--badge-origin-fg); border-color:var(--badge-origin-bd); }
+.badge.live { background:var(--badge-ok-bg); color:var(--good); border-color:var(--badge-ok-bd); text-decoration:none; }
+
+.live-sessions-strip {
+  display:flex; gap:.8rem; align-items:center; margin-bottom:1rem; padding:.55rem .75rem;
+  border:1px solid var(--line); border-radius:8px; background:var(--panel);
+}
+.live-sessions-head { display:flex; gap:.45rem; align-items:center; white-space:nowrap; }
+.live-session-links { display:flex; gap:.5rem; flex-wrap:wrap; }
+.live-session-links a {
+  display:inline-flex; gap:.4rem; align-items:center; padding:.25rem .55rem;
+  border:1px solid var(--badge-ok-bd); border-radius:6px; text-decoration:none;
+  background:var(--badge-ok-bg); color:var(--good);
+}
+.live-session-links small { color:var(--ink-2); }
+.live-pulse { animation:live-pulse 1.4s ease-in-out infinite; }
+@keyframes live-pulse { 50% { opacity:.3; } }
 
 .metric-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.75rem; }
 .metric { background: var(--panel); border:1px solid var(--line); border-radius:8px; padding:.8rem .9rem; min-width: 0; }
@@ -91,6 +107,8 @@ table th { color: var(--ink-2); font-size:.76rem; text-transform:uppercase; }
 tr[data-href] { cursor: pointer; }
 tr[data-href]:hover { background: var(--soft); }
 pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.35; }
+pre.live-transcript { min-height:16rem; max-height:70vh; margin:0; padding:.8rem .9rem; }
+#live-waiting { padding:0 .9rem .8rem; }
 .dot { height:.65rem; width:.65rem; border-radius:50%; display:inline-block; margin-right:.4rem; }
 .dot.up{background:var(--good);} .dot.down{background:var(--bad);} .dot.unk{background:#8a96a3;}
 
@@ -130,4 +148,5 @@ pre.transcript { max-height:60vh; overflow:auto; font-size:.8rem; line-height:1.
   .grid2{grid-template-columns:1fr;}
   table { display:block; overflow-x:auto; }
   .toolbar .actions { margin-left:0; }
+  .live-sessions-strip { align-items:flex-start; flex-direction:column; }
 }

@@ -27,6 +27,10 @@
       </ul>
     </nav>
     <div id="action-status"></div>
+    <div id="live-sessions"
+         hx-get="/partial/live-sessions"
+         hx-trigger="load, every 2s"
+         hx-swap="innerHTML"></div>
     {% block content %}{% endblock %}
     <footer class="muted-txt" style="margin:2rem 0;font-size:.8rem;">
       Autonomous responder · read-only data from logs · secrets redacted

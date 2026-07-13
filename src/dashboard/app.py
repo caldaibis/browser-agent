@@ -7,6 +7,7 @@ Run:  uv run uvicorn src.dashboard.app:app --host 127.0.0.1 --port 8000
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -20,13 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .. import apply_sessions, push_notify, store
 from ..config import PROJECT_ROOT, LOG_DIR
 from ..settings import settings
-from .. import push_notify, store
 from . import costs, data, funnel, healthinfo, si, trajectories
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -94,6 +95,16 @@ def _action(request: Request, ok: bool, msg: str):
             f'<div class="toast {cls}">{icon} {msg}</div>')
     return JSONResponse({"ok": ok, "msg": msg}, status_code=200 if ok else 500)
 
+
+def _active_session_context() -> tuple[list[apply_sessions.ApplySession], dict[str, apply_sessions.ApplySession]]:
+    live = apply_sessions.list_sessions(live_only=True)
+    by_url: dict[str, apply_sessions.ApplySession] = {}
+    for session in live:
+        for url in (session.stekkies_url, session.source_url):
+            if url:
+                by_url[url] = session
+    return live, by_url
+
 # Status -> Pico/color class for badges
 STATUS_CLASS = {
     "submitted": "ok", "applied": "ok", "already_applied": "muted", "not_available": "muted",
@@ -116,12 +127,14 @@ def overview(request: Request):
     subs = list(reversed(data.load_submissions()))
     stats = data.compute_stats(subs)
     spend = costs.spend_rollup(days=7)
+    _live, active_by_url = _active_session_context()
     return templates.TemplateResponse(request, "index.html", {
         "stats": stats, "recent": subs[:12],
         "health": healthinfo.health(refresh_credit_if_stale=False),
         "stats_json": json.dumps(stats),
         "attention": healthinfo.attention_items(), "spend": spend,
         "kpis": data.mission_kpis(subs, spend), "active_page": "overview",
+        "active_by_url": active_by_url,
     })
 
 
@@ -145,6 +158,7 @@ def submissions(request: Request, status: str = "", source: str = "",
     page = max(1, min(page, pages))
     start = (page - 1) * per
     page_subs = subs[start:start + per]
+    _live, active_by_url = _active_session_context()
     return templates.TemplateResponse(request, "submissions.html", {
         "subs": page_subs, "total": total, "page": page, "pages": pages, "per": per,
         "statuses": sorted({s.status for s in all_subs}),
@@ -152,6 +166,7 @@ def submissions(request: Request, status: str = "", source: str = "",
         "origins": sorted({s.origin for s in all_subs if s.origin}),
         "f_status": status, "f_source": source, "f_origin": origin, "f_days": days,
         "active_page": "submissions",
+        "active_by_url": active_by_url,
     })
 
 
@@ -160,13 +175,79 @@ def submission_detail(request: Request, key: str):
     sub = data.get_submission(key)
     if not sub:
         return HTMLResponse("Not found", status_code=404)
+    _live, active_by_url = _active_session_context()
     return templates.TemplateResponse(request, "detail.html", {
         "sub": sub, "transcript": data.load_transcript(sub),
         "usage": costs.usage_for_submission(sub),
         "timeline": trajectories.load_timeline(sub.transcript_stem)
                     or trajectories.timeline_from_transcript(data.load_transcript(sub) or ""),
         "active_page": "submissions",
+        "live_session": active_by_url.get(sub.source_url) or active_by_url.get(sub.stekkies_url),
     })
+
+
+@app.get("/session/{session_id}", response_class=HTMLResponse)
+def live_session(request: Request, session_id: str):
+    session = apply_sessions.get_session(session_id)
+    if session is None:
+        return HTMLResponse("Not found", status_code=404)
+    transcript, offset = data.live_transcript_snapshot(session.transcript_path)
+    return templates.TemplateResponse(request, "live_session.html", {
+        "session": session,
+        "transcript": transcript,
+        "offset": offset,
+        "active_page": "submissions",
+    })
+
+
+@app.get("/session/{session_id}/events")
+def live_session_events(session_id: str, offset: int = 0):
+    if apply_sessions.get_session(session_id) is None:
+        return HTMLResponse("Not found", status_code=404)
+
+    async def events():
+        position = max(0, offset)
+        last_state = ""
+        while True:
+            session = apply_sessions.get_session(session_id)
+            if session is None:
+                break
+            state = json.dumps({
+                "status": session.status,
+                "phase": session.phase,
+                "outcome": session.outcome,
+                "error": session.error,
+                "live": session.live,
+            })
+            if state != last_state:
+                yield f"event: status\ndata: {state}\n\n"
+                last_state = state
+
+            if session.transcript_path:
+                chunk, size = await asyncio.to_thread(
+                    data.live_transcript_chunk,
+                    session.transcript_path,
+                    position,
+                )
+                if size < position:
+                    position = 0
+                for raw_line in chunk.splitlines(keepends=True):
+                    if not raw_line.endswith((b"\n", b"\r")):
+                        break
+                    position += len(raw_line)
+                    line = data.redact(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
+                    yield f"id: {position}\nevent: message\ndata: {json.dumps(line)}\n\n"
+
+            if not session.live:
+                yield "event: complete\ndata: {}\n\n"
+                break
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/health", response_class=HTMLResponse)
@@ -318,20 +399,28 @@ def action_healthcheck(request: Request):
 def action_retry(request: Request, url: str = ""):
     if not url or "stekkies.com" not in url:
         return _action(request, False, "invalid url")
+    # Refuse before touching dedup state if another dashboard retry owns the
+    # launch lock.  A rejected click must not make a listing retryable later.
+    if APPLY_LOCK.exists():
+        return _action(request, False, "an apply is already running; try again shortly")
+    # Create the observable identity before making the listing retryable.  If
+    # state creation fails, the duplicate guard remains intact.
+    session = apply_sessions.create_session(stekkies_url=url, retry=True)
     # Remove from dedup so the listing is re-attempted.
     try:
         store.delete_processed(url)
     except Exception as e:
+        apply_sessions.finish_session(
+            session.id, error=f"dedup edit failed: {type(e).__name__}: {e}")
         return _action(request, False, f"dedup edit failed: {e}")
     # Serialize with a lock so we never share the browser with the live watcher's apply.
-    if APPLY_LOCK.exists():
-        return _action(request, False, "an apply is already running; try again shortly")
     try:
         APPLY_LOCK.write_text("retry", encoding="utf-8")
         # Wrapper clears the lock when the apply finishes (fire-and-forget).
         cmd = (
             f"{shlex.quote(sys.executable)} -m src.orchestrator --once "
-            f"{shlex.quote(url)}; rm -f {shlex.quote(str(APPLY_LOCK))}"
+            f"{shlex.quote(url)} --session-id {shlex.quote(session.id)}; "
+            f"rm -f {shlex.quote(str(APPLY_LOCK))}"
         )
         with open(LOG_DIR / "retry.log", "ab") as log:
             # Popen dups the fd at spawn; the child keeps writing after we close.
@@ -342,8 +431,13 @@ def action_retry(request: Request, url: str = ""):
             )
     except Exception as e:
         APPLY_LOCK.unlink(missing_ok=True)
+        apply_sessions.finish_session(
+            session.id, error=f"{type(e).__name__}: {e}")
         return _action(request, False, f"launch failed: {e}")
-    return _action(request, True, "retry launched (check submissions in a minute)")
+    location = f"/session/{session.id}"
+    if request.headers.get("hx-request"):
+        return HTMLResponse("", headers={"HX-Redirect": location})
+    return JSONResponse({"ok": True, "msg": "retry launched", "session_url": location})
 
 
 @app.post("/action/gate-delete")
@@ -367,4 +461,12 @@ def data_cache_bust() -> None:
 def attention_panel(request: Request):
     return templates.TemplateResponse(request, "_attention.html", {
         "attention": healthinfo.attention_items(),
+    })
+
+
+@app.get("/partial/live-sessions", response_class=HTMLResponse)
+def live_sessions_panel(request: Request):
+    live, _by_url = _active_session_context()
+    return templates.TemplateResponse(request, "_live_sessions.html", {
+        "live_sessions": live,
     })

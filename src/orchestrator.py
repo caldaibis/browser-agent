@@ -9,7 +9,7 @@ import time
 import traceback
 from dataclasses import asdict
 
-from . import eventlog, store
+from . import apply_sessions, eventlog, store
 from .config import LOG_DIR
 from .models import Listing, ProcessedRecord
 from .stekkies import extract_listing
@@ -110,7 +110,8 @@ def _prevented_message(url: str) -> str:
 
 
 def process_source(listing: Listing | dict, msg_id: str | None = None,
-                   trigger: str = "manual", msg_received_ts: str = "") -> dict:
+                   trigger: str = "manual", msg_received_ts: str = "",
+                   session_id: str = "") -> dict:
     """Apply directly to an external source listing, used by Huurwoningen mail
     and manual/direct integrations that do not need Stekkies extraction."""
     t0 = time.time()
@@ -136,11 +137,18 @@ def process_source(listing: Listing | dict, msg_id: str | None = None,
             message=_prevented_message(source_url),
         )
 
+    if not session_id:
+        session_id = apply_sessions.create_session(
+            source_url=source_url,
+            source=source,
+            address=address,
+        ).id
+
     try:
         (LOG_DIR / "last_listing.json").write_text(
             json.dumps(listing.to_json(), indent=2, ensure_ascii=False),
             encoding="utf-8")
-        result = apply(listing)
+        result = apply(listing, session_id=session_id)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
         if result.outcome == "no_credit":
@@ -193,6 +201,8 @@ def process_source(listing: Listing | dict, msg_id: str | None = None,
             message=result.summary or f"Agent finished with outcome={result.outcome} (rc={result.rc}).",
         )
     except Exception as e:
+        apply_sessions.finish_session(
+            session_id, error=f"{type(e).__name__}: {e}")
         _log("error", error=str(e))
         traceback.print_exc()
         improve_exception(
@@ -217,7 +227,7 @@ def process_source(listing: Listing | dict, msg_id: str | None = None,
 
 
 def process(stekkies_url: str, msg_id: str | None = None,
-            trigger: str | None = None) -> dict:
+            trigger: str | None = None, session_id: str = "") -> dict:
     t0 = time.time()
     received_ts = message_received_ts(msg_id) if msg_id else None
     _log("listing_received", msg_id=msg_id, url=stekkies_url)
@@ -234,6 +244,13 @@ def process(stekkies_url: str, msg_id: str | None = None,
             message=_prevented_message(stekkies_url),
         )
 
+    if not session_id:
+        session_id = apply_sessions.create_session(
+            stekkies_url=stekkies_url,
+            retry=trigger == "dashboard_retry",
+        ).id
+    apply_sessions.claim_session(session_id, phase="resolving")
+
     try:
         listing = extract_listing(stekkies_url, headless=True)
         d = asdict(listing)
@@ -243,7 +260,7 @@ def process(stekkies_url: str, msg_id: str | None = None,
              source_url=listing.source_url, address=listing.address)
         if not listing.source_url:
             _log("no_source_url", note="cannot apply without external link")
-            return _finish(
+            result_record = _finish(
                 msg_id=msg_id,
                 trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
                 msg_received_ts=received_ts,
@@ -254,9 +271,11 @@ def process(stekkies_url: str, msg_id: str | None = None,
                 mark_read=True,
                 message="Could not find an external source URL, so no application was submitted.",
             )
+            apply_sessions.finish_session(session_id, outcome="no_source_url")
+            return result_record
         if _source_duplicate(listing.source_url, keys):
             _log("duplicate_source_skipped", msg_id=msg_id, source_url=listing.source_url)
-            return _finish(
+            result_record = _finish(
                 msg_id=msg_id,
                 trigger=trigger or ("stekkies_mail" if msg_id else "manual"),
                 msg_received_ts=received_ts,
@@ -268,7 +287,9 @@ def process(stekkies_url: str, msg_id: str | None = None,
                 mark_read=True,
                 message=_prevented_message(listing.source_url),
             )
-        result = apply(d)
+            apply_sessions.finish_session(session_id, outcome="skipped_duplicate")
+            return result_record
+        result = apply(d, session_id=session_id)
         _log("applied", outcome=result.outcome, returncode=result.rc,
              seconds=round(time.time() - t0, 1))
         if result.outcome == "no_credit":
@@ -321,6 +342,8 @@ def process(stekkies_url: str, msg_id: str | None = None,
             message=result.summary or f"Agent finished with outcome={result.outcome} (rc={result.rc}).",
         )
     except Exception as e:
+        apply_sessions.finish_session(
+            session_id, error=f"{type(e).__name__}: {e}")
         _log("error", error=str(e))
         traceback.print_exc()
         improve_exception(
@@ -390,7 +413,14 @@ def _handle_event(ev) -> None:
 
 def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == "--once":
-        process(sys.argv[2])
+        session_id = ""
+        if len(sys.argv) >= 5 and sys.argv[3] == "--session-id":
+            session_id = sys.argv[4]
+        process(
+            sys.argv[2],
+            trigger="dashboard_retry" if session_id else None,
+            session_id=session_id,
+        )
         return 0
     _log("watcher_started")
     # The watch loop must survive Gmail failures INSIDE the process: exiting

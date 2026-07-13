@@ -496,3 +496,53 @@ def load_transcript(sub: Submission) -> str | None:
         return redact(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _live_transcript_path(transcript_path: str) -> Path | None:
+    if not transcript_path:
+        return None
+    try:
+        root = TRANSCRIPTS_DIR.resolve()
+        path = Path(transcript_path).resolve()
+        if path.suffix == ".log" and path.is_relative_to(root):
+            return path
+    except OSError:
+        pass
+    return None
+
+
+def live_transcript_snapshot(transcript_path: str) -> tuple[str, int]:
+    """Read a live transcript and the exact byte offset represented by it.
+
+    Only apply ``*.log`` files inside the canonical transcript directory are
+    eligible.  The offset lets an SSE client replay this snapshot and then
+    tail from the next complete agent message without a gap.
+    """
+    try:
+        path = _live_transcript_path(transcript_path)
+        if path is None:
+            return "", 0
+        raw = path.read_bytes()
+        # Logger flushes one newline-terminated message at a time.  If a read
+        # lands during a write, replay only complete messages and let the SSE
+        # tail pick up the unfinished bytes on its next poll.
+        complete_end = raw.rfind(b"\n") + 1
+        complete = raw[:complete_end]
+        return redact(complete.decode("utf-8", errors="replace")), complete_end
+    except OSError:
+        return "", 0
+
+
+def live_transcript_chunk(transcript_path: str, offset: int) -> tuple[bytes, int]:
+    """Read bytes appended after ``offset`` from a validated transcript."""
+    try:
+        path = _live_transcript_path(transcript_path)
+        if path is None:
+            return b"", 0
+        size = path.stat().st_size
+        start = offset if 0 <= offset <= size else 0
+        with path.open("rb") as stream:
+            stream.seek(start)
+            return stream.read(), size
+    except OSError:
+        return b"", 0

@@ -1,0 +1,19 @@
+<section class="live-sessions-strip" aria-live="polite">
+  <div class="live-sessions-head">
+    <strong>Live submissions</strong>
+    <span class="badge {{ 'live' if live_sessions else 'muted' }}">{{ live_sessions|length }}</span>
+  </div>
+  {% if live_sessions %}
+  <div class="live-session-links">
+    {% for session in live_sessions %}
+    <a href="/session/{{ session.id }}">
+      <span class="live-pulse">●</span>
+      {{ session.address or session.source or session.source_url or session.stekkies_url or 'Resolving listing' }}
+      <small>{{ session.phase.replace('_', ' ') }}</small>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <span class="muted-txt">No submission sessions are running.</span>
+  {% endif %}
+</section>

@@ -47,6 +47,9 @@ access that can overlap is serialized by `src/browser_lock.py`.
 5. A site fast path may complete a known deterministic flow. Otherwise
    `src/browser_agent/loop.py` runs the DeepSeek tool-calling loop through the
    normalized adapter in `src/browser_agent/transport.py`.
+   `src/apply_sessions.py` records the run's live phase and transcript identity
+   so the dashboard can show resolving, browser-wait, and agent execution in
+   real time. The transcript itself remains the append-only source of truth.
 6. The loop returns `AgentResult(rc, outcome, summary, resolved_url)`. The
    resolved URL matters because an aggregator can lead to a previously seen
    listing under a different source URL.
@@ -120,6 +123,7 @@ trusted; `src/self_improvement/cost.py` estimates cost from raw token usage.
 | Site playbooks | `src/site_playbooks.py` | `state/site_playbooks/` | Durable mechanics, no listing facts or personal data |
 | Mail/poll/activity evidence | orchestrator/eventlog | `logs/*.jsonl`, `logs/activity.log` | Append-only operational logs |
 | Apply transcripts | `src/apply.py` | `logs/transcripts/` | May contain secrets before dashboard redaction |
+| Live apply-session state | `src/apply_sessions.py` | `state/apply_sessions/` | Current phase, process liveness, listing identity, and transcript pointer |
 | Structured trajectories | `src/self_improvement_harness.py` | `logs/trajectories/` | Per-turn machine-readable evidence |
 | Pending verified fixes | self-improvement facade | `state/pending_patches/` | Recovery when every push fails |
 | Application documents | user / apply prompt | `documents/` or `DOCS_DIR` | Personal data, gitignored |
@@ -177,6 +181,7 @@ The system is deliberately asymmetric:
 - `orchestrator.py`: lifecycle owner, dedup checks, persistence, mail handling,
   notifications, and self-improvement enqueue.
 - `apply.py`: apply-stage facade and deterministic pre-flight policy.
+- `apply_sessions.py`: cross-process live-run identity, phase, and liveness state.
 - `listing_context.py`: cheap fail-open detail-page/JSON-LD enrichment.
 - `models.py`, `dedup.py`, `store.py`: schema, identity, and state.
 
@@ -216,7 +221,9 @@ The system is deliberately asymmetric:
 - `self_improvement/`: prompts, worktrees, browser diagnostics, cost, helpers.
 - `healthcheck.py`, `digest.py`, `notify.py`, `push_notify.py`: alerts and
   operational summaries.
-- `dashboard/`: read-mostly operator UI and a small set of explicit POST actions.
+- `dashboard/`: read-mostly operator UI, live transcript SSE, and a small set
+  of explicit POST actions. Retry creates a session before launch and redirects
+  directly to its replay-plus-live-tail view.
 
 ### Auxiliary and compatibility entry points
 

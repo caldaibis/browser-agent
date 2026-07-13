@@ -44,6 +44,7 @@
     </thead>
     <tbody>
       {% for s in subs %}
+      {% set live = active_by_url.get(s.source_url) or active_by_url.get(s.stekkies_url) %}
       <tr data-href="/submission/{{ s.permalink }}">
         <td class="muted-txt nowrap">{{ s.ts[:16].replace('T',' ') }}</td>
         <td>
@@ -54,7 +55,10 @@
           {% endif %}
         </td>
         <td><span class="badge origin">{{ s.origin_label }}</span></td>
-        <td><span class="badge {{ status_class(s.status) }}">{{ s.status }}</span></td>
+        <td>
+          <span class="badge {{ status_class(s.status) }}">{{ s.status }}</span>
+          {% if live %}<a class="badge live" href="/session/{{ live.id }}">● LIVE</a>{% endif %}
+        </td>
         <td class="muted-txt nowrap">{{ fmt_dur(s.seconds) }}</td>
         <td class="muted-txt nowrap">{{ s.token_usage.display_summary if s.token_usage else '—' }}</td>
       </tr>
