@@ -209,6 +209,35 @@ SELECT_OPTION_BY_LABEL_TOOL = {
         },
     },
 }
+CHECK_BY_LABEL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "check_by_label",
+        "description": (
+            "FALLBACK ONLY. Programmatically check the checkbox associated "
+            "with the given label text — without clicking. Use this ONLY for "
+            "custom-styled checkboxes inside a dialog invisible to "
+            "browser_snapshot (e.g. REBO Groep's \"Bezichtiging aanvragen\" "
+            "dialog). Do NOT use click_by_text on checkbox labels — it does "
+            "not toggle non-standard checkboxes; the MCP browser_check tool "
+            "only hits the first querySelector match; and browser_click on "
+            "the hidden <input type=\"checkbox\"> can trigger site JavaScript "
+            "that closes the dialog. This tool sets checked=true directly via "
+            "JavaScript and dispatches synthetic events, bypassing click-"
+            "event handlers entirely."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Visible label text of the checkbox, e.g. 'Ik ga akkoord met de voorwaarden'.",
+                },
+            },
+            "required": ["label"],
+        },
+    },
+}
 
 # Browser MCP tools we never want the model to use (raw JS = token bleed).
 BLOCKED_TOOLS = {

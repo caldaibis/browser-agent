@@ -30,6 +30,7 @@ from mcp.client.stdio import stdio_client
 from .. import browser_dom_tools, credentials
 from ..agent_tools import (
     AGGREGATOR_HOP_TOOL,
+    CHECK_BY_LABEL_TOOL,
     CLICK_BY_TEXT_TOOL,
     DOM_SCAN_TOOL,
     FILL_BY_LABEL_TOOL,
@@ -116,7 +117,7 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
             tools = _to_openai_tools(mcp_tools) + [
                 LOGIN_WITH_CREDENTIAL_TOOL, DOM_SCAN_TOOL, CLICK_BY_TEXT_TOOL,
                 FILL_BY_LABEL_TOOL, SELECT_OPTION_BY_LABEL_TOOL,
-                AGGREGATOR_HOP_TOOL,
+                CHECK_BY_LABEL_TOOL, AGGREGATOR_HOP_TOOL,
             ]
             log.line(f"[agent] model={model} backend=agent_browser@{server_version} "
                      f"tools={len(tools)} cdp={cdp_url}")
@@ -556,6 +557,32 @@ async def _run(prompt: str, model: str, max_turns: int, cdp_url: str, log: Logge
                         except Exception as e:
                             text = f"### Tool error\n{type(e).__name__}: {e}"
                             log.line(f"[agent]   -> select_option_by_label error: {e}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": False,
+                                "error": f"{type(e).__name__}: {e}",
+                            })
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id, "content": _clamp_tool_result(text),
+                        })
+                        continue
+                    if name == "check_by_label":
+                        field_label = str(args.get("label", ""))
+                        try:
+                            current_url = await _current_tab_url(session)
+                            text = await browser_dom_tools.check_by_label(
+                                cdp_url, field_label, current_url=current_url)
+                            log.line(f"[agent]   -> check_by_label {field_label!r}")
+                            _record_trajectory(trajectory_id, "tool_result", {
+                                "turn": turn,
+                                "tool": name,
+                                "ok": True,
+                                "summary": field_label,
+                            })
+                        except Exception as e:
+                            text = f"### Tool error\n{type(e).__name__}: {e}"
+                            log.line(f"[agent]   -> check_by_label error: {e}")
                             _record_trajectory(trajectory_id, "tool_result", {
                                 "turn": turn,
                                 "tool": name,

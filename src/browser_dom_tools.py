@@ -514,3 +514,87 @@ async def select_option_by_label(cdp_url: str, label: str, option: str, settle_m
             return await dom_report(page)
         finally:
             await browser.close()
+
+
+async def check_by_label(cdp_url: str, label: str, settle_ms: int = 300,
+                         current_url: str | None = None) -> str:
+    """Connect over CDP and programmatically set input.checked=true for the
+    checkbox associated with the given label text — without clicking.
+
+    REBO Groep's "Bezichtiging aanvragen" dialog (reached via huurwoningen.nl's
+    aggregator_hop) has three custom-styled checkboxes invisible to the
+    accessibility tree. click_by_text clicks the label but does not toggle the
+    checkbox state; the MCP browser_check tool only hits the first
+    querySelector('input[type="checkbox"]') match; and browser_click on the
+    hidden <input> can trigger site JavaScript that closes the dialog entirely.
+
+    This sets the checked state directly via page.evaluate() and dispatches
+    synthetic change/input events — bypassing click-event handlers entirely. It
+    finds the correct checkbox through label proximity (for/id first, then
+    ancestor/sibling search), so it works even when custom styling hides the
+    input from the accessibility tree.
+
+    Scoped to the open dialog first (see dialog_scope) so duplicate-id fields
+    in other, hidden dialogs on the same page are never targeted.
+
+    Labels without an associated input return a descriptive failure so the
+    model can try a different label.
+    """
+    field_label = " ".join(str(label or "").split())
+    if not field_label:
+        return "REFUSED: empty label"
+
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url, timeout=30000)
+        try:
+            page = await current_page(browser, hint_url=current_url)
+            scope = await dialog_scope(page)
+            root = scope if scope is not None else page
+            label_loc = root.get_by_text(field_label, exact=False).first
+            try:
+                await label_loc.evaluate("""
+                (labelEl) => {
+                  let input = null;
+                  // Standard for/id association first
+                  if (labelEl.htmlFor) {
+                    input = labelEl.closest('body,dialog')?.querySelector(
+                      '#' + CSS.escape(labelEl.htmlFor)
+                    );
+                  }
+                  // Fall back: nearest ancestor with a checkbox
+                  if (!input) {
+                    let ancestor = labelEl;
+                    for (let i = 0; i < 8 && ancestor && !input; i++) {
+                      ancestor = ancestor.parentElement;
+                      if (ancestor) {
+                        input = ancestor.querySelector('input[type="checkbox"]');
+                      }
+                    }
+                  }
+                  // Broader fallback: sibling walk within container
+                  if (!input) {
+                    const container = labelEl.closest('label,div,fieldset') || labelEl.parentElement;
+                    if (container) {
+                      input = container.querySelector('input[type="checkbox"]');
+                    }
+                  }
+                  if (!input) throw new Error('NO_CHECKBOX_FOUND');
+                  input.checked = true;
+                  input.dispatchEvent(new Event('change', {bubbles: true}));
+                  input.dispatchEvent(new Event('input', {bubbles: true}));
+                  return input.getAttribute('name') || input.id || '(anonymous)';
+                }
+                """)
+            except Exception as e:
+                return (
+                    f"CHECK FAILED: no checkbox associated with label {field_label!r} "
+                    f"({type(e).__name__}). {await dom_report(page)}"
+                )
+            if settle_ms:
+                await page.wait_for_timeout(settle_ms)
+            return await dom_report(page)
+        finally:
+            await browser.close()
+

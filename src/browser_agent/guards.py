@@ -89,6 +89,7 @@ GRACE_TURNS = settings().apply_grace_turns
 _FORM_TOOLS = {
     "browser_fill_form", "browser_type", "browser_file_upload",
     "browser_select_option", "fill_by_label", "select_option_by_label",
+    "check_by_label",
 }
 
 
