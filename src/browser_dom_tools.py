@@ -47,7 +47,12 @@ async def current_page(browser, hint_url: str | None = None):
 
 
 async def dialog_scope(page):
-    """A Locator scoped to the currently open <dialog>, or None if none is open.
+    """A Locator scoped to the currently open dialog/modal, or None if none is open.
+
+    Targets three patterns:
+    - `<dialog open>` — native HTML dialog element (REBO Groep).
+    - `[role='dialog']:not([hidden])` — ARIA dialog (Gravity Forms, jQuery UI).
+    - `[aria-modal='true']:not([hidden])` — explicitly modal overlay.
 
     Verified on REBO Groep (Hof van Oslo, 02-07-2026): a single page can have
     several <dialog> elements (viewing request, brochure download, email-
@@ -55,11 +60,19 @@ async def dialog_scope(page):
     invalid but real HTML). An unscoped getElementById/get_by_label/get_by_text
     silently resolves to whichever hidden dialog comes first in DOM order --
     not the one actually open -- so a fill silently no-ops (0x0 bounding box)
-    and a click can time out waiting on a hidden duplicate. Every read/click/
-    fill below scopes to the open dialog first so it always targets the
-    thing actually on screen.
+    and a click can time out waiting on a hidden duplicate.
+
+    Also verified on De Keizer Makelaarsgroep (28-07-2026, reached via
+    huurwoningen.nl aggregator_hop): the contact form is a div-based Gravity
+    Forms modal with no `<dialog>` element at all, so the old selector
+    (`dialog[open]`) always returned None, making every dom_report report
+    `in_open_dialog: false` and misleading the agent into thinking the form was
+    not open. The expanded selector now catches `[role='dialog']` div modals.
+
+    Every read/click/fill below scopes to the open dialog first so it always
+    targets the thing actually on screen.
     """
-    dlg = page.locator("dialog[open]")
+    dlg = page.locator("dialog[open], [role='dialog']:not([hidden]), [aria-modal='true']:not([hidden])")
     try:
         if await dlg.count() > 0:
             return dlg.first
@@ -194,6 +207,20 @@ _COOKIE_CLOSE_SELECTORS = [
     for base in ("button", "[role=button]", "a")
 ]
 
+# Non-cookie site popups — newsletter overlays (ActiveCampaign ._form_show, etc.),
+# generic site modals — that reappear after every interaction and block real
+# form controls. These are dismissed AFTER cookie banners (which take priority),
+# so the agent never wastes turns closing the same popup repeatedly.
+_NEWSLETTER_CLOSE_SELECTORS = [
+    "._form-wrapper._form_show ._form-close",
+    "._form-wrapper._form_show ._form-close *",
+    "._form-close",
+    ".close",
+    "[aria-label='Close']",
+    "[aria-label='Sluiten']",
+    "[data-dismiss='modal']",
+]
+
 _CONSENT_SYNC_URL_MARKERS = (
     "user-sync", "usersync", "sync.privacy", "sync.ad", "adnxs.com",
     "doubleclick.net", "rubiconproject.com", "pubmatic.com", "criteo.com",
@@ -269,6 +296,17 @@ async def dismiss_cookie_banner(cdp_url: str, current_url: str | None = None) ->
                     if closed:
                         note += f" and closed {closed} consent sync tab(s)"
                     return note
+                except Exception:  # noqa: BLE001 - absence is the normal case
+                    continue
+            # Secondary sweep: non-cookie site popups (newsletter overlays,
+            # ActiveCampaign ._form_show modals, generic close buttons) that
+            # reappear after every interaction and block real form controls.
+            for selector in _NEWSLETTER_CLOSE_SELECTORS:
+                loc = page.locator(selector).first
+                try:
+                    await loc.click(timeout=800)
+                    await page.wait_for_timeout(300)
+                    return "dismissed a newsletter/site popup"
                 except Exception:  # noqa: BLE001 - absence is the normal case
                     continue
             await _close_consent_sync_tabs(browser, current_url)

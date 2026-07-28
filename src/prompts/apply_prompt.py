@@ -270,6 +270,13 @@ YOUR TASK
 1. Open the URL above in the browser.
 2. Run the ELIGIBILITY GATE above. If not eligible, stop now (do not apply).
 3. Find the apply / "reageer" / contact / application form for this property.
+   IMPORTANT: if the listing description explicitly states contact is ONLY via
+   email (e.g. "alleen mogelijk via de e-mail", "contact bij interesse is alleen
+   mogelijk via"), do NOT waste turns on a secondary contact form on the page —
+   accept the email-only path, compose the application message as an email draft
+   addressed to the stated email address, and report the email channel as the
+   application method. Only use an on-page form when the listing does NOT state
+   email-only contact.
 4. Fill the application form using the applicant details contained in the
    reference message below. For any message/motivation field, write a warm,
    natural application message inspired by the reference. Keep the same facts,
