@@ -13,6 +13,7 @@ import html
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, asdict
 
 from playwright.sync_api import sync_playwright
@@ -84,7 +85,18 @@ def _extract_from_page(page, url: str) -> Listing:
     # goto() timed out (30s default) even though the extractable content
     # (title, external source link) is present shortly after the DOM loads.
     # domcontentloaded + a fixed settle avoids it.
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            break
+        except Exception:
+            if attempt == 0:
+                # transient network glitch — retry with a fresh page
+                ctx = page.context
+                page.close()
+                page = ctx.new_page()
+                continue
+            raise
     page.wait_for_timeout(4000)
     data = page.evaluate(EXTRACT_JS)
     data["letter"] = _clean_html_text(data["letter"])
@@ -103,18 +115,21 @@ def extract_listing(url: str, headless: bool = True) -> Listing:
     (CDP_URL) so it shares the logged-in profile; falls back to launching its
     own persistent context if the host isn't running."""
     with sync_playwright() as p:
-        # Try the shared CDP host first.
-        try:
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = ctx.new_page()
+        # Try the shared CDP host first (3 attempts, 3s apart).
+        for attempt in range(3):
             try:
-                return _extract_from_page(page, url)
-            finally:
-                page.close()
-                browser.close()  # detaches CDP; does NOT kill the host browser
-        except Exception:
-            pass  # host not up — fall back to our own profile
+                browser = p.chromium.connect_over_cdp(CDP_URL)
+                ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                page = ctx.new_page()
+                try:
+                    return _extract_from_page(page, url)
+                finally:
+                    page.close()
+                    browser.close()  # detaches CDP; does NOT kill the host browser
+            except Exception:
+                if attempt < 2:
+                    time.sleep(3)
+                # last attempt failed — fall through to our own profile
 
         ctx = p.chromium.launch_persistent_context(
             user_data_dir=str(USER_DATA_DIR), headless=headless,
