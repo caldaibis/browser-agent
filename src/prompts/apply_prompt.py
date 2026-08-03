@@ -290,6 +290,11 @@ YOUR TASK
    leave it blank or write one short sentence — these often have a tight
    character limit; if a field shows [invalid] after typing, it is likely too
    long, so shorten drastically rather than retrying the same length.
+   If the SAME validation error text persists after 2 materially different
+   inputs (not just shortening — e.g. clearing the field and typing fresh, or
+   trying a completely different message), the error is likely stale/cached in
+   the DOM and shortening will never help. STOP retrying that field: close the
+   dialog, reopen it fresh, and start again with a short message from scratch.
 5. Upload documents BEFORE the final submit, into whatever attachment slots the
    form provides. Match a document to a labelled slot when the label names it
    (use the "why it matters" note to pick the right one); otherwise put it in a
